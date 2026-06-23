@@ -1,0 +1,23 @@
+# Rust / Cargo
+/target
+**/target
+Cargo.lock.bak
+*.rs.bk
+
+# Soroban / Stellar build artifacts
+*.wasm
+.soroban/
+.stellar/
+
+# Env & secrets
+.env
+.env.*
+!.env.example
+*.key
+identity.toml
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
