@@ -8,7 +8,8 @@
 //! This commit adds the constructor and split validation; jar logic follows.
 
 use soroban_sdk::{
-    contract, contracterror, contractimpl, contracttype, panic_with_error, Address, Env, String, Vec,
+    contract, contracterror, contractimpl, contracttype, panic_with_error, symbol_short, token,
+    Address, Env, String, Vec,
 };
 
 /// 100% expressed in basis points.
@@ -74,6 +75,47 @@ impl TipSplitter {
         }
         Self::validate_splits(&env, &splits);
         env.storage().persistent().set(&key, &Jar { owner, splits });
+    }
+
+    /// Send a tip. Transfers `amount` of USDC from `from`, split across the jar's
+    /// recipients atomically, then emits a `("tip", jar_id)` event.
+    pub fn tip(env: Env, from: Address, jar_id: String, amount: i128, message: String) {
+        from.require_auth();
+        if amount <= 0 {
+            panic_with_error!(&env, Error::InvalidAmount);
+        }
+
+        let jar: Jar = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Jar(jar_id.clone()))
+            .unwrap_or_else(|| panic_with_error!(&env, Error::JarNotFound));
+
+        let token_addr: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Token)
+            .unwrap_or_else(|| panic_with_error!(&env, Error::NotInitialized));
+        let client = token::Client::new(&env, &token_addr);
+
+        let n = jar.splits.len();
+        let mut distributed: i128 = 0;
+        for i in 0..n {
+            let split = jar.splits.get(i).unwrap();
+            // Last recipient absorbs any rounding dust so the full amount is sent.
+            let share = if i == n - 1 {
+                amount - distributed
+            } else {
+                amount * (split.bps as i128) / (BPS_DENOM as i128)
+            };
+            if share > 0 {
+                client.transfer(&from, &split.to, &share);
+                distributed += share;
+            }
+        }
+
+        env.events()
+            .publish((symbol_short!("tip"), jar_id), (from, amount, message));
     }
 
     /// Read a jar's configuration.
