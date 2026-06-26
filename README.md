@@ -11,8 +11,10 @@ separate repositories under the same organization.
 
 | Contract | Status | Purpose |
 |----------|--------|---------|
-| `tip-splitter` | 🚧 in progress | Receives a tip and splits it across recipients by basis points |
+| `tip-splitter` | ✅ v0.1.0 | Receives a tip and splits it across recipients by basis points |
 | `supporter-badge` | planned | Non-transferable badge minted to supporters |
+
+See [`docs/CONTRACT.md`](./docs/CONTRACT.md) for the full `tip-splitter` interface.
 
 ## Quick start
 
