@@ -77,6 +77,25 @@ impl TipSplitter {
         env.storage().persistent().set(&key, &Jar { owner, splits });
     }
 
+    /// Update an existing jar's splits. Only the jar owner may do this.
+    pub fn update_splits(env: Env, jar_id: String, splits: Vec<Split>) {
+        let key = DataKey::Jar(jar_id);
+        let jar: Jar = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .unwrap_or_else(|| panic_with_error!(&env, Error::JarNotFound));
+        jar.owner.require_auth();
+        Self::validate_splits(&env, &splits);
+        env.storage().persistent().set(
+            &key,
+            &Jar {
+                owner: jar.owner,
+                splits,
+            },
+        );
+    }
+
     /// Send a tip. Transfers `amount` of USDC from `from`, split across the jar's
     /// recipients atomically, then emits a `("tip", jar_id)` event.
     pub fn tip(env: Env, from: Address, jar_id: String, amount: i128, message: String) {
