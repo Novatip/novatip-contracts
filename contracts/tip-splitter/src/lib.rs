@@ -171,3 +171,5 @@ impl TipSplitter {
         }
     }
 }
+
+mod test;
