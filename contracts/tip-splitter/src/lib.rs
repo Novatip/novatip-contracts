@@ -65,8 +65,34 @@ impl TipSplitter {
         env.storage().instance().set(&DataKey::Token, &token);
     }
 
+    /// Register a new tip jar. `owner` must authorize. Splits must sum to 100%.
+    pub fn create_jar(env: Env, owner: Address, jar_id: String, splits: Vec<Split>) {
+        owner.require_auth();
+        let key = DataKey::Jar(jar_id);
+        if env.storage().persistent().has(&key) {
+            panic_with_error!(&env, Error::JarExists);
+        }
+        Self::validate_splits(&env, &splits);
+        env.storage().persistent().set(&key, &Jar { owner, splits });
+    }
+
+    /// Read a jar's configuration.
+    pub fn get_jar(env: Env, jar_id: String) -> Jar {
+        env.storage()
+            .persistent()
+            .get(&DataKey::Jar(jar_id))
+            .unwrap_or_else(|| panic_with_error!(&env, Error::JarNotFound))
+    }
+
+    /// The USDC token address tips are settled in.
+    pub fn get_token(env: Env) -> Address {
+        env.storage()
+            .instance()
+            .get(&DataKey::Token)
+            .unwrap_or_else(|| panic_with_error!(&env, Error::NotInitialized))
+    }
+
     /// Validate that splits are non-empty, within bounds, and sum to 100%.
-    #[allow(dead_code)] // wired into create_jar in the next commit
     fn validate_splits(env: &Env, splits: &Vec<Split>) {
         let n = splits.len();
         if n == 0 {
