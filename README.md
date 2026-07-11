@@ -32,6 +32,24 @@ make test
 - [Stellar CLI](https://developers.stellar.org/docs/tools/cli) for build & deploy
 - Tips settle in **USDC** (Stellar Asset Contract)
 
+## Network Deployments
+
+| Network | Contract ID | Status |
+|---------|-------------|--------|
+| Testnet | coming soon | pending deployment |
+| Mainnet | coming soon | pending audit |
+
+USDC Stellar Asset Contract addresses:
+
+| Network | USDC SAC |
+|---------|----------|
+| Testnet | `CBIELTK6YBZJU5UP2WWQEUCYKLPU6AUNZ2BQ4WWFEIE3USCIHMXQDAMA` |
+| Mainnet | `CCW67TSZV3SSS2HXMBQ5JFGCKJNXKZM7UQUWUZPUTHXSTZLEO7SJMI75` |
+
+## Changelog
+
+See [CHANGELOG.md](./CHANGELOG.md) for a full history of changes.
+
 ## License
 
 MIT — see [LICENSE](./LICENSE).
