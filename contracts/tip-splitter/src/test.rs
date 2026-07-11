@@ -241,3 +241,76 @@ fn update_splits_changes_distribution() {
     let jar = client.get_jar(&jar_id);
     assert_eq!(jar.splits.len(), 2);
 }
+
+#[test]
+fn tip_single_recipient_receives_full_amount() {
+    let s = setup();
+    let env = &s.env;
+    let client = TipSplitterClient::new(env, &s.contract);
+    let token = token::Client::new(env, &s.token);
+    let token_admin = token::StellarAssetClient::new(env, &s.token);
+
+    let owner = Address::generate(env);
+    let alice = Address::generate(env);
+    let tipper = Address::generate(env);
+    token_admin.mint(&tipper, &500);
+
+    let jar_id = String::from_str(env, "@solo");
+    let splits = vec![
+        env,
+        Split {
+            to: alice.clone(),
+            bps: 10000,
+        },
+    ];
+    client.create_jar(&owner, &jar_id, &splits);
+    client.tip(&tipper, &jar_id, &500, &String::from_str(env, "all for you"));
+
+    // Single recipient must receive the exact amount with no dust loss
+    assert_eq!(token.balance(&alice), 500);
+    assert_eq!(token.balance(&tipper), 0);
+}
+
+#[test]
+fn create_jar_rejects_too_many_recipients() {
+    let s = setup();
+    let env = &s.env;
+    let client = TipSplitterClient::new(env, &s.contract);
+
+    let owner = Address::generate(env);
+    let addr = Address::generate(env);
+
+    // 21 recipients exceeds MAX_RECIPIENTS (20)
+    // bps values don't matter — TooManyRecipients is checked first
+    let mut splits_vec = soroban_sdk::Vec::new(env);
+    for _ in 0..21 {
+        splits_vec.push_back(Split {
+            to: addr.clone(),
+            bps: 476,
+        });
+    }
+
+    let res = client.try_create_jar(
+        &owner,
+        &String::from_str(env, "@toobig"),
+        &splits_vec,
+    );
+    assert_eq!(res, Err(Ok(Error::TooManyRecipients)));
+}
+
+#[test]
+fn get_jar_ids_returns_all_registered_slugs() {
+    let s = setup();
+    let env = &s.env;
+    let client = TipSplitterClient::new(env, &s.contract);
+
+    let owner = Address::generate(env);
+    let alice = Address::generate(env);
+    let splits = vec![env, Split { to: alice.clone(), bps: 10000 }];
+
+    client.create_jar(&owner, &String::from_str(env, "@one"), &splits);
+    client.create_jar(&owner, &String::from_str(env, "@two"), &splits);
+
+    let ids = client.get_jar_ids();
+    assert_eq!(ids.len(), 2);
+}
