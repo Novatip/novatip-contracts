@@ -41,6 +41,8 @@ pub enum DataKey {
     Token,
     /// A tip jar keyed by its public slug, e.g. "@alice".
     Jar(String),
+    /// Ordered list of all registered jar slugs (for indexer discovery).
+    JarIds,
 }
 
 #[contracterror]
@@ -75,6 +77,16 @@ impl TipSplitter {
         }
         Self::validate_splits(&env, &splits);
         env.storage().persistent().set(&key, &Jar { owner, splits });
+
+        // Track the jar_id in the instance-level list for indexer discovery
+        let ids_key = DataKey::JarIds;
+        let mut ids: Vec<String> = env
+            .storage()
+            .instance()
+            .get(&ids_key)
+            .unwrap_or_else(|| Vec::new(&env));
+        ids.push_back(jar_id);
+        env.storage().instance().set(&ids_key, &ids);
     }
 
     /// Update an existing jar's splits. Only the jar owner may do this.
@@ -151,6 +163,19 @@ impl TipSplitter {
             .instance()
             .get(&DataKey::Token)
             .unwrap_or_else(|| panic_with_error!(&env, Error::NotInitialized))
+    }
+
+    /// Returns a list of all registered jar IDs (slugs).
+    /// Intended for use by the backend indexer to discover all active jars
+    /// without needing to track them off-chain.
+    ///
+    /// Note: this is a best-effort view - it requires jar IDs to be tracked
+    /// in a separate instance-storage Vec updated on create_jar.
+    pub fn get_jar_ids(env: Env) -> Vec<String> {
+        env.storage()
+            .instance()
+            .get(&DataKey::JarIds)
+            .unwrap_or_else(|| Vec::new(&env))
     }
 
     /// Validate that splits are non-empty, within bounds, and sum to 100%.
