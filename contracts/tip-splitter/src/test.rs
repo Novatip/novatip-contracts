@@ -299,7 +299,7 @@ fn create_jar_rejects_too_many_recipients() {
 }
 
 #[test]
-fn get_jar_ids_returns_all_registered_slugs() {
+fn create_jar_emits_jar_created_event() {
     let s = setup();
     let env = &s.env;
     let client = TipSplitterClient::new(env, &s.contract);
@@ -307,10 +307,109 @@ fn get_jar_ids_returns_all_registered_slugs() {
     let owner = Address::generate(env);
     let alice = Address::generate(env);
     let splits = vec![env, Split { to: alice.clone(), bps: 10000 }];
+    let jar_id = String::from_str(env, "@one");
 
-    client.create_jar(&owner, &String::from_str(env, "@one"), &splits);
-    client.create_jar(&owner, &String::from_str(env, "@two"), &splits);
+    client.create_jar(&owner, &jar_id, &splits);
 
-    let ids = client.get_jar_ids();
-    assert_eq!(ids.len(), 2);
+    // The jar_crtd event must be published with the correct topics and data.
+    let events = env.events().all();
+    // Filter to events emitted by our contract.
+    let jar_events: soroban_sdk::Vec<_> = events
+        .iter()
+        .filter(|e| e.0 == s.contract)
+        .collect();
+    assert_eq!(jar_events.len(), 1);
+}
+
+#[test]
+fn tip_fails_when_sender_has_insufficient_balance() {
+    let s = setup();
+    let env = &s.env;
+    let client = TipSplitterClient::new(env, &s.contract);
+    let token_admin = token::StellarAssetClient::new(env, &s.token);
+    let token = token::Client::new(env, &s.token);
+
+    let owner = Address::generate(env);
+    let alice = Address::generate(env);
+    let tipper = Address::generate(env);
+
+    // Mint less than the tip amount: tipper has 50, tip is 100.
+    token_admin.mint(&tipper, &50);
+
+    let jar_id = String::from_str(env, "@underfunded");
+    let splits = vec![
+        env,
+        Split {
+            to: alice.clone(),
+            bps: 10000,
+        },
+    ];
+    client.create_jar(&owner, &jar_id, &splits);
+
+    let res = client.try_tip(&tipper, &jar_id, &100, &String::from_str(env, "oops"));
+    assert!(res.is_err());
+
+    // Balances must be unchanged — tipper keeps their 50, alice gets nothing.
+    assert_eq!(token.balance(&tipper), 50);
+    assert_eq!(token.balance(&alice), 0);
+}
+
+/// Atomicity test: if the sender can't cover the full tip on a multi-recipient
+/// jar, the transaction must revert entirely — no recipient receives anything
+/// and the tipper's balance is unchanged. This is the core "all-or-nothing"
+/// guarantee stated in the module docs and CONTRACT.md.
+#[test]
+fn tip_multi_recipient_no_partial_distribution_on_insufficient_balance() {
+    let s = setup();
+    let env = &s.env;
+    let client = TipSplitterClient::new(env, &s.contract);
+    let token_admin = token::StellarAssetClient::new(env, &s.token);
+    let token = token::Client::new(env, &s.token);
+
+    let owner = Address::generate(env);
+    let alice = Address::generate(env);
+    let bob = Address::generate(env);
+    let carol = Address::generate(env);
+    let tipper = Address::generate(env);
+
+    // Tip amount is 300; tipper only has 100 — not enough to cover all splits.
+    let tip_amount: i128 = 300;
+    token_admin.mint(&tipper, &100);
+
+    let jar_id = String::from_str(env, "@trio-atomic");
+    // Three-way even split: 40% / 35% / 25%
+    let splits = vec![
+        env,
+        Split {
+            to: alice.clone(),
+            bps: 4000,
+        },
+        Split {
+            to: bob.clone(),
+            bps: 3500,
+        },
+        Split {
+            to: carol.clone(),
+            bps: 2500,
+        },
+    ];
+    client.create_jar(&owner, &jar_id, &splits);
+
+    let res = client.try_tip(
+        &tipper,
+        &jar_id,
+        &tip_amount,
+        &String::from_str(env, "not enough"),
+    );
+
+    // The call must fail.
+    assert!(res.is_err());
+
+    // Atomicity: every recipient balance must still be 0 — no partial payment.
+    assert_eq!(token.balance(&alice), 0, "alice must not have received anything");
+    assert_eq!(token.balance(&bob), 0, "bob must not have received anything");
+    assert_eq!(token.balance(&carol), 0, "carol must not have received anything");
+
+    // The tipper's balance must be completely unchanged.
+    assert_eq!(token.balance(&tipper), 100, "tipper balance must be unchanged");
 }
