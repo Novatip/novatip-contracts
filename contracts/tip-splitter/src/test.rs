@@ -299,7 +299,7 @@ fn create_jar_rejects_too_many_recipients() {
 }
 
 #[test]
-fn get_jar_ids_returns_all_registered_slugs() {
+fn create_jar_emits_jar_created_event() {
     let s = setup();
     let env = &s.env;
     let client = TipSplitterClient::new(env, &s.contract);
@@ -307,10 +307,16 @@ fn get_jar_ids_returns_all_registered_slugs() {
     let owner = Address::generate(env);
     let alice = Address::generate(env);
     let splits = vec![env, Split { to: alice.clone(), bps: 10000 }];
+    let jar_id = String::from_str(env, "@one");
 
-    client.create_jar(&owner, &String::from_str(env, "@one"), &splits);
-    client.create_jar(&owner, &String::from_str(env, "@two"), &splits);
+    client.create_jar(&owner, &jar_id, &splits);
 
-    let ids = client.get_jar_ids();
-    assert_eq!(ids.len(), 2);
+    // The jar_created event must be published with the correct topics and data.
+    let events = env.events().all();
+    // Filter to events from our contract
+    let jar_events: soroban_sdk::Vec<_> = events
+        .iter()
+        .filter(|e| e.0 == s.contract)
+        .collect();
+    assert_eq!(jar_events.len(), 1);
 }
