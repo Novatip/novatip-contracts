@@ -8,7 +8,8 @@ basis-point shares, atomically, in one transaction.
 - **Jar** — a creator's tip target, identified by a public slug (e.g. `@alice`).
   Holds an `owner` and a list of `Split`s.
 - **Split** — a recipient `Address` and its share in basis points (`bps`).
-  All splits in a jar must sum to exactly `10_000` (= 100%).
+  All splits in a jar must sum to exactly `10_000` (= 100%), and no address may
+  appear more than once.
 - **USDC token** — the Stellar Asset Contract id is fixed at deploy time; every
   tip settles in that asset.
 
@@ -25,10 +26,29 @@ struct Jar   { owner: Address, splits: Vec<Split> }
 |----------|------|-------------|
 | `__constructor(admin, token)` | — | Deploy-time init. Stores the admin and USDC token address. |
 | `create_jar(owner, jar_id, splits)` | `owner` | Register a new jar. Fails if the slug exists or splits are invalid. Emits a `jar_crtd` event. |
-| `update_splits(jar_id, splits)` | jar `owner` | Replace a jar's splits. |
+| `update_splits(jar_id, splits)` | jar `owner` | Replace a jar's splits. Subject to the same validation as `create_jar`. |
 | `tip(from, jar_id, amount, message)` | `from` | Transfer `amount` USDC from `from`, split across the jar's recipients. |
 | `get_jar(jar_id) -> Jar` | — | Read a jar's configuration. |
 | `get_token() -> Address` | — | The USDC token address tips settle in. |
+
+### Validation rules
+
+`create_jar` and `update_splits` share one validator, so both enforce all of:
+
+- The list must be non-empty — `InvalidSplits`.
+- At most 20 entries (`MAX_RECIPIENTS`) — `TooManyRecipients`.
+- **No address may appear twice** — `DuplicateRecipient`.
+- The `bps` values must sum to exactly `10_000` — `InvalidSplits`.
+
+Duplicates are rejected rather than merged. A repeated address is not a
+loss-of-funds bug — the shares still total 100% — but it makes `tip` issue
+several separate transfers to one destination in a single call, wasting fees,
+and leaves an on-chain record that per-collaborator accounting has to
+de-duplicate after the fact. Clients that want to let a user enter the same
+collaborator twice should sum the shares before submitting.
+
+The check is a pairwise comparison over the vector, so position doesn't matter:
+`[a, b, a]` is rejected just as `[a, a, b]` is.
 
 ### Splitting rules
 
@@ -47,6 +67,7 @@ struct Jar   { owner: Address, splits: Vec<Split> }
 | 4 | `InvalidSplits` | Empty list, or bps don't sum to 10_000. |
 | 5 | `InvalidAmount` | Tip amount ≤ 0. |
 | 6 | `TooManyRecipients` | More than 20 recipients. |
+| 7 | `DuplicateRecipient` | The same address appears more than once in the splits. |
 
 ## Events
 
