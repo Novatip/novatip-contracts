@@ -5,7 +5,10 @@
 //! by basis-point splits. Splitting is atomic: either every recipient is paid in
 //! the same transaction or the whole tip reverts.
 //!
-//! This commit adds the constructor and split validation; jar logic follows.
+//! Jar discovery is intentionally event-driven: `create_jar` emits a
+//! `jar_created` event, and indexers reconstruct the full jar list by scanning
+//! those events. This keeps on-chain storage O(1) regardless of how many jars
+//! are ever registered.
 
 use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, panic_with_error, symbol_short, token,
@@ -41,8 +44,6 @@ pub enum DataKey {
     Token,
     /// A tip jar keyed by its public slug, e.g. "@alice".
     Jar(String),
-    /// Ordered list of all registered jar slugs (for indexer discovery).
-    JarIds,
 }
 
 #[contracterror]
@@ -69,24 +70,21 @@ impl TipSplitter {
     }
 
     /// Register a new tip jar. `owner` must authorize. Splits must sum to 100%.
+    /// Emits a `jar_created` event so indexers can discover all jars from the
+    /// event log without any on-chain list.
     pub fn create_jar(env: Env, owner: Address, jar_id: String, splits: Vec<Split>) {
         owner.require_auth();
-        let key = DataKey::Jar(jar_id);
+        let key = DataKey::Jar(jar_id.clone());
         if env.storage().persistent().has(&key) {
             panic_with_error!(&env, Error::JarExists);
         }
         Self::validate_splits(&env, &splits);
-        env.storage().persistent().set(&key, &Jar { owner, splits });
+        env.storage()
+            .persistent()
+            .set(&key, &Jar { owner: owner.clone(), splits });
 
-        // Track the jar_id in the instance-level list for indexer discovery
-        let ids_key = DataKey::JarIds;
-        let mut ids: Vec<String> = env
-            .storage()
-            .instance()
-            .get(&ids_key)
-            .unwrap_or_else(|| Vec::new(&env));
-        ids.push_back(jar_id);
-        env.storage().instance().set(&ids_key, &ids);
+        env.events()
+            .publish((symbol_short!("jar_crtd"), jar_id), owner);
     }
 
     /// Update an existing jar's splits. Only the jar owner may do this.
@@ -163,19 +161,6 @@ impl TipSplitter {
             .instance()
             .get(&DataKey::Token)
             .unwrap_or_else(|| panic_with_error!(&env, Error::NotInitialized))
-    }
-
-    /// Returns a list of all registered jar IDs (slugs).
-    /// Intended for use by the backend indexer to discover all active jars
-    /// without needing to track them off-chain.
-    ///
-    /// Note: this is a best-effort view - it requires jar IDs to be tracked
-    /// in a separate instance-storage Vec updated on create_jar.
-    pub fn get_jar_ids(env: Env) -> Vec<String> {
-        env.storage()
-            .instance()
-            .get(&DataKey::JarIds)
-            .unwrap_or_else(|| Vec::new(&env))
     }
 
     /// Validate that splits are non-empty, within bounds, and sum to 100%.
