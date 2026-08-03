@@ -163,7 +163,12 @@ impl TipSplitter {
             .unwrap_or_else(|| panic_with_error!(&env, Error::NotInitialized))
     }
 
-    /// Validate that splits are non-empty, within bounds, and sum to 100%.
+    /// Validate that splits are non-empty, within bounds, carry a non-zero
+    /// share each, and sum to 100%.
+    ///
+    /// A `bps == 0` entry would never be paid — `tip` skips zero shares — so it
+    /// is dead weight that still consumes a slot against `MAX_RECIPIENTS` and
+    /// misleads clients into showing a collaborator who never receives funds.
     fn validate_splits(env: &Env, splits: &Vec<Split>) {
         let n = splits.len();
         if n == 0 {
@@ -174,7 +179,11 @@ impl TipSplitter {
         }
         let mut total: u32 = 0;
         for i in 0..n {
-            total += splits.get(i).unwrap().bps;
+            let bps = splits.get(i).unwrap().bps;
+            if bps == 0 {
+                panic_with_error!(env, Error::InvalidSplits);
+            }
+            total += bps;
         }
         if total != BPS_DENOM {
             panic_with_error!(env, Error::InvalidSplits);
