@@ -8,6 +8,15 @@ All notable changes to `novatip-contracts` are documented here.
 - `get_jar_ids()` view function for indexer discovery of all registered jar slugs
 - Edge case tests for single recipient tip, max recipients rejection, and jar ID tracking
 - `JarIds` storage key to track registered slugs at the instance level
+- Tests covering zero-bps rejection on `create_jar` (leading, trailing, and sole entry) and on `update_splits`
+
+### Changed
+- `validate_splits()` now rejects any split with `bps == 0` (`InvalidSplits`).
+  Such a recipient could never be paid but still consumed one of the 20
+  recipient slots and appeared in clients as a collaborator. This applies to
+  both `create_jar` and `update_splits`; jars written before this change are
+  unaffected on read but must drop zero-bps entries before their next
+  `update_splits` call.
 
 ## [0.1.0] - 2025-07-01
 
