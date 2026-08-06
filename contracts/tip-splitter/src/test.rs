@@ -112,7 +112,8 @@ fn create_jar_rejects_bad_bps_sum() {
 
     let owner = Address::generate(env);
     let alice = Address::generate(env);
-    // 6000 + 3000 = 9000, not 10000.
+    let bob = Address::generate(env);
+    // Distinct recipients, so the only defect is the sum: 6000 + 3000 = 9000.
     let bad = vec![
         env,
         Split {
@@ -120,13 +121,191 @@ fn create_jar_rejects_bad_bps_sum() {
             bps: 6000,
         },
         Split {
-            to: alice.clone(),
+            to: bob.clone(),
             bps: 3000,
         },
     ];
 
     let res = client.try_create_jar(&owner, &String::from_str(env, "@x"), &bad);
-    assert_eq!(res, Err(Ok(Error::InvalidSplits)));
+    assert_eq!(res, Err(Ok(Error::InvalidSplits.into())));
+}
+
+/// The same address twice is rejected even though the shares still total 100%.
+#[test]
+fn create_jar_rejects_duplicate_recipient() {
+    let s = setup();
+    let env = &s.env;
+    let client = TipSplitterClient::new(env, &s.contract);
+
+    let owner = Address::generate(env);
+    let alice = Address::generate(env);
+    let dup = vec![
+        env,
+        Split {
+            to: alice.clone(),
+            bps: 6000,
+        },
+        Split {
+            to: alice.clone(),
+            bps: 4000,
+        },
+    ];
+
+    let res = client.try_create_jar(&owner, &String::from_str(env, "@dupaddr"), &dup);
+    assert_eq!(res, Err(Ok(Error::DuplicateRecipient.into())));
+
+    // The jar must not have been stored.
+    let jar = client.try_get_jar(&String::from_str(env, "@dupaddr"));
+    assert!(jar.is_err(), "rejected jar must not be persisted");
+}
+
+/// The duplicate need not be adjacent — the check is pairwise across the whole
+/// vector, not just neighbours.
+#[test]
+fn create_jar_rejects_non_adjacent_duplicate_recipient() {
+    let s = setup();
+    let env = &s.env;
+    let client = TipSplitterClient::new(env, &s.contract);
+
+    let owner = Address::generate(env);
+    let alice = Address::generate(env);
+    let bob = Address::generate(env);
+    let dup = vec![
+        env,
+        Split {
+            to: alice.clone(),
+            bps: 4000,
+        },
+        Split {
+            to: bob.clone(),
+            bps: 3000,
+        },
+        Split {
+            to: alice.clone(),
+            bps: 3000,
+        },
+    ];
+
+    let res = client.try_create_jar(&owner, &String::from_str(env, "@spread"), &dup);
+    assert_eq!(res, Err(Ok(Error::DuplicateRecipient.into())));
+}
+
+/// A vector of distinct addresses must still be accepted and pay out normally —
+/// the new check must not reject valid jars.
+#[test]
+fn create_jar_accepts_distinct_recipients() {
+    let s = setup();
+    let env = &s.env;
+    let client = TipSplitterClient::new(env, &s.contract);
+    let token = token::Client::new(env, &s.token);
+    let token_admin = token::StellarAssetClient::new(env, &s.token);
+
+    let owner = Address::generate(env);
+    let alice = Address::generate(env);
+    let bob = Address::generate(env);
+    let carol = Address::generate(env);
+    let tipper = Address::generate(env);
+    token_admin.mint(&tipper, &100);
+
+    let jar_id = String::from_str(env, "@distinct");
+    let splits = vec![
+        env,
+        Split {
+            to: alice.clone(),
+            bps: 5000,
+        },
+        Split {
+            to: bob.clone(),
+            bps: 3000,
+        },
+        Split {
+            to: carol.clone(),
+            bps: 2000,
+        },
+    ];
+    client.create_jar(&owner, &jar_id, &splits);
+
+    let jar = client.get_jar(&jar_id);
+    assert_eq!(jar.splits.len(), 3);
+
+    client.tip(&tipper, &jar_id, &100, &String::from_str(env, "nice"));
+    assert_eq!(token.balance(&alice), 50);
+    assert_eq!(token.balance(&bob), 30);
+    assert_eq!(token.balance(&carol), 20);
+}
+
+/// The O(n^2) scan must still accept a full-size jar at the MAX_RECIPIENTS bound.
+#[test]
+fn create_jar_accepts_max_distinct_recipients() {
+    let s = setup();
+    let env = &s.env;
+    let client = TipSplitterClient::new(env, &s.contract);
+
+    let owner = Address::generate(env);
+
+    // 20 distinct recipients at 500 bps each = 10000.
+    let mut splits = soroban_sdk::Vec::new(env);
+    for _ in 0..20 {
+        splits.push_back(Split {
+            to: Address::generate(env),
+            bps: 500,
+        });
+    }
+
+    let jar_id = String::from_str(env, "@full");
+    client.create_jar(&owner, &jar_id, &splits);
+    assert_eq!(client.get_jar(&jar_id).splits.len(), 20);
+}
+
+/// `update_splits` runs the same validator, so a duplicate can't be introduced
+/// into an existing jar.
+#[test]
+fn update_splits_rejects_duplicate_recipient() {
+    let s = setup();
+    let env = &s.env;
+    let client = TipSplitterClient::new(env, &s.contract);
+
+    let owner = Address::generate(env);
+    let alice = Address::generate(env);
+    let bob = Address::generate(env);
+
+    let jar_id = String::from_str(env, "@upd-dup");
+    client.create_jar(
+        &owner,
+        &jar_id,
+        &vec![
+            env,
+            Split {
+                to: alice.clone(),
+                bps: 5000,
+            },
+            Split {
+                to: bob.clone(),
+                bps: 5000,
+            },
+        ],
+    );
+
+    let res = client.try_update_splits(
+        &jar_id,
+        &vec![
+            env,
+            Split {
+                to: alice.clone(),
+                bps: 5000,
+            },
+            Split {
+                to: alice.clone(),
+                bps: 5000,
+            },
+        ],
+    );
+    assert_eq!(res, Err(Ok(Error::DuplicateRecipient.into())));
+
+    // The original two-way split must be untouched.
+    let jar = client.get_jar(&jar_id);
+    assert_eq!(jar.splits.len(), 2);
+    assert_eq!(jar.splits.get(1).unwrap().to, bob);
 }
 
 #[test]

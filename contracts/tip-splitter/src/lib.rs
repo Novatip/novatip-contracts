@@ -56,6 +56,7 @@ pub enum Error {
     InvalidSplits = 4,
     InvalidAmount = 5,
     TooManyRecipients = 6,
+    DuplicateRecipient = 7,
 }
 
 #[contract]
@@ -69,7 +70,8 @@ impl TipSplitter {
         env.storage().instance().set(&DataKey::Token, &token);
     }
 
-    /// Register a new tip jar. `owner` must authorize. Splits must sum to 100%.
+    /// Register a new tip jar. `owner` must authorize. Splits must sum to 100%
+    /// and may not name the same recipient twice.
     /// Emits a `jar_created` event so indexers can discover all jars from the
     /// event log without any on-chain list.
     pub fn create_jar(env: Env, owner: Address, jar_id: String, splits: Vec<Split>) {
@@ -163,7 +165,13 @@ impl TipSplitter {
             .unwrap_or_else(|| panic_with_error!(&env, Error::NotInitialized))
     }
 
-    /// Validate that splits are non-empty, within bounds, and sum to 100%.
+    /// Validate that splits are non-empty, within bounds, name each recipient at
+    /// most once, and sum to 100%.
+    ///
+    /// Listing the same address twice is not a loss-of-funds bug — the shares
+    /// still total 100% — but it makes `tip` issue several transfers to one
+    /// destination in a single call, wasting fees, and leaves an on-chain record
+    /// that per-collaborator accounting has to de-duplicate after the fact.
     fn validate_splits(env: &Env, splits: &Vec<Split>) {
         let n = splits.len();
         if n == 0 {
@@ -174,7 +182,16 @@ impl TipSplitter {
         }
         let mut total: u32 = 0;
         for i in 0..n {
-            total += splits.get(i).unwrap().bps;
+            let split = splits.get(i).unwrap();
+            // Pairwise comparison rather than a set: `n` is capped at
+            // MAX_RECIPIENTS (20), so this is at most 190 comparisons, and a hash
+            // set would need an allocator we don't have under `no_std`.
+            for j in (i + 1)..n {
+                if splits.get(j).unwrap().to == split.to {
+                    panic_with_error!(env, Error::DuplicateRecipient);
+                }
+            }
+            total += split.bps;
         }
         if total != BPS_DENOM {
             panic_with_error!(env, Error::InvalidSplits);
