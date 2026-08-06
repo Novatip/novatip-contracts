@@ -165,13 +165,12 @@ impl TipSplitter {
             .unwrap_or_else(|| panic_with_error!(&env, Error::NotInitialized))
     }
 
-    /// Validate that splits are non-empty, within bounds, name each recipient at
-    /// most once, and sum to 100%.
+    /// Validate that splits are non-empty, within bounds, carry a non-zero
+    /// share each, and sum to 100%.
     ///
-    /// Listing the same address twice is not a loss-of-funds bug — the shares
-    /// still total 100% — but it makes `tip` issue several transfers to one
-    /// destination in a single call, wasting fees, and leaves an on-chain record
-    /// that per-collaborator accounting has to de-duplicate after the fact.
+    /// A `bps == 0` entry would never be paid — `tip` skips zero shares — so it
+    /// is dead weight that still consumes a slot against `MAX_RECIPIENTS` and
+    /// misleads clients into showing a collaborator who never receives funds.
     fn validate_splits(env: &Env, splits: &Vec<Split>) {
         let n = splits.len();
         if n == 0 {
@@ -182,6 +181,11 @@ impl TipSplitter {
         }
         let mut total: u32 = 0;
         for i in 0..n {
+            let bps = splits.get(i).unwrap().bps;
+            if bps == 0 {
+                panic_with_error!(env, Error::InvalidSplits);
+            }
+            total += bps;
             let split = splits.get(i).unwrap();
             // Pairwise comparison rather than a set: `n` is capped at
             // MAX_RECIPIENTS (20), so this is at most 190 comparisons, and a hash

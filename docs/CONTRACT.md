@@ -8,8 +8,8 @@ basis-point shares, atomically, in one transaction.
 - **Jar** — a creator's tip target, identified by a public slug (e.g. `@alice`).
   Holds an `owner` and a list of `Split`s.
 - **Split** — a recipient `Address` and its share in basis points (`bps`).
-  All splits in a jar must sum to exactly `10_000` (= 100%), and no address may
-  appear more than once.
+  Every split must have `bps >= 1`, and all splits in a jar must sum to exactly
+  `10_000` (= 100%).
 - **USDC token** — the Stellar Asset Contract id is fixed at deploy time; every
   tip settles in that asset.
 
@@ -33,22 +33,23 @@ struct Jar   { owner: Address, splits: Vec<Split> }
 
 ### Validation rules
 
-`create_jar` and `update_splits` share one validator, so both enforce all of:
+`create_jar` and `update_splits` run the same checks on the supplied splits:
 
 - The list must be non-empty — `InvalidSplits`.
 - At most 20 entries (`MAX_RECIPIENTS`) — `TooManyRecipients`.
-- **No address may appear twice** — `DuplicateRecipient`.
+- **No entry may have `bps == 0`** — `InvalidSplits`.
 - The `bps` values must sum to exactly `10_000` — `InvalidSplits`.
 
-Duplicates are rejected rather than merged. A repeated address is not a
-loss-of-funds bug — the shares still total 100% — but it makes `tip` issue
-several separate transfers to one destination in a single call, wasting fees,
-and leaves an on-chain record that per-collaborator accounting has to
-de-duplicate after the fact. Clients that want to let a user enter the same
-collaborator twice should sum the shares before submitting.
+A `bps == 0` entry is rejected rather than accepted-and-ignored. Such a
+recipient could never be paid (`tip` skips zero shares), but it would still
+consume one of the 20 recipient slots and surface in clients as a collaborator
+who never receives funds. Rejecting it at write time keeps a stored jar's
+recipient list an accurate record of who actually gets paid.
 
-The check is a pairwise comparison over the vector, so position doesn't matter:
-`[a, b, a]` is rejected just as `[a, a, b]` is.
+Note that this is a validation-time rule about `bps`, not a guarantee about
+transferred amounts: a recipient with a valid non-zero `bps` can still receive
+`0` on a small tip, because `amount * bps / 10_000` truncates (e.g. `bps: 100`
+on a tip of `50` yields `0`).
 
 ### Splitting rules
 
@@ -64,7 +65,7 @@ The check is a pairwise comparison over the vector, so position doesn't matter:
 | 1 | `NotInitialized` | Token address missing (should never happen post-deploy). |
 | 2 | `JarExists` | Slug already registered. |
 | 3 | `JarNotFound` | Slug not registered. |
-| 4 | `InvalidSplits` | Empty list, or bps don't sum to 10_000. |
+| 4 | `InvalidSplits` | Empty list, an entry with `bps == 0`, or bps don't sum to 10_000. |
 | 5 | `InvalidAmount` | Tip amount ≤ 0. |
 | 6 | `TooManyRecipients` | More than 20 recipients. |
 | 7 | `DuplicateRecipient` | The same address appears more than once in the splits. |

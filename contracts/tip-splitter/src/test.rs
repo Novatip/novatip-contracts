@@ -308,6 +308,133 @@ fn update_splits_rejects_duplicate_recipient() {
     assert_eq!(jar.splits.get(1).unwrap().to, bob);
 }
 
+/// A recipient with `bps: 0` can never be paid, so it must be rejected at
+/// validation time rather than silently skipped inside `tip`.
+#[test]
+fn create_jar_rejects_zero_bps_entry() {
+    let s = setup();
+    let env = &s.env;
+    let client = TipSplitterClient::new(env, &s.contract);
+
+    let owner = Address::generate(env);
+    let alice = Address::generate(env);
+    let ghost = Address::generate(env);
+    // Sums to exactly 10000, but `ghost` would never receive anything.
+    let bad = vec![
+        env,
+        Split {
+            to: alice.clone(),
+            bps: 10000,
+        },
+        Split {
+            to: ghost.clone(),
+            bps: 0,
+        },
+    ];
+
+    let res = client.try_create_jar(&owner, &String::from_str(env, "@zero"), &bad);
+    assert_eq!(res, Err(Ok(Error::InvalidSplits.into())));
+
+    // The jar must not have been stored.
+    let jar = client.try_get_jar(&String::from_str(env, "@zero"));
+    assert!(jar.is_err(), "rejected jar must not be persisted");
+}
+
+/// The zero check must not depend on position — a leading zero-bps entry is
+/// just as invalid as a trailing one.
+#[test]
+fn create_jar_rejects_zero_bps_first_entry() {
+    let s = setup();
+    let env = &s.env;
+    let client = TipSplitterClient::new(env, &s.contract);
+
+    let owner = Address::generate(env);
+    let ghost = Address::generate(env);
+    let alice = Address::generate(env);
+    let bad = vec![
+        env,
+        Split {
+            to: ghost.clone(),
+            bps: 0,
+        },
+        Split {
+            to: alice.clone(),
+            bps: 10000,
+        },
+    ];
+
+    let res = client.try_create_jar(&owner, &String::from_str(env, "@zerofirst"), &bad);
+    assert_eq!(res, Err(Ok(Error::InvalidSplits.into())));
+}
+
+/// A single recipient holding the whole jar must still carry a real share.
+#[test]
+fn create_jar_rejects_all_zero_bps() {
+    let s = setup();
+    let env = &s.env;
+    let client = TipSplitterClient::new(env, &s.contract);
+
+    let owner = Address::generate(env);
+    let alice = Address::generate(env);
+    let bad = vec![
+        env,
+        Split {
+            to: alice.clone(),
+            bps: 0,
+        },
+    ];
+
+    let res = client.try_create_jar(&owner, &String::from_str(env, "@allzero"), &bad);
+    assert_eq!(res, Err(Ok(Error::InvalidSplits.into())));
+}
+
+/// `update_splits` runs the same validation, so a zero-bps entry can't be
+/// smuggled into an already-valid jar.
+#[test]
+fn update_splits_rejects_zero_bps_entry() {
+    let s = setup();
+    let env = &s.env;
+    let client = TipSplitterClient::new(env, &s.contract);
+
+    let owner = Address::generate(env);
+    let alice = Address::generate(env);
+    let ghost = Address::generate(env);
+
+    let jar_id = String::from_str(env, "@upd-zero");
+    client.create_jar(
+        &owner,
+        &jar_id,
+        &vec![
+            env,
+            Split {
+                to: alice.clone(),
+                bps: 10000,
+            },
+        ],
+    );
+
+    let res = client.try_update_splits(
+        &jar_id,
+        &vec![
+            env,
+            Split {
+                to: alice.clone(),
+                bps: 10000,
+            },
+            Split {
+                to: ghost.clone(),
+                bps: 0,
+            },
+        ],
+    );
+    assert_eq!(res, Err(Ok(Error::InvalidSplits.into())));
+
+    // The original splits must be untouched.
+    let jar = client.get_jar(&jar_id);
+    assert_eq!(jar.splits.len(), 1);
+    assert_eq!(jar.splits.get(0).unwrap().bps, 10000);
+}
+
 #[test]
 fn create_jar_rejects_duplicate_slug() {
     let s = setup();

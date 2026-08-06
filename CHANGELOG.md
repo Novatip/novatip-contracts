@@ -8,20 +8,15 @@ All notable changes to `novatip-contracts` are documented here.
 - `get_jar_ids()` view function for indexer discovery of all registered jar slugs
 - Edge case tests for single recipient tip, max recipients rejection, and jar ID tracking
 - `JarIds` storage key to track registered slugs at the instance level
-- `DuplicateRecipient` (code 7) error variant, raised when a split vector names the same address twice
-- Tests for duplicate recipients (adjacent and non-adjacent) on `create_jar` and `update_splits`, plus valid-case coverage for distinct recipients and a full 20-recipient jar
+- Tests covering zero-bps rejection on `create_jar` (leading, trailing, and sole entry) and on `update_splits`
 
 ### Changed
-- `validate_splits()` now rejects any split vector containing the same recipient
-  address more than once, on both `create_jar` and `update_splits`. Duplicates
-  were not a loss-of-funds bug, but they made `tip` issue several transfers to
-  one destination in a single call and forced per-collaborator accounting to
-  de-duplicate after the fact. Clients that allow entering a collaborator twice
-  must sum the shares before submitting. Jars written before this change are
-  unaffected on read, but must drop duplicates before their next `update_splits`
-  call.
-- `create_jar_rejects_bad_bps_sum` now uses two distinct recipients, so it still
-  exercises the sum check rather than tripping the new duplicate check first
+- `validate_splits()` now rejects any split with `bps == 0` (`InvalidSplits`).
+  Such a recipient could never be paid but still consumed one of the 20
+  recipient slots and appeared in clients as a collaborator. This applies to
+  both `create_jar` and `update_splits`; jars written before this change are
+  unaffected on read but must drop zero-bps entries before their next
+  `update_splits` call.
 
 ## [0.1.0] - 2025-07-01
 
