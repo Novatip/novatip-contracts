@@ -68,6 +68,7 @@ on a tip of `50` yields `0`).
 | 4 | `InvalidSplits` | Empty list, an entry with `bps == 0`, or bps don't sum to 10_000. |
 | 5 | `InvalidAmount` | Tip amount ≤ 0. |
 | 6 | `TooManyRecipients` | More than 20 recipients. |
+| 7 | `DuplicateRecipient` | The same address appears more than once in the splits. |
 
 ## Events
 
