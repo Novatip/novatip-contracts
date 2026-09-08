@@ -28,12 +28,34 @@ const MAX_RECIPIENTS: u32 = 20;
 /// an unbounded id costs unnecessary rent and can produce jars no frontend can
 /// address.
 const MAX_JAR_ID_LEN: u32 = 64;
-/// Longest tip message, in bytes, that may ride along in the `tip` event.
+/// Longest tip message, in UTF-8 bytes, that may ride along in the `tip` event.
 ///
 /// The message is echoed verbatim into the event payload, so an unbounded
 /// string inflates the transaction and every downstream copy the indexer has
-/// to store and serve. 280 matches the character budget the tip form implies.
+/// to store and serve. 280 matches the character budget the tip form implies
+/// for plain-ASCII text.
+///
+/// This is a byte count, not a character count. Accented characters (é, ö)
+/// cost 2 bytes each in UTF-8 and most emoji cost 4, so a non-ASCII message
+/// hits the limit at well under 280 visible characters. The contract checks
+/// `message.len()`, which returns the byte count, so the rejection boundary
+/// is 280 bytes regardless of character count.
+///
+/// Clients should count UTF-8 bytes — not `message.length` in JavaScript or
+/// `len(message)` in Rust — to show an accurate remaining-bytes indicator.
 const MAX_MESSAGE_LEN: u32 = 280;
+
+/// How long a jar's persistent entry is kept before it can be archived,
+/// in ledger increments. Soroban extends an entry's lifetime when it is
+/// read or written, so a jar that is tipped regularly will never expire.
+/// A jar that goes untouched for this many ledgers will be archived,
+/// after which `get_jar` and `tip` will fail until the entry is restored.
+///
+/// 1 000 000 ledgers is roughly 78 years at the default 5-second
+/// close rate, which is well beyond any realistic creator lifecycle.
+/// The constant exists so the value can be changed in one place if the
+/// product decides a shorter idle window is acceptable.
+const JAR_TTL_LEDGERS: u32 = 1_000_000;
 
 /// One recipient and the share of every tip they receive, in basis points.
 #[contracttype]
@@ -74,6 +96,12 @@ pub enum Error {
     DuplicateRecipient = 7,
     MessageTooLong = 8,
     InvalidJarId = 9,
+    /// Splits list is empty.
+    SplitsEmpty = 10,
+    /// A split has a basis-point share that is zero or above 100 %.
+    SplitOutOfRange = 11,
+    /// Splits sum to something other than 10 000 bps.
+    SplitSumNot100Pct = 12,
 }
 
 #[contract]
@@ -124,6 +152,7 @@ impl TipSplitter {
             .persistent()
             .get(&key)
             .unwrap_or_else(|| panic_with_error!(&env, Error::JarNotFound));
+        env.storage().persistent().extend_ttl(&key, JAR_TTL_LEDGERS);
         jar.owner.require_auth();
         Self::validate_splits(&env, &splits);
         let split_count = splits.len();
@@ -149,6 +178,7 @@ impl TipSplitter {
             .persistent()
             .get(&key)
             .unwrap_or_else(|| panic_with_error!(&env, Error::JarNotFound));
+        env.storage().persistent().extend_ttl(&key, JAR_TTL_LEDGERS);
         jar.owner.require_auth();
         env.storage().persistent().set(
             &key,
@@ -176,11 +206,16 @@ impl TipSplitter {
             panic_with_error!(&env, Error::MessageTooLong);
         }
 
+        let jar_key = DataKey::Jar(jar_id.clone());
         let jar: Jar = env
             .storage()
             .persistent()
-            .get(&DataKey::Jar(jar_id.clone()))
+            .get(&jar_key)
             .unwrap_or_else(|| panic_with_error!(&env, Error::JarNotFound));
+
+        // Bump the jar's storage entry so a jar that is tipped regularly
+        // is never archived, and a jar idle for a few years still works.
+        env.storage().persistent().extend_ttl(&jar_key, JAR_TTL_LEDGERS);
 
         let token_addr: Address = env
             .storage()
@@ -190,6 +225,21 @@ impl TipSplitter {
         let client = token::Client::new(&env, &token_addr);
 
         let n = jar.splits.len();
+
+        // Reject amounts too small to pay every recipient a non-zero share.
+        // With integer division, a recipient's share of `amount * bps / 10_000`
+        // truncates to zero when `amount < 10_000 / bps`. If that happens, the
+        // recipient is silently skipped and the final recipient absorbs the
+        // dust — the tip succeeds but the collaborator never sees it.
+        // Better to fail loudly with InvalidAmount than to pay nobody.
+        for i in 0..n {
+            let split = jar.splits.get(i).unwrap();
+            let bps = split.bps as i128;
+            if amount * bps < (BPS_DENOM as i128) {
+                panic_with_error!(&env, Error::InvalidAmount);
+            }
+        }
+
         let mut distributed: i128 = 0;
         for i in 0..n {
             let split = jar.splits.get(i).unwrap();
@@ -197,9 +247,22 @@ impl TipSplitter {
             let share = if i == n - 1 {
                 amount - distributed
             } else {
-                amount * (split.bps as i128) / (BPS_DENOM as i128)
+                amount
+                    .checked_mul(split.bps as i128)
+                    .unwrap_or_else(|| {
+                        // `amount * bps` overflows i128 before the division
+                        // can bring the result back into range. This is a
+                        // caller error — the tip amount is too large for the
+                        // contract to split safely — so we surface a typed
+                        // error rather than an opaque wasm trap.
+                        panic_with_error!(&env, Error::InvalidAmount)
+                    })
+                    / (BPS_DENOM as i128)
             };
-            if share > 0 {
+            if share > 0 && split.to != from {
+                // Skip self-transfers: a tipper who is also a recipient would
+                // otherwise pay themselves with a no-op transfer that burns gas
+                // and emits a confusing token event.
                 client.transfer(&from, &split.to, &share);
                 distributed += share;
             }
@@ -211,10 +274,14 @@ impl TipSplitter {
 
     /// Read a jar's configuration.
     pub fn get_jar(env: Env, jar_id: String) -> Jar {
-        env.storage()
+        let key = DataKey::Jar(jar_id);
+        let jar: Jar = env
+            .storage()
             .persistent()
-            .get(&DataKey::Jar(jar_id))
-            .unwrap_or_else(|| panic_with_error!(&env, Error::JarNotFound))
+            .get(&key)
+            .unwrap_or_else(|| panic_with_error!(&env, Error::JarNotFound));
+        env.storage().persistent().extend_ttl(&key, JAR_TTL_LEDGERS);
+        jar
     }
 
     /// Whether `jar_id` is already registered.
@@ -257,7 +324,7 @@ impl TipSplitter {
     fn validate_splits(env: &Env, splits: &Vec<Split>) {
         let n = splits.len();
         if n == 0 {
-            panic_with_error!(env, Error::InvalidSplits);
+            panic_with_error!(env, Error::SplitsEmpty);
         }
         if n > MAX_RECIPIENTS {
             panic_with_error!(env, Error::TooManyRecipients);
@@ -267,7 +334,7 @@ impl TipSplitter {
             let split = splits.get(i).unwrap();
             let bps = split.bps;
             if bps == 0 || bps > BPS_DENOM {
-                panic_with_error!(env, Error::InvalidSplits);
+                panic_with_error!(env, Error::SplitOutOfRange);
             }
             // `checked_add` rather than `+=`: `bps` is caller-supplied, and an
             // overflow must surface as the same typed `InvalidSplits` every
@@ -277,7 +344,7 @@ impl TipSplitter {
             // resting on `overflow-checks = true` in the release profile.
             total = total
                 .checked_add(bps)
-                .unwrap_or_else(|| panic_with_error!(env, Error::InvalidSplits));
+                .unwrap_or_else(|| panic_with_error!(env, Error::SplitSumNot100Pct));
             // Pairwise comparison rather than a set: `n` is capped at
             // MAX_RECIPIENTS (20), so this is at most 190 comparisons, and a hash
             // set would need an allocator we don't have under `no_std`.
@@ -288,7 +355,7 @@ impl TipSplitter {
             }
         }
         if total != BPS_DENOM {
-            panic_with_error!(env, Error::InvalidSplits);
+            panic_with_error!(env, Error::SplitSumNot100Pct);
         }
     }
 }
