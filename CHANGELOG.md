@@ -4,6 +4,37 @@ All notable changes to `novatip-contracts` are documented here.
 
 ## [Unreleased]
 
+### Fixed
+- `extend_ttl` was called with two arguments where the SDK takes three
+  (`key`, `threshold`, `extend_to`), so the crate did not compile. A
+  `JAR_TTL_THRESHOLD` constant now supplies the missing bound, and the TTL is
+  only bumped once the remaining lifetime drops below it rather than on every
+  access
+- The `JAR_TTL_LEDGERS` doc comment claimed 1 000 000 ledgers was "roughly 78
+  years"; at the 5-second close rate it is roughly 58 days
+- Event assertions in `test.rs` compared `Val` with `==`, which it does not
+  implement. The payloads are now decoded to their concrete types, which also
+  asserts the events decode to the shape consumers expect
+- Split-validation tests still expected the removed catch-all `InvalidSplits`
+  after error codes were split into `SplitsEmpty`, `SplitOutOfRange` and
+  `SplitSumNot100Pct`
+- The workspace used `resolver = "2"`, under which the `rust-version` pin is
+  ignored when selecting dependency versions. Cargo resolved a `getrandom`
+  requiring `edition2024`, which the pinned 1.84 toolchain cannot parse, so no
+  build succeeded. Switching to `resolver = "3"` makes the MSRV pin bind, and
+  `Cargo.lock` is committed with the resolved set
+- `jar_id.len() == 0` replaced with `is_empty()` (clippy, `-D warnings`)
+
+### Changed
+- `rust-toolchain.toml` now lists `wasm32v1-none` alongside
+  `wasm32-unknown-unknown`, so `rustup show` installs the target
+  `stellar contract build` needs without a separate step
+- `docs/CONTRACT.md` documents error codes 10, 11 and 12, records that code 4
+  is retained but no longer raised, and notes that codes are appended rather
+  than renumbered
+- Added `CONTRIBUTING.md` and `.gitattributes`
+
+
 ### Deployed
 - Testnet deployment at
   [`CCY2WPXROVUMPYAK3YJHZ57I35JKAUM5GDJKLUF5Y72KGENBQNSYAJIW`](https://stellar.expert/explorer/testnet/contract/CCY2WPXROVUMPYAK3YJHZ57I35JKAUM5GDJKLUF5Y72KGENBQNSYAJIW),

@@ -2,7 +2,7 @@
 use super::*;
 use proptest::prelude::*;
 use soroban_sdk::testutils::{Address as _, Events as _, MockAuth, MockAuthInvoke};
-use soroban_sdk::{symbol_short, token, vec, Address, Env, IntoVal, String};
+use soroban_sdk::{symbol_short, token, vec, Address, Env, IntoVal, String, TryFromVal};
 
 /// Shared test fixture: a fresh env with a USDC-like token and a deployed
 /// TipSplitter pointed at it. All auths are mocked.
@@ -144,7 +144,7 @@ fn tip_emits_tip_event_with_expected_topics_and_data() {
         .filter(|e| e.0 == s.contract)
         .collect();
     assert_eq!(tip_events.len(), 1);
-    let (_, topics, data) = tip_events.get(0).unwrap();
+    let (_, topics, data) = tip_events.first().unwrap();
     assert_eq!(
         topics,
         &vec![
@@ -153,7 +153,9 @@ fn tip_emits_tip_event_with_expected_topics_and_data() {
             jar_id.into_val(env)
         ]
     );
-    assert_eq!(data, &(tipper, 100i128, message).into_val(env));
+    let decoded: (Address, i128, String) =
+        TryFromVal::try_from_val(env, data).expect("tip event data shape");
+    assert_eq!(decoded, (tipper, 100i128, message));
 }
 
 #[test]
@@ -179,7 +181,7 @@ fn create_jar_rejects_bad_bps_sum() {
     ];
 
     let res = client.try_create_jar(&owner, &String::from_str(env, "@x"), &bad);
-    assert_eq!(res, Err(Ok(Error::InvalidSplits.into())));
+    assert_eq!(res, Err(Ok(Error::SplitSumNot100Pct.into())));
 }
 
 /// No single share may exceed 100%. Such an entry can never belong to a set
@@ -202,7 +204,7 @@ fn create_jar_rejects_bps_above_one_hundred_percent() {
     ];
 
     let res = client.try_create_jar(&owner, &String::from_str(env, "@overshare"), &bad);
-    assert_eq!(res, Err(Ok(Error::InvalidSplits.into())));
+    assert_eq!(res, Err(Ok(Error::SplitOutOfRange.into())));
 }
 
 /// Overflow regression: `u32::MAX + 10_001` is `2^32 + 10_000`, so a wrapping
@@ -234,7 +236,7 @@ fn create_jar_rejects_bps_sum_that_wraps_u32() {
 
     let jar_id = String::from_str(env, "@wrap");
     let res = client.try_create_jar(&owner, &jar_id, &bad);
-    assert_eq!(res, Err(Ok(Error::InvalidSplits.into())));
+    assert_eq!(res, Err(Ok(Error::SplitOutOfRange.into())));
 
     // The jar must not have been stored.
     let jar = client.try_get_jar(&jar_id);
@@ -280,7 +282,7 @@ fn update_splits_rejects_bps_sum_that_wraps_u32() {
             },
         ],
     );
-    assert_eq!(res, Err(Ok(Error::InvalidSplits.into())));
+    assert_eq!(res, Err(Ok(Error::SplitOutOfRange.into())));
 
     // The original split must be untouched.
     let jar = client.get_jar(&jar_id);
@@ -491,7 +493,7 @@ fn create_jar_rejects_zero_bps_entry() {
     ];
 
     let res = client.try_create_jar(&owner, &String::from_str(env, "@zero"), &bad);
-    assert_eq!(res, Err(Ok(Error::InvalidSplits.into())));
+    assert_eq!(res, Err(Ok(Error::SplitOutOfRange.into())));
 
     // The jar must not have been stored.
     let jar = client.try_get_jar(&String::from_str(env, "@zero"));
@@ -522,7 +524,7 @@ fn create_jar_rejects_zero_bps_first_entry() {
     ];
 
     let res = client.try_create_jar(&owner, &String::from_str(env, "@zerofirst"), &bad);
-    assert_eq!(res, Err(Ok(Error::InvalidSplits.into())));
+    assert_eq!(res, Err(Ok(Error::SplitOutOfRange.into())));
 }
 
 /// A single recipient holding the whole jar must still carry a real share.
@@ -543,7 +545,7 @@ fn create_jar_rejects_all_zero_bps() {
     ];
 
     let res = client.try_create_jar(&owner, &String::from_str(env, "@allzero"), &bad);
-    assert_eq!(res, Err(Ok(Error::InvalidSplits.into())));
+    assert_eq!(res, Err(Ok(Error::SplitOutOfRange.into())));
 }
 
 /// `update_splits` runs the same validation, so a zero-bps entry can't be
@@ -585,7 +587,7 @@ fn update_splits_rejects_zero_bps_entry() {
             },
         ],
     );
-    assert_eq!(res, Err(Ok(Error::InvalidSplits.into())));
+    assert_eq!(res, Err(Ok(Error::SplitOutOfRange.into())));
 
     // The original splits must be untouched.
     let jar = client.get_jar(&jar_id);
@@ -1016,7 +1018,7 @@ fn create_jar_emits_jar_created_event() {
         .filter(|e| e.0 == s.contract)
         .collect();
     assert_eq!(jar_events.len(), 1);
-    let (_, topics, data) = jar_events.get(0).unwrap();
+    let (_, topics, data) = jar_events.first().unwrap();
     assert_eq!(
         topics,
         &vec![
@@ -1025,7 +1027,8 @@ fn create_jar_emits_jar_created_event() {
             jar_id.into_val(env)
         ]
     );
-    assert_eq!(data, &owner.into_val(env));
+    let decoded: Address = TryFromVal::try_from_val(env, data).expect("jar_crtd event data shape");
+    assert_eq!(decoded, owner);
 }
 
 #[test]
@@ -1077,8 +1080,9 @@ fn update_splits_emits_splits_event() {
         .filter(|e| e.0 == s.contract && e.1 == expected_topics)
         .collect();
     assert_eq!(splits_events.len(), 1);
-    let (_, _, data) = splits_events.get(0).unwrap();
-    assert_eq!(data, &new_splits.len().into_val(env));
+    let (_, _, data) = splits_events.first().unwrap();
+    let decoded: u32 = TryFromVal::try_from_val(env, data).expect("splits event data shape");
+    assert_eq!(decoded, new_splits.len());
 }
 
 #[test]

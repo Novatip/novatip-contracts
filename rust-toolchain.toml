@@ -1,5 +1,9 @@
 [toolchain]
 channel = "1.84.0"
-targets = ["wasm32-unknown-unknown"]
+# wasm32v1-none is what `stellar contract build` targets on current CLI
+# versions; wasm32-unknown-unknown is kept for `cargo build --target ...`,
+# which CI uses. Listing both means `rustup show` installs them for a new
+# contributor without a separate `rustup target add`.
+targets = ["wasm32v1-none", "wasm32-unknown-unknown"]
 profile = "minimal"
 components = ["rustfmt", "clippy"]

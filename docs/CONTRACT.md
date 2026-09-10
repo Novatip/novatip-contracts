@@ -122,12 +122,20 @@ the code, so flipping that profile setting cannot turn it into a bypass.
 | 1 | `NotInitialized` | Token address missing (should never happen post-deploy). |
 | 2 | `JarExists` | Slug already registered. |
 | 3 | `JarNotFound` | Slug not registered. |
-| 4 | `InvalidSplits` | Empty list, an entry with `bps == 0` or `bps > 10_000`, a sum that overflows `u32`, or bps that don't sum to 10_000. |
-| 5 | `InvalidAmount` | Tip amount ≤ 0. |
+| 4 | `InvalidSplits` | **No longer raised.** Split validation now reports the specific failure as code 10, 11 or 12. The variant is retained so existing codes keep their values. |
+| 5 | `InvalidAmount` | Tip amount ≤ 0, or so large that `amount * bps` overflows `i128` before the division. |
 | 6 | `TooManyRecipients` | More than 20 recipients. |
 | 7 | `DuplicateRecipient` | The same address appears more than once in the splits. |
 | 8 | `MessageTooLong` | Tip message exceeds 280 bytes. |
 | 9 | `InvalidJarId` | `jar_id` is empty or exceeds 64 bytes (`MAX_JAR_ID_LEN`). |
+| 10 | `SplitsEmpty` | The splits list is empty. |
+| 11 | `SplitOutOfRange` | An entry has `bps == 0` or `bps > 10_000`. Checked per entry, before the sum. |
+| 12 | `SplitSumNot100Pct` | The shares sum to something other than exactly 10 000 bps, including a sum that would overflow `u32`. |
+
+Error codes are part of the public interface: `@novatip/sdk` and the frontend
+both map these numbers to user-facing messages. New variants are **appended**
+and existing values are never renumbered, which is why code 4 stays in place
+rather than being removed.
 
 ## Events
 

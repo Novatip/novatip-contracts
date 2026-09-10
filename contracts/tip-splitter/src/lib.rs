@@ -45,17 +45,25 @@ const MAX_JAR_ID_LEN: u32 = 64;
 /// `len(message)` in Rust — to show an accurate remaining-bytes indicator.
 const MAX_MESSAGE_LEN: u32 = 280;
 
-/// How long a jar's persistent entry is kept before it can be archived,
-/// in ledger increments. Soroban extends an entry's lifetime when it is
-/// read or written, so a jar that is tipped regularly will never expire.
-/// A jar that goes untouched for this many ledgers will be archived,
-/// after which `get_jar` and `tip` will fail until the entry is restored.
+/// How long a jar's persistent entry is extended to on access, in ledgers.
 ///
-/// 1 000 000 ledgers is roughly 78 years at the default 5-second
-/// close rate, which is well beyond any realistic creator lifecycle.
-/// The constant exists so the value can be changed in one place if the
-/// product decides a shorter idle window is acceptable.
+/// Soroban archives a persistent entry once its time to live runs out, after
+/// which `get_jar` and `tip` fail until it is restored. Every read and write
+/// path bumps the entry, so a jar that is used at all never expires; this
+/// bound only governs how long a completely idle jar survives.
+///
+/// At the default 5-second close rate, 1 000 000 ledgers is roughly 58 days.
+/// That comfortably covers a creator between gigs while staying inside the
+/// network's maximum persistent entry lifetime.
 const JAR_TTL_LEDGERS: u32 = 1_000_000;
+
+/// Bump a jar's time to live only once it drops below this many ledgers.
+///
+/// `extend_ttl` takes a threshold as well as a target: below the threshold the
+/// entry is extended back up to `JAR_TTL_LEDGERS`, and above it the call is a
+/// no-op. Setting the threshold under the target means an actively tipped jar
+/// pays for the write occasionally rather than on every single access.
+const JAR_TTL_THRESHOLD: u32 = 500_000;
 
 /// One recipient and the share of every tip they receive, in basis points.
 #[contracttype]
@@ -122,7 +130,7 @@ impl TipSplitter {
     /// event log without any on-chain list.
     pub fn create_jar(env: Env, owner: Address, jar_id: String, splits: Vec<Split>) {
         owner.require_auth();
-        if jar_id.len() == 0 || jar_id.len() > MAX_JAR_ID_LEN {
+        if jar_id.is_empty() || jar_id.len() > MAX_JAR_ID_LEN {
             panic_with_error!(&env, Error::InvalidJarId);
         }
         let key = DataKey::Jar(jar_id.clone());
@@ -152,7 +160,9 @@ impl TipSplitter {
             .persistent()
             .get(&key)
             .unwrap_or_else(|| panic_with_error!(&env, Error::JarNotFound));
-        env.storage().persistent().extend_ttl(&key, JAR_TTL_LEDGERS);
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, JAR_TTL_THRESHOLD, JAR_TTL_LEDGERS);
         jar.owner.require_auth();
         Self::validate_splits(&env, &splits);
         let split_count = splits.len();
@@ -178,7 +188,9 @@ impl TipSplitter {
             .persistent()
             .get(&key)
             .unwrap_or_else(|| panic_with_error!(&env, Error::JarNotFound));
-        env.storage().persistent().extend_ttl(&key, JAR_TTL_LEDGERS);
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, JAR_TTL_THRESHOLD, JAR_TTL_LEDGERS);
         jar.owner.require_auth();
         env.storage().persistent().set(
             &key,
@@ -215,7 +227,9 @@ impl TipSplitter {
 
         // Bump the jar's storage entry so a jar that is tipped regularly
         // is never archived, and a jar idle for a few years still works.
-        env.storage().persistent().extend_ttl(&jar_key, JAR_TTL_LEDGERS);
+        env.storage()
+            .persistent()
+            .extend_ttl(&jar_key, JAR_TTL_THRESHOLD, JAR_TTL_LEDGERS);
 
         let token_addr: Address = env
             .storage()
@@ -247,17 +261,14 @@ impl TipSplitter {
             let share = if i == n - 1 {
                 amount - distributed
             } else {
-                amount
-                    .checked_mul(split.bps as i128)
-                    .unwrap_or_else(|| {
-                        // `amount * bps` overflows i128 before the division
-                        // can bring the result back into range. This is a
-                        // caller error — the tip amount is too large for the
-                        // contract to split safely — so we surface a typed
-                        // error rather than an opaque wasm trap.
-                        panic_with_error!(&env, Error::InvalidAmount)
-                    })
-                    / (BPS_DENOM as i128)
+                amount.checked_mul(split.bps as i128).unwrap_or_else(|| {
+                    // `amount * bps` overflows i128 before the division
+                    // can bring the result back into range. This is a
+                    // caller error — the tip amount is too large for the
+                    // contract to split safely — so we surface a typed
+                    // error rather than an opaque wasm trap.
+                    panic_with_error!(&env, Error::InvalidAmount)
+                }) / (BPS_DENOM as i128)
             };
             if share > 0 && split.to != from {
                 // Skip self-transfers: a tipper who is also a recipient would
@@ -280,7 +291,9 @@ impl TipSplitter {
             .persistent()
             .get(&key)
             .unwrap_or_else(|| panic_with_error!(&env, Error::JarNotFound));
-        env.storage().persistent().extend_ttl(&key, JAR_TTL_LEDGERS);
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, JAR_TTL_THRESHOLD, JAR_TTL_LEDGERS);
         jar
     }
 
