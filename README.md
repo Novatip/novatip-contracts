@@ -43,7 +43,7 @@ make test
 
 | Network | Contract ID | Status |
 |---------|-------------|--------|
-| Testnet | [`CCY2WPXROVUMPYAK3YJHZ57I35JKAUM5GDJKLUF5Y72KGENBQNSYAJIW`](https://stellar.expert/explorer/testnet/contract/CCY2WPXROVUMPYAK3YJHZ57I35JKAUM5GDJKLUF5Y72KGENBQNSYAJIW) | live |
+| Testnet | [`CCKPD2MPAYQYCL7QJKUMJHTEJWNHSIP7BZYIZBRO3C4DM4VHZKL6VBRL`](https://stellar.expert/explorer/testnet/contract/CCKPD2MPAYQYCL7QJKUMJHTEJWNHSIP7BZYIZBRO3C4DM4VHZKL6VBRL) | live |
 | Mainnet | coming soon | pending audit |
 
 The testnet deployment settles in the testnet USDC SAC below, and carries a
