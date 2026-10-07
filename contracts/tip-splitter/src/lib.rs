@@ -81,6 +81,22 @@ pub struct Jar {
     pub splits: Vec<Split>,
 }
 
+/// The contract's hard bounds, returned by `get_limits`.
+///
+/// Clients that validate input before submitting a transaction need the same
+/// numbers the contract enforces. Shipping them as a view rather than as
+/// hardcoded client constants means a bound can only be changed in one place.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Limits {
+    /// 100% expressed in basis points, the denominator every `bps` is a share of.
+    pub bps_denom: u32,
+    /// Most recipients a single jar may split a tip across.
+    pub max_recipients: u32,
+    /// Longest tip message, in UTF-8 bytes.
+    pub max_message_len: u32,
+}
+
 #[contracttype]
 pub enum DataKey {
     /// Contract admin (deployer); reserved for future migrations.
@@ -321,6 +337,21 @@ impl TipSplitter {
             .instance()
             .get(&DataKey::Token)
             .unwrap_or_else(|| panic_with_error!(&env, Error::NotInitialized))
+    }
+
+    /// The bounds this contract enforces: the basis-point denominator, the
+    /// maximum recipient count, and the maximum tip-message length in bytes.
+    ///
+    /// These are compile-time constants, so the view reads no storage. It
+    /// exists so a client can discover the limits of the contract it is
+    /// actually talking to instead of hardcoding its own copy, which would
+    /// silently desynchronise the moment a bound here changed.
+    pub fn get_limits(_env: Env) -> Limits {
+        Limits {
+            bps_denom: BPS_DENOM,
+            max_recipients: MAX_RECIPIENTS,
+            max_message_len: MAX_MESSAGE_LEN,
+        }
     }
 
     /// Validate that splits are non-empty, within bounds, carry a share that is

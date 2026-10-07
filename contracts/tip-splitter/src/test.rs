@@ -1745,6 +1745,92 @@ fn create_jar_accepts_jar_id_at_exact_limit() {
     assert_eq!(client.get_jar(&exact).splits.len(), 1);
 }
 
+/// `get_limits` exists so clients stop hardcoding the contract's bounds. This
+/// asserts the view and the constants cannot drift apart: changing one without
+/// the other fails here.
+#[test]
+fn get_limits_matches_contract_constants() {
+    let s = setup();
+    let env = &s.env;
+    let client = TipSplitterClient::new(env, &s.contract);
+
+    let limits = client.get_limits();
+
+    assert_eq!(limits.bps_denom, BPS_DENOM);
+    assert_eq!(limits.max_recipients, MAX_RECIPIENTS);
+    assert_eq!(limits.max_message_len, MAX_MESSAGE_LEN);
+    assert_eq!(
+        limits,
+        Limits {
+            bps_denom: 10_000,
+            max_recipients: 20,
+            max_message_len: 280,
+        },
+        "the published limits are part of the public interface; changing one \
+         means clients and docs/CONTRACT.md have to change with it"
+    );
+}
+
+/// The limits are only useful if they describe what the contract actually
+/// enforces, so exercise each returned bound against the rejection it predicts.
+#[test]
+fn get_limits_describes_the_enforced_bounds() {
+    let s = setup();
+    let env = &s.env;
+    let client = TipSplitterClient::new(env, &s.contract);
+    let token_admin = token::StellarAssetClient::new(env, &s.token);
+
+    let limits = client.get_limits();
+    let owner = Address::generate(env);
+    let tipper = Address::generate(env);
+    token_admin.mint(&tipper, &1_000);
+
+    // max_recipients: a jar with exactly that many recipients is accepted, and
+    // one more is not.
+    let mut splits = vec![env];
+    for _ in 0..limits.max_recipients {
+        splits.push_back(Split {
+            to: Address::generate(env),
+            bps: limits.bps_denom / limits.max_recipients,
+        });
+    }
+    let jar_id = String::from_str(env, "@limits");
+    client.create_jar(&owner, &jar_id, &splits);
+
+    let mut too_many = splits.clone();
+    too_many.push_back(Split {
+        to: Address::generate(env),
+        bps: 1,
+    });
+    assert_eq!(
+        client.try_create_jar(&owner, &String::from_str(env, "@over"), &too_many),
+        Err(Ok(Error::TooManyRecipients.into()))
+    );
+
+    // bps_denom: the shares of an accepted jar sum to exactly the denominator.
+    let stored = client.get_jar(&jar_id);
+    let total: u32 = (0..stored.splits.len())
+        .map(|i| stored.splits.get(i).unwrap().bps)
+        .sum();
+    assert_eq!(total, limits.bps_denom);
+
+    // max_message_len: a message of exactly that many bytes is accepted, and
+    // one byte more is not.
+    let exact = String::from_bytes(env, &vec_of_bytes(limits.max_message_len));
+    client.tip(&tipper, &jar_id, &1_000, &exact);
+
+    let over = String::from_bytes(env, &vec_of_bytes(limits.max_message_len + 1));
+    assert_eq!(
+        client.try_tip(&tipper, &jar_id, &1, &over),
+        Err(Ok(Error::MessageTooLong.into()))
+    );
+}
+
+/// `n` filler ASCII bytes — one UTF-8 byte each, so the byte length is `n`.
+fn vec_of_bytes(n: u32) -> std::vec::Vec<u8> {
+    std::vec![b'a'; n as usize]
+}
+
 #[test]
 fn get_admin_returns_constructor_admin() {
     let s = setup();
