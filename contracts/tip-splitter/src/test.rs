@@ -2,7 +2,7 @@
 use super::*;
 use proptest::prelude::*;
 use soroban_sdk::testutils::{Address as _, Events as _, MockAuth, MockAuthInvoke};
-use soroban_sdk::{symbol_short, token, vec, Address, Env, IntoVal, String, TryFromVal};
+use soroban_sdk::{symbol_short, token, vec, Address, Env, IntoVal, String, TryFromVal, Vec};
 
 /// Shared test fixture: a fresh env with a USDC-like token and a deployed
 /// TipSplitter pointed at it. All auths are mocked.
@@ -136,7 +136,8 @@ fn tip_emits_tip_event_with_expected_topics_and_data() {
     client.tip(&tipper, &jar_id, &100, &message);
 
     // decodeTipEvent in novatip-sdk reads topic 0 as the "tip" symbol, topic 1
-    // as the jar id, and the data as the (from, amount, message) tuple.
+    // as the jar id, and the data as the (from, amount, message, breakdown)
+    // tuple.
     let tip_events: std::vec::Vec<_> = env
         .events()
         .all()
@@ -153,9 +154,154 @@ fn tip_emits_tip_event_with_expected_topics_and_data() {
             jar_id.into_val(env)
         ]
     );
-    let decoded: (Address, i128, String) =
+    let decoded: (Address, i128, String, Vec<(Address, i128)>) =
         TryFromVal::try_from_val(env, data).expect("tip event data shape");
-    assert_eq!(decoded, (tipper, 100i128, message));
+    assert_eq!(
+        decoded,
+        (tipper, 100i128, message, vec![env, (alice, 100i128)])
+    );
+}
+
+/// Reads the per-recipient breakdown out of the single `tip` event this
+/// contract published.
+fn tip_breakdown(env: &Env, contract: &Address, jar_id: &String) -> std::vec::Vec<(Address, i128)> {
+    let expected_topics = vec![
+        env,
+        symbol_short!("tip").into_val(env),
+        jar_id.into_val(env),
+    ];
+    let events: std::vec::Vec<_> = env
+        .events()
+        .all()
+        .iter()
+        .filter(|e| e.0 == *contract && e.1 == expected_topics)
+        .collect();
+    assert_eq!(events.len(), 1, "expected exactly one tip event");
+    let (_, _, data) = events.first().unwrap();
+    let (_, _, _, breakdown): (Address, i128, String, Vec<(Address, i128)>) =
+        TryFromVal::try_from_val(env, data).expect("tip event data shape");
+    (0..breakdown.len())
+        .map(|i| breakdown.get(i).unwrap())
+        .collect()
+}
+
+/// The point of the breakdown is that an indexer never has to redo the split
+/// arithmetic. So it must match, recipient for recipient and in split order,
+/// the balances the transfers actually produced — including the dust the last
+/// recipient absorbs, which is where a recomputed figure would go wrong.
+#[test]
+fn tip_event_breakdown_matches_the_balances_the_transfers_produced() {
+    let s = setup();
+    let env = &s.env;
+    let client = TipSplitterClient::new(env, &s.contract);
+    let token = token::Client::new(env, &s.token);
+    let token_admin = token::StellarAssetClient::new(env, &s.token);
+
+    let owner = Address::generate(env);
+    let a = Address::generate(env);
+    let b = Address::generate(env);
+    let c = Address::generate(env);
+    let tipper = Address::generate(env);
+    token_admin.mint(&tipper, &100);
+
+    // 33.33 / 33.33 / 33.34 over 100 units leaves rounding dust for `c`.
+    let jar_id = String::from_str(env, "@breakdown");
+    client.create_jar(
+        &owner,
+        &jar_id,
+        &vec![
+            env,
+            Split {
+                to: a.clone(),
+                bps: 3333,
+            },
+            Split {
+                to: b.clone(),
+                bps: 3333,
+            },
+            Split {
+                to: c.clone(),
+                bps: 3334,
+            },
+        ],
+    );
+
+    client.tip(
+        &tipper,
+        &jar_id,
+        &100,
+        &String::from_str(env, "split three ways"),
+    );
+
+    let breakdown = tip_breakdown(env, &s.contract, &jar_id);
+    assert_eq!(
+        breakdown,
+        std::vec![
+            (a.clone(), token.balance(&a)),
+            (b.clone(), token.balance(&b)),
+            (c.clone(), token.balance(&c)),
+        ],
+        "the breakdown must report what each recipient was actually paid, in split order"
+    );
+    // Pin the figures down, so a change in the splitting rule shows up here
+    // rather than being absorbed by comparing the event against itself.
+    assert_eq!(breakdown, std::vec![(a, 33i128), (b, 33i128), (c, 34i128)]);
+    assert_eq!(
+        breakdown.iter().map(|(_, amt)| amt).sum::<i128>(),
+        100,
+        "the breakdown must account for the whole tip"
+    );
+}
+
+/// `tip` skips a transfer when the sender is also a recipient. The breakdown is
+/// a record of the transfers the call made, so that entry reports `0` — and the
+/// recipient's balance confirms nothing moved.
+#[test]
+fn tip_event_breakdown_reports_zero_for_a_skipped_self_transfer() {
+    let s = setup();
+    let env = &s.env;
+    let client = TipSplitterClient::new(env, &s.contract);
+    let token = token::Client::new(env, &s.token);
+    let token_admin = token::StellarAssetClient::new(env, &s.token);
+
+    let owner = Address::generate(env);
+    let alice = Address::generate(env);
+    let tipper = Address::generate(env);
+    token_admin.mint(&tipper, &100);
+
+    // The tipper is listed first; `tip` skips paying them and the final
+    // recipient absorbs the whole amount.
+    let jar_id = String::from_str(env, "@selftip");
+    client.create_jar(
+        &owner,
+        &jar_id,
+        &vec![
+            env,
+            Split {
+                to: tipper.clone(),
+                bps: 5000,
+            },
+            Split {
+                to: alice.clone(),
+                bps: 5000,
+            },
+        ],
+    );
+
+    client.tip(&tipper, &jar_id, &100, &String::from_str(env, "half mine"));
+
+    let breakdown = tip_breakdown(env, &s.contract, &jar_id);
+    assert_eq!(
+        breakdown,
+        std::vec![(tipper.clone(), 0i128), (alice.clone(), 100i128)],
+        "a skipped self-transfer is reported as 0, not as the notional share"
+    );
+    assert_eq!(token.balance(&alice), 100);
+    assert_eq!(token.balance(&tipper), 0);
+    // Every entry still names its recipient in split order, so an indexer can
+    // tell "listed but paid nothing" apart from "not listed at all".
+    assert_eq!(breakdown[0].0, tipper);
+    assert_eq!(breakdown[1].0, alice);
 }
 
 #[test]

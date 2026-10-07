@@ -221,7 +221,9 @@ impl TipSplitter {
     }
 
     /// Send a tip. Transfers `amount` of USDC from `from`, split across the jar's
-    /// recipients atomically, then emits a `("tip", jar_id)` event.
+    /// recipients atomically, then emits a `("tip", jar_id)` event carrying the
+    /// sender, the total, the message, and the per-recipient breakdown in split
+    /// order.
     ///
     /// `message` may be at most `MAX_MESSAGE_LEN` bytes; it is rejected before
     /// any funds move.
@@ -271,6 +273,12 @@ impl TipSplitter {
         }
 
         let mut distributed: i128 = 0;
+        // The per-recipient breakdown published in the `tip` event, in split
+        // order. Recording it as the transfers happen is what makes the event
+        // self-describing: an indexer that recomputed the split arithmetic
+        // from `get_jar` could get a different answer, because the jar's
+        // splits may have changed between the tip and the read.
+        let mut breakdown: Vec<(Address, i128)> = Vec::new(&env);
         for i in 0..n {
             let split = jar.splits.get(i).unwrap();
             // Last recipient absorbs any rounding dust so the full amount is sent.
@@ -286,17 +294,27 @@ impl TipSplitter {
                     panic_with_error!(&env, Error::InvalidAmount)
                 }) / (BPS_DENOM as i128)
             };
-            if share > 0 && split.to != from {
+            let paid = if share > 0 && split.to != from {
                 // Skip self-transfers: a tipper who is also a recipient would
                 // otherwise pay themselves with a no-op transfer that burns gas
                 // and emits a confusing token event.
                 client.transfer(&from, &split.to, &share);
                 distributed += share;
-            }
+                share
+            } else {
+                // Nothing moved, so the breakdown reports 0 rather than the
+                // notional share. The event is a record of the transfers this
+                // call actually made, which is what a balance-tracking indexer
+                // needs to stay in step with the ledger.
+                0
+            };
+            breakdown.push_back((split.to, paid));
         }
 
-        env.events()
-            .publish((symbol_short!("tip"), jar_id), (from, amount, message));
+        env.events().publish(
+            (symbol_short!("tip"), jar_id),
+            (from, amount, message, breakdown),
+        );
     }
 
     /// Read a jar's configuration.
