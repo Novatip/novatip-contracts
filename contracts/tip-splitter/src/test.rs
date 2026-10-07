@@ -736,6 +736,87 @@ fn jar_exists_stays_true_after_update_splits() {
     assert!(client.jar_exists(&jar_id));
 }
 
+/// `get_jar_owner` must agree with `get_jar(...).owner` for a registered jar,
+/// which is the whole point: the cheap read and the full read never disagree.
+#[test]
+fn get_jar_owner_returns_owner_of_registered_jar() {
+    let s = setup();
+    let env = &s.env;
+    let client = TipSplitterClient::new(env, &s.contract);
+
+    let owner = Address::generate(env);
+    let alice = Address::generate(env);
+    let bob = Address::generate(env);
+    let jar_id = String::from_str(env, "@duo");
+
+    client.create_jar(
+        &owner,
+        &jar_id,
+        &vec![
+            env,
+            Split {
+                to: alice.clone(),
+                bps: 6000,
+            },
+            Split {
+                to: bob.clone(),
+                bps: 4000,
+            },
+        ],
+    );
+
+    assert_eq!(client.get_jar_owner(&jar_id), owner);
+    assert_eq!(client.get_jar_owner(&jar_id), client.get_jar(&jar_id).owner);
+    // The owner is distinct from the recipients — a jar can pay addresses that
+    // do not control it, so returning a recipient would pass a weaker test.
+    assert_ne!(client.get_jar_owner(&jar_id), alice);
+}
+
+/// An unregistered slug is a `JarNotFound` panic, not a default address — a
+/// zero or placeholder address here would read to a client as "someone owns
+/// this jar".
+#[test]
+fn get_jar_owner_on_missing_jar_fails() {
+    let s = setup();
+    let env = &s.env;
+    let client = TipSplitterClient::new(env, &s.contract);
+
+    let res = client.try_get_jar_owner(&String::from_str(env, "@ghost"));
+    assert_eq!(res, Err(Ok(Error::JarNotFound.into())));
+}
+
+/// `transfer_jar_ownership` rewrites the stored owner, so the cheap read must
+/// follow it rather than serving a stale address.
+#[test]
+fn get_jar_owner_follows_ownership_transfer() {
+    let s = setup();
+    let env = &s.env;
+    let client = TipSplitterClient::new(env, &s.contract);
+
+    let owner = Address::generate(env);
+    let new_owner = Address::generate(env);
+    let alice = Address::generate(env);
+    let jar_id = String::from_str(env, "@moved");
+
+    client.create_jar(
+        &owner,
+        &jar_id,
+        &vec![
+            env,
+            Split {
+                to: alice.clone(),
+                bps: 10000,
+            },
+        ],
+    );
+    assert_eq!(client.get_jar_owner(&jar_id), owner);
+
+    client.transfer_jar_ownership(&jar_id, &new_owner);
+
+    assert_eq!(client.get_jar_owner(&jar_id), new_owner);
+    assert_ne!(client.get_jar_owner(&jar_id), owner);
+}
+
 #[test]
 fn tip_on_missing_jar_fails() {
     let s = setup();

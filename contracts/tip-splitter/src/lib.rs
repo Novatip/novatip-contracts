@@ -297,6 +297,29 @@ impl TipSplitter {
         jar
     }
 
+    /// Read a jar's owner without pulling its splits across the wire.
+    ///
+    /// The alternative — `get_jar(jar_id).owner` — deserializes the whole
+    /// recipient vector to read one address, which for a jar near the
+    /// `MAX_RECIPIENTS` cap is a lot of data moved to answer "do I control
+    /// this jar?". A dashboard badge or a client deciding whether the
+    /// connected wallet may call `update_splits` only needs the address.
+    ///
+    /// Panics with `JarNotFound` if the slug is unregistered, matching
+    /// `get_jar`.
+    pub fn get_jar_owner(env: Env, jar_id: String) -> Address {
+        let key = DataKey::Jar(jar_id);
+        let jar: Jar = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .unwrap_or_else(|| panic_with_error!(&env, Error::JarNotFound));
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, JAR_TTL_THRESHOLD, JAR_TTL_LEDGERS);
+        jar.owner
+    }
+
     /// Whether `jar_id` is already registered.
     ///
     /// A slug-availability check would otherwise have to call `get_jar` and
