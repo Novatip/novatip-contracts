@@ -42,3 +42,24 @@ jobs:
 
       - name: Build wasm
         run: cargo build --target wasm32-unknown-unknown --release
+
+      # Contract size drives upload cost and ongoing state rent, and it creeps
+      # up quietly — a dependency adding a few KB is invisible until someone
+      # looks. Printing it on every run (and into the step summary, so it shows
+      # on the PR without opening the logs) makes that drift visible.
+      - name: Report wasm size
+        run: |
+          WASM=target/wasm32-unknown-unknown/release/tip_splitter.wasm
+          if [ ! -f "$WASM" ]; then
+            echo "error: expected wasm at $WASM but it was not built" >&2
+            exit 1
+          fi
+          SIZE=$(wc -c < "$WASM")
+          echo "tip_splitter.wasm: $SIZE bytes ($((SIZE / 1024)) KiB)"
+          {
+            echo "### Contract size"
+            echo
+            echo "| Artifact | Bytes | KiB |"
+            echo "|----------|------:|----:|"
+            echo "| \`tip_splitter.wasm\` | $SIZE | $((SIZE / 1024)) |"
+          } >> "$GITHUB_STEP_SUMMARY"
