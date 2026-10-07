@@ -42,3 +42,48 @@ jobs:
 
       - name: Build wasm
         run: cargo build --target wasm32-unknown-unknown --release
+
+      # Contract size drives upload cost and ongoing state rent, and it creeps
+      # up quietly — a dependency adding a few KB is invisible until someone
+      # looks. Printing it on every run (and into the step summary, so it shows
+      # on the PR without opening the logs) makes that drift visible.
+      - name: Report wasm size
+        env:
+          # Hard ceiling for the unoptimized release wasm, in bytes.
+          #
+          # The contract builds to roughly 18 KiB today, so 64 KiB leaves well
+          # over 3x headroom: ordinary feature work and a new dependency or two
+          # will not trip it, and only a genuine regression — a heavyweight dep
+          # pulled in by accident, or `opt-level`/`lto` silently dropping out of
+          # the release profile — pushes the artifact past it.
+          #
+          # This measures the raw `cargo build` output, not the `stellar
+          # contract optimize` artifact that actually gets uploaded, so it is a
+          # deliberately loose upper bound rather than a cost estimate. If
+          # optimization moves into CI, point the check at the optimized file
+          # and lower this number to match.
+          #
+          # Raising it is fine when the growth is understood and intentional —
+          # the point is that the bump shows up in a diff and gets a reason.
+          MAX_WASM_BYTES: 65536
+        run: |
+          WASM=target/wasm32-unknown-unknown/release/tip_splitter.wasm
+          if [ ! -f "$WASM" ]; then
+            echo "error: expected wasm at $WASM but it was not built" >&2
+            exit 1
+          fi
+          SIZE=$(wc -c < "$WASM")
+          echo "tip_splitter.wasm: $SIZE bytes ($((SIZE / 1024)) KiB)"
+          {
+            echo "### Contract size"
+            echo
+            echo "| Artifact | Bytes | KiB | Limit (bytes) |"
+            echo "|----------|------:|----:|--------------:|"
+            echo "| \`tip_splitter.wasm\` | $SIZE | $((SIZE / 1024)) | $MAX_WASM_BYTES |"
+          } >> "$GITHUB_STEP_SUMMARY"
+          if [ "$SIZE" -gt "$MAX_WASM_BYTES" ]; then
+            echo
+            echo "::error::tip_splitter.wasm is $SIZE bytes, over the $MAX_WASM_BYTES byte limit."
+            echo "Shrink the contract, or raise MAX_WASM_BYTES in this workflow with a reason." >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi

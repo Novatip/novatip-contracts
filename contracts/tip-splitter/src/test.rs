@@ -882,6 +882,462 @@ fn jar_exists_stays_true_after_update_splits() {
     assert!(client.jar_exists(&jar_id));
 }
 
+/// `get_jar_owner` must agree with `get_jar(...).owner` for a registered jar,
+/// which is the whole point: the cheap read and the full read never disagree.
+#[test]
+fn get_jar_owner_returns_owner_of_registered_jar() {
+    let s = setup();
+    let env = &s.env;
+    let client = TipSplitterClient::new(env, &s.contract);
+
+    let owner = Address::generate(env);
+    let alice = Address::generate(env);
+    let bob = Address::generate(env);
+    let jar_id = String::from_str(env, "@duo");
+
+    client.create_jar(
+        &owner,
+        &jar_id,
+        &vec![
+            env,
+            Split {
+                to: alice.clone(),
+                bps: 6000,
+            },
+            Split {
+                to: bob.clone(),
+                bps: 4000,
+            },
+        ],
+    );
+
+    assert_eq!(client.get_jar_owner(&jar_id), owner);
+    assert_eq!(client.get_jar_owner(&jar_id), client.get_jar(&jar_id).owner);
+    // The owner is distinct from the recipients — a jar can pay addresses that
+    // do not control it, so returning a recipient would pass a weaker test.
+    assert_ne!(client.get_jar_owner(&jar_id), alice);
+}
+
+/// An unregistered slug is a `JarNotFound` panic, not a default address — a
+/// zero or placeholder address here would read to a client as "someone owns
+/// this jar".
+#[test]
+fn get_jar_owner_on_missing_jar_fails() {
+    let s = setup();
+    let env = &s.env;
+    let client = TipSplitterClient::new(env, &s.contract);
+
+    let res = client.try_get_jar_owner(&String::from_str(env, "@ghost"));
+    assert_eq!(res, Err(Ok(Error::JarNotFound.into())));
+}
+
+/// `transfer_jar_ownership` rewrites the stored owner, so the cheap read must
+/// follow it rather than serving a stale address.
+#[test]
+fn get_jar_owner_follows_ownership_transfer() {
+    let s = setup();
+    let env = &s.env;
+    let client = TipSplitterClient::new(env, &s.contract);
+
+    let owner = Address::generate(env);
+    let new_owner = Address::generate(env);
+    let alice = Address::generate(env);
+    let jar_id = String::from_str(env, "@moved");
+
+    client.create_jar(
+        &owner,
+        &jar_id,
+        &vec![
+            env,
+            Split {
+                to: alice.clone(),
+                bps: 10000,
+            },
+        ],
+    );
+    assert_eq!(client.get_jar_owner(&jar_id), owner);
+
+    client.transfer_jar_ownership(&jar_id, &new_owner);
+
+    assert_eq!(client.get_jar_owner(&jar_id), new_owner);
+    assert_ne!(client.get_jar_owner(&jar_id), owner);
+}
+
+/// A single-recipient jar counts 1 — the degenerate case a badge still has to
+/// render, and the one an off-by-one would most likely get wrong.
+#[test]
+fn get_split_count_counts_single_recipient() {
+    let s = setup();
+    let env = &s.env;
+    let client = TipSplitterClient::new(env, &s.contract);
+
+    let owner = Address::generate(env);
+    let alice = Address::generate(env);
+    let jar_id = String::from_str(env, "@solo");
+
+    client.create_jar(
+        &owner,
+        &jar_id,
+        &vec![
+            env,
+            Split {
+                to: alice.clone(),
+                bps: 10000,
+            },
+        ],
+    );
+
+    assert_eq!(client.get_split_count(&jar_id), 1);
+}
+
+/// A multi-recipient jar counts every entry, and agrees with the length of the
+/// vector `get_jar` returns — the cheap read must not drift from the full one.
+#[test]
+fn get_split_count_counts_every_recipient() {
+    let s = setup();
+    let env = &s.env;
+    let client = TipSplitterClient::new(env, &s.contract);
+
+    let owner = Address::generate(env);
+    let jar_id = String::from_str(env, "@collective");
+
+    // Four recipients at 2500 bps each.
+    let mut splits = vec![env];
+    for _ in 0..4 {
+        splits.push_back(Split {
+            to: Address::generate(env),
+            bps: 2500,
+        });
+    }
+    client.create_jar(&owner, &jar_id, &splits);
+
+    assert_eq!(client.get_split_count(&jar_id), 4);
+    assert_eq!(
+        client.get_split_count(&jar_id),
+        client.get_jar(&jar_id).splits.len()
+    );
+}
+
+/// `update_splits` replaces the stored vector, so the count must follow it both
+/// upwards and back down rather than serving a cached length.
+#[test]
+fn get_split_count_follows_update_splits() {
+    let s = setup();
+    let env = &s.env;
+    let client = TipSplitterClient::new(env, &s.contract);
+
+    let owner = Address::generate(env);
+    let alice = Address::generate(env);
+    let bob = Address::generate(env);
+    let carol = Address::generate(env);
+    let jar_id = String::from_str(env, "@growing");
+
+    client.create_jar(
+        &owner,
+        &jar_id,
+        &vec![
+            env,
+            Split {
+                to: alice.clone(),
+                bps: 10000,
+            },
+        ],
+    );
+    assert_eq!(client.get_split_count(&jar_id), 1);
+
+    client.update_splits(
+        &jar_id,
+        &vec![
+            env,
+            Split {
+                to: alice.clone(),
+                bps: 4000,
+            },
+            Split {
+                to: bob.clone(),
+                bps: 4000,
+            },
+            Split {
+                to: carol.clone(),
+                bps: 2000,
+            },
+        ],
+    );
+    assert_eq!(client.get_split_count(&jar_id), 3);
+
+    // Shrinking the list must lower the count too.
+    client.update_splits(
+        &jar_id,
+        &vec![
+            env,
+            Split {
+                to: alice.clone(),
+                bps: 5000,
+            },
+            Split {
+                to: bob.clone(),
+                bps: 5000,
+            },
+        ],
+    );
+    assert_eq!(client.get_split_count(&jar_id), 2);
+}
+
+/// An unregistered slug is a `JarNotFound` panic, not `0` — a zero count would
+/// be indistinguishable from a jar, and no stored jar can have zero splits.
+#[test]
+fn get_split_count_on_missing_jar_fails() {
+    let s = setup();
+    let env = &s.env;
+    let client = TipSplitterClient::new(env, &s.contract);
+
+    let res = client.try_get_split_count(&String::from_str(env, "@ghost"));
+    assert_eq!(res, Err(Ok(Error::JarNotFound.into())));
+}
+
+/// The preview is the payout: the numbers a client shows before signing must
+/// be the balances the tip actually produces.
+#[test]
+fn preview_split_matches_what_tip_pays() {
+    let s = setup();
+    let env = &s.env;
+    let client = TipSplitterClient::new(env, &s.contract);
+    let token = token::Client::new(env, &s.token);
+    let token_admin = token::StellarAssetClient::new(env, &s.token);
+
+    let owner = Address::generate(env);
+    let alice = Address::generate(env);
+    let bob = Address::generate(env);
+    let tipper = Address::generate(env);
+    token_admin.mint(&tipper, &1_000);
+
+    let jar_id = String::from_str(env, "@preview");
+    client.create_jar(
+        &owner,
+        &jar_id,
+        &vec![
+            env,
+            Split {
+                to: alice.clone(),
+                bps: 7000,
+            },
+            Split {
+                to: bob.clone(),
+                bps: 3000,
+            },
+        ],
+    );
+
+    let preview = client.preview_split(&jar_id, &101);
+    assert_eq!(preview, vec![env, 70_i128, 31_i128]);
+
+    client.tip(
+        &tipper,
+        &jar_id,
+        &101,
+        &String::from_str(env, "here you go"),
+    );
+
+    assert_eq!(token.balance(&alice), preview.get(0).unwrap());
+    assert_eq!(token.balance(&bob), preview.get(1).unwrap());
+}
+
+/// A single-recipient jar previews the whole amount, with no dust to place.
+#[test]
+fn preview_split_single_recipient_gets_everything() {
+    let s = setup();
+    let env = &s.env;
+    let client = TipSplitterClient::new(env, &s.contract);
+
+    let owner = Address::generate(env);
+    let alice = Address::generate(env);
+    let jar_id = String::from_str(env, "@onlyme");
+
+    client.create_jar(
+        &owner,
+        &jar_id,
+        &vec![
+            env,
+            Split {
+                to: alice.clone(),
+                bps: 10000,
+            },
+        ],
+    );
+
+    assert_eq!(client.preview_split(&jar_id, &7), vec![env, 7_i128]);
+}
+
+/// Thirds over amounts that do not divide cleanly: the shares must still sum to
+/// exactly the amount, with the truncated remainder landing on the last
+/// recipient. These are the amounts where a client's own arithmetic would
+/// most easily drift from the contract's.
+#[test]
+fn preview_split_shares_sum_to_amount_for_awkward_amounts() {
+    let s = setup();
+    let env = &s.env;
+    let client = TipSplitterClient::new(env, &s.contract);
+
+    let owner = Address::generate(env);
+    let jar_id = String::from_str(env, "@thirds");
+
+    // 3333 / 3333 / 3334 — the classic non-terminating split.
+    client.create_jar(
+        &owner,
+        &jar_id,
+        &vec![
+            env,
+            Split {
+                to: Address::generate(env),
+                bps: 3333,
+            },
+            Split {
+                to: Address::generate(env),
+                bps: 3333,
+            },
+            Split {
+                to: Address::generate(env),
+                bps: 3334,
+            },
+        ],
+    );
+
+    for amount in [10_i128, 11, 99, 100, 101, 7_777, 1_000_003] {
+        let shares = client.preview_split(&jar_id, &amount);
+        assert_eq!(shares.len(), 3, "one share per recipient");
+
+        let mut total: i128 = 0;
+        for i in 0..shares.len() {
+            let share = shares.get(i).unwrap();
+            assert!(share > 0, "every recipient must get something at {amount}");
+            total += share;
+        }
+        assert_eq!(total, amount, "shares must sum to exactly {amount}");
+    }
+
+    // Spot-check the dust placement rather than only the invariant: at 100,
+    // truncation leaves 1 over and the final recipient absorbs it.
+    assert_eq!(
+        client.preview_split(&jar_id, &100),
+        vec![env, 33_i128, 33_i128, 34_i128]
+    );
+}
+
+/// The preview must follow `update_splits`, or a client would quote shares for
+/// a line-up the contract no longer has.
+#[test]
+fn preview_split_follows_update_splits() {
+    let s = setup();
+    let env = &s.env;
+    let client = TipSplitterClient::new(env, &s.contract);
+
+    let owner = Address::generate(env);
+    let alice = Address::generate(env);
+    let bob = Address::generate(env);
+    let jar_id = String::from_str(env, "@requoted");
+
+    client.create_jar(
+        &owner,
+        &jar_id,
+        &vec![
+            env,
+            Split {
+                to: alice.clone(),
+                bps: 10000,
+            },
+        ],
+    );
+    assert_eq!(client.preview_split(&jar_id, &100), vec![env, 100_i128]);
+
+    client.update_splits(
+        &jar_id,
+        &vec![
+            env,
+            Split {
+                to: alice.clone(),
+                bps: 2500,
+            },
+            Split {
+                to: bob.clone(),
+                bps: 7500,
+            },
+        ],
+    );
+    assert_eq!(
+        client.preview_split(&jar_id, &100),
+        vec![env, 25_i128, 75_i128]
+    );
+}
+
+/// A preview that returns at all must describe a tip that can go through, so
+/// it rejects exactly the amounts `tip` rejects.
+#[test]
+fn preview_split_rejects_amounts_tip_would_reject() {
+    let s = setup();
+    let env = &s.env;
+    let client = TipSplitterClient::new(env, &s.contract);
+
+    let owner = Address::generate(env);
+    let alice = Address::generate(env);
+    let bob = Address::generate(env);
+    let jar_id = String::from_str(env, "@strict");
+
+    client.create_jar(
+        &owner,
+        &jar_id,
+        &vec![
+            env,
+            Split {
+                to: alice.clone(),
+                bps: 9900,
+            },
+            Split {
+                to: bob.clone(),
+                bps: 100,
+            },
+        ],
+    );
+
+    assert_eq!(
+        client.try_preview_split(&jar_id, &0),
+        Err(Ok(Error::InvalidAmount.into()))
+    );
+    assert_eq!(
+        client.try_preview_split(&jar_id, &-5),
+        Err(Ok(Error::InvalidAmount.into()))
+    );
+    // bps 100 truncates to zero below 100, which `tip` refuses to pay.
+    assert_eq!(
+        client.try_preview_split(&jar_id, &99),
+        Err(Ok(Error::InvalidAmount.into()))
+    );
+    assert!(client
+        .try_tip(
+            &Address::generate(env),
+            &jar_id,
+            &99,
+            &String::from_str(env, "too small")
+        )
+        .is_err());
+    // 100 is the first amount that pays everyone.
+    assert_eq!(
+        client.preview_split(&jar_id, &100),
+        vec![env, 99_i128, 1_i128]
+    );
+}
+
+/// An unregistered slug is a `JarNotFound` panic, matching `get_jar` — an
+/// empty vector would read as a jar that pays nobody.
+#[test]
+fn preview_split_on_missing_jar_fails() {
+    let s = setup();
+    let env = &s.env;
+    let client = TipSplitterClient::new(env, &s.contract);
+
+    let res = client.try_preview_split(&String::from_str(env, "@ghost"), &100);
+    assert_eq!(res, Err(Ok(Error::JarNotFound.into())));
+}
+
 #[test]
 fn tip_on_missing_jar_fails() {
     let s = setup();
