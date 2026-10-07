@@ -32,7 +32,7 @@ struct Limits { bps_denom: u32, max_recipients: u32, max_message_len: u32 }
 | `__constructor(admin, token)` | — | Deploy-time init. Stores the admin and USDC token address. |
 | `create_jar(owner, jar_id, splits)` | `owner` | Register a new jar. Fails if the slug is empty, over `MAX_JAR_ID_LEN` bytes, already exists, or splits are invalid. Emits a `jar_crtd` event. |
 | `update_splits(jar_id, splits)` | jar `owner` | Replace a jar's splits. Subject to the same validation as `create_jar`. Emits a `splits` event. |
-| `transfer_jar_ownership(jar_id, new_owner)` | current jar `owner` | Hand control of a jar to `new_owner`. Splits are unchanged; the new owner does not need to authorize. Emits a `jar_xfer` event. |
+| `transfer_jar_ownership(jar_id, new_owner)` | current jar `owner` | Hand control of a jar to `new_owner`. Splits are unchanged; the new owner does not need to authorize. Emits a `jar_xfer` event carrying both owners. |
 | `tip(from, jar_id, amount, message)` | `from` | Transfer `amount` USDC from `from`, split across the jar's recipients. Emits a `tip` event carrying the per-recipient breakdown. |
 | `get_jar(jar_id) -> Jar` | — | Read a jar's configuration. Panics with `JarNotFound` if the slug is free. |
 | `jar_exists(jar_id) -> bool` | — | Whether the slug is already registered. |
@@ -228,10 +228,28 @@ having to re-poll every jar on a schedule. The indexer refetches the jar via
 ### `jar_xfer` — published on every successful `transfer_jar_ownership`
 
 - **Topics:** `(symbol "jar_xfer", jar_id: String)`
-- **Data:** `new_owner: Address`
+- **Data:** `(prev_owner: Address, new_owner: Address)`
 
 Lets an indexer update who controls a jar without re-polling `get_jar` for
 every jar on a schedule.
+
+Both ends of the move are published, in that order, so each event is
+independently meaningful. With only the new owner, a consumer replaying the log
+could see where a jar went but not where it came from, unless it had already
+indexed every prior event for that jar and kept the running state — which an
+indexer starting from a partial history has not. Carrying `prev_owner` also
+means successive transfers chain: each event's `prev_owner` is the previous
+event's `new_owner`, so an ownership history can be reconstructed from the
+events alone.
+
+`prev_owner` is the address that authorized the call — only the current owner
+may transfer a jar — and is always different from `new_owner` in practice,
+though the contract does not reject a transfer to the existing owner. Splits
+are unchanged by a transfer, so no `splits` event accompanies this one.
+
+> **Consumer impact.** The data was a bare `Address` and is now a
+> two-element tuple. A decoder that reads it as a single address must be
+> updated before it reads events from a contract built from this version.
 
 ### `tip` — published on every successful tip
 

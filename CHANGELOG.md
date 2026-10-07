@@ -21,6 +21,11 @@ All notable changes to `novatip-contracts` are documented here.
   jar's splits changed between the tip and the read. A positional decoder
   (`decodeTipEvent` in `@novatip/sdk`, the backend indexer) must be updated to
   accept the fourth element; the first three keep their positions and meaning
+- The `jar_xfer` event's data changed from a bare `new_owner: Address` to
+  `(prev_owner, new_owner)`, so each event says where a jar came from as well
+  as where it went. An indexer starting from a partial history no longer needs
+  the running state to interpret one, and successive transfers chain. A
+  decoder reading the data as a single address must be updated
 
 ### Fixed
 - `extend_ttl` was called with two arguments where the SDK takes three
