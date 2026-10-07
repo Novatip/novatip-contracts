@@ -32,14 +32,16 @@ struct Limits { bps_denom: u32, max_recipients: u32, max_message_len: u32 }
 | `__constructor(admin, token)` | — | Deploy-time init. Stores the admin and USDC token address. |
 | `create_jar(owner, jar_id, splits)` | `owner` | Register a new jar. Fails if the slug is empty, over `MAX_JAR_ID_LEN` bytes, already exists, or splits are invalid. Emits a `jar_crtd` event. |
 | `update_splits(jar_id, splits)` | jar `owner` | Replace a jar's splits. Subject to the same validation as `create_jar`. Emits a `splits` event. |
+| `set_min_tip_amount(jar_id, min_amount)` | jar `owner` | Set or clear an optional minimum tip amount for a jar. `min_amount` must be strictly positive (`> 0`) or `None` to clear. Emits a `min_tip` event. |
 | `transfer_jar_ownership(jar_id, new_owner)` | current jar `owner` | Hand control of a jar to `new_owner`. Splits are unchanged; the new owner does not need to authorize. Emits a `jar_xfer` event carrying both owners. |
-| `tip(from, jar_id, amount, message)` | `from` | Transfer `amount` USDC from `from`, split across the jar's recipients. Emits a `tip` event carrying the per-recipient breakdown. |
+| `tip(from, jar_id, amount, message)` | `from` | Transfer `amount` USDC from `from`, split across the jar's recipients. Emits a `tip` event carrying the per-recipient breakdown. Rejects amounts below the jar's minimum with `BelowMinTipAmount`. |
 | `get_jar(jar_id) -> Jar` | — | Read a jar's configuration. Panics with `JarNotFound` if the slug is free. |
 | `get_jar_owner(jar_id) -> Address` | — | Read just a jar's owner. Panics with `JarNotFound` if the slug is free. |
 | `get_split_count(jar_id) -> u32` | — | How many recipients a jar pays. Panics with `JarNotFound` if the slug is free. |
-| `preview_split(jar_id, amount) -> Vec<i128>` | — | What each recipient would receive from a tip of `amount`, in split order. Rejects the amounts `tip` rejects; panics with `JarNotFound` if the slug is free. |
+| `preview_split(jar_id, amount) -> Vec<i128>` | — | What each recipient would receive from a tip of `amount`, in split order. Rejects amounts below the jar's minimum with `BelowMinTipAmount` as well as the amounts `tip` rejects; panics with `JarNotFound` if the slug is free. |
 | `jar_exists(jar_id) -> bool` | — | Whether the slug is already registered. |
 | `is_recipient(jar_id, address) -> bool` | — | Whether `address` appears in the jar's splits. Panics with `JarNotFound` if the slug is free. |
+| `get_min_tip_amount(jar_id) -> Option<i128>` | — | Read a jar's optional minimum tip amount. Returns `None` if no minimum is set. Panics with `JarNotFound` if the slug is free. |
 | `get_token() -> Address` | — | The USDC token address tips settle in. |
 | `get_admin() -> Address` | — | The contract admin recorded at deploy time. |
 | `get_limits() -> Limits` | — | The bounds this contract enforces: `bps_denom`, `max_recipients`, `max_message_len`. Reads no storage. |
@@ -172,6 +174,25 @@ The `tip` event's [`breakdown`](#tip--published-on-every-successful-tip) does
 know who tipped, so it is the authoritative record of what each recipient was
 actually paid.
 
+### Setting a minimum tip amount
+
+A creator can opt out of micro-dust tips by setting an optional floor on their jar.
+By default, jars have no minimum tip amount (`None`), accepting any positive amount.
+
+`set_min_tip_amount(jar_id, min_amount)` lets the jar owner configure an optional
+minimum tip amount (`Some(amount)` where `amount > 0`) or clear it (`None`). Only the
+jar owner may authorize this call. Passing a non-positive amount (`<= 0`) panics with
+`InvalidAmount` (error code 5).
+
+When a minimum is configured, any tip with `amount < min_amount` is rejected with
+`BelowMinTipAmount` (error code 13) before any tokens move or events emit. `preview_split`
+similarly rejects amounts below the minimum with `BelowMinTipAmount`.
+
+`get_min_tip_amount(jar_id)` reads the configured floor:
+- Returns `None` if no minimum is set (the default for all newly created jars).
+- Returns `Some(amount)` if a minimum floor has been configured.
+- Panics with `JarNotFound` (error code 3) if the slug is not registered.
+
 ### Checking slug availability
 
 `jar_exists` is the intended way to test whether a slug is taken. The
@@ -270,6 +291,7 @@ the code, so flipping that profile setting cannot turn it into a bypass.
 | 10 | `SplitsEmpty` | The splits list is empty. |
 | 11 | `SplitOutOfRange` | An entry has `bps == 0` or `bps > 10_000`. Checked per entry, before the sum. |
 | 12 | `SplitSumNot100Pct` | The shares sum to something other than exactly 10 000 bps, including a sum that would overflow `u32`. |
+| 13 | `BelowMinTipAmount` | Tip amount is strictly below the jar's configured minimum tip amount. Raised by `tip` and `preview_split`. |
 
 Error codes are part of the public interface: `@novatip/sdk` and the frontend
 both map these numbers to user-facing messages. New variants are **appended**
@@ -326,6 +348,13 @@ are unchanged by a transfer, so no `splits` event accompanies this one.
 > **Consumer impact.** The data was a bare `Address` and is now a
 > two-element tuple. A decoder that reads it as a single address must be
 > updated before it reads events from a contract built from this version.
+
+### `min_tip` — published on every successful `set_min_tip_amount`
+
+- **Topics:** `(symbol "min_tip", jar_id: String)`
+- **Data:** `min_amount: Option<i128>`
+
+Lets indexers track the current minimum tip floor for a jar without polling `get_min_tip_amount`.
 
 ### `tip` — published on every successful tip
 

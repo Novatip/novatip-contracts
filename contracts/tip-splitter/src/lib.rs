@@ -105,6 +105,8 @@ pub enum DataKey {
     Token,
     /// A tip jar keyed by its public slug, e.g. "@alice".
     Jar(String),
+    /// Optional minimum tip amount for a jar keyed by its public slug.
+    MinTip(String),
 }
 
 #[contracterror]
@@ -126,6 +128,8 @@ pub enum Error {
     SplitOutOfRange = 11,
     /// Splits sum to something other than 10 000 bps.
     SplitSumNot100Pct = 12,
+    /// Tip amount is below the jar's configured minimum tip amount.
+    BelowMinTipAmount = 13,
 }
 
 #[contract]
@@ -226,6 +230,44 @@ impl TipSplitter {
             .publish((symbol_short!("jar_xfer"), jar_id), (prev_owner, new_owner));
     }
 
+    /// Set an optional minimum tip amount for a jar. Only the jar owner may do this.
+    ///
+    /// If `min_amount` is `Some(amount)`, `amount` must be strictly positive (`> 0`).
+    /// Passing `None` clears any previously set minimum tip amount.
+    ///
+    /// Emits a `min_tip` event carrying the jar slug and the configured minimum.
+    pub fn set_min_tip_amount(env: Env, jar_id: String, min_amount: Option<i128>) {
+        let key = DataKey::Jar(jar_id.clone());
+        let jar: Jar = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .unwrap_or_else(|| panic_with_error!(&env, Error::JarNotFound));
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, JAR_TTL_THRESHOLD, JAR_TTL_LEDGERS);
+        jar.owner.require_auth();
+
+        let min_key = DataKey::MinTip(jar_id.clone());
+        match min_amount {
+            Some(amount) => {
+                if amount <= 0 {
+                    panic_with_error!(&env, Error::InvalidAmount);
+                }
+                env.storage().persistent().set(&min_key, &amount);
+                env.storage()
+                    .persistent()
+                    .extend_ttl(&min_key, JAR_TTL_THRESHOLD, JAR_TTL_LEDGERS);
+            }
+            None => {
+                env.storage().persistent().remove(&min_key);
+            }
+        }
+
+        env.events()
+            .publish((symbol_short!("min_tip"), jar_id), min_amount);
+    }
+
     /// Send a tip. Transfers `amount` of USDC from `from`, split across the jar's
     /// recipients atomically, then emits a `("tip", jar_id)` event carrying the
     /// sender, the total, the message, and the per-recipient breakdown in split
@@ -248,6 +290,17 @@ impl TipSplitter {
             .persistent()
             .get(&jar_key)
             .unwrap_or_else(|| panic_with_error!(&env, Error::JarNotFound));
+
+        // Enforce optional per-jar minimum tip amount if configured
+        let min_key = DataKey::MinTip(jar_id.clone());
+        if let Some(min_amount) = env.storage().persistent().get::<DataKey, i128>(&min_key) {
+            if amount < min_amount {
+                panic_with_error!(&env, Error::BelowMinTipAmount);
+            }
+            env.storage()
+                .persistent()
+                .extend_ttl(&min_key, JAR_TTL_THRESHOLD, JAR_TTL_LEDGERS);
+        }
 
         // Bump the jar's storage entry so a jar that is tipped regularly
         // is never archived, and a jar idle for a few years still works.
@@ -392,7 +445,7 @@ impl TipSplitter {
     /// client whose connected wallet appears in the splits should account for
     /// that itself.
     pub fn preview_split(env: Env, jar_id: String, amount: i128) -> Vec<i128> {
-        let key = DataKey::Jar(jar_id);
+        let key = DataKey::Jar(jar_id.clone());
         let jar: Jar = env
             .storage()
             .persistent()
@@ -401,7 +454,41 @@ impl TipSplitter {
         env.storage()
             .persistent()
             .extend_ttl(&key, JAR_TTL_THRESHOLD, JAR_TTL_LEDGERS);
+
+        let min_key = DataKey::MinTip(jar_id);
+        if let Some(min_amount) = env.storage().persistent().get::<DataKey, i128>(&min_key) {
+            if amount < min_amount {
+                panic_with_error!(&env, Error::BelowMinTipAmount);
+            }
+            env.storage()
+                .persistent()
+                .extend_ttl(&min_key, JAR_TTL_THRESHOLD, JAR_TTL_LEDGERS);
+        }
+
         Self::compute_shares(&env, &jar.splits, amount)
+    }
+
+    /// Read a jar's optional minimum tip amount.
+    ///
+    /// Returns `Some(amount)` if a minimum is set, or `None` if no minimum is configured.
+    /// Panics with `JarNotFound` if the slug is not registered.
+    pub fn get_min_tip_amount(env: Env, jar_id: String) -> Option<i128> {
+        let key = DataKey::Jar(jar_id.clone());
+        if !env.storage().persistent().has(&key) {
+            panic_with_error!(&env, Error::JarNotFound);
+        }
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, JAR_TTL_THRESHOLD, JAR_TTL_LEDGERS);
+
+        let min_key = DataKey::MinTip(jar_id);
+        let min_amount: Option<i128> = env.storage().persistent().get(&min_key);
+        if min_amount.is_some() {
+            env.storage()
+                .persistent()
+                .extend_ttl(&min_key, JAR_TTL_THRESHOLD, JAR_TTL_LEDGERS);
+        }
+        min_amount
     }
 
     /// Whether `jar_id` is already registered.

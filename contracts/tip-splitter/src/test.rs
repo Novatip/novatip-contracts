@@ -2676,6 +2676,247 @@ fn get_admin_returns_constructor_admin() {
     assert_eq!(client.get_admin(), s.admin);
 }
 
+#[test]
+fn set_min_tip_amount_sets_and_reads_minimum() {
+    let s = setup();
+    let env = &s.env;
+    let client = TipSplitterClient::new(env, &s.contract);
+
+    let owner = Address::generate(env);
+    let alice = Address::generate(env);
+    let jar_id = String::from_str(env, "@creators");
+    client.create_jar(
+        &owner,
+        &jar_id,
+        &vec![
+            env,
+            Split {
+                to: alice.clone(),
+                bps: 10000,
+            },
+        ],
+    );
+
+    // Initial state: no minimum configured
+    assert_eq!(client.get_min_tip_amount(&jar_id), None);
+
+    // Set minimum to 500
+    client.set_min_tip_amount(&jar_id, &Some(500_i128));
+    assert_eq!(client.get_min_tip_amount(&jar_id), Some(500_i128));
+
+    // Clear minimum by passing None
+    client.set_min_tip_amount(&jar_id, &None);
+    assert_eq!(client.get_min_tip_amount(&jar_id), None);
+}
+
+#[test]
+fn set_min_tip_amount_emits_event() {
+    let s = setup();
+    let env = &s.env;
+    let client = TipSplitterClient::new(env, &s.contract);
+
+    let owner = Address::generate(env);
+    let alice = Address::generate(env);
+    let jar_id = String::from_str(env, "@eventjar");
+    client.create_jar(
+        &owner,
+        &jar_id,
+        &vec![
+            env,
+            Split {
+                to: alice.clone(),
+                bps: 10000,
+            },
+        ],
+    );
+
+    client.set_min_tip_amount(&jar_id, &Some(250_i128));
+
+    let expected_topics = vec![
+        env,
+        symbol_short!("min_tip").into_val(env),
+        jar_id.clone().into_val(env),
+    ];
+    let min_events: std::vec::Vec<_> = env
+        .events()
+        .all()
+        .iter()
+        .filter(|e| e.0 == s.contract && e.1 == expected_topics)
+        .collect();
+    assert_eq!(min_events.len(), 1);
+    let (_, _, data) = min_events.first().unwrap();
+    let decoded: Option<i128> = TryFromVal::try_from_val(env, data).expect("min_tip event data");
+    assert_eq!(decoded, Some(250_i128));
+}
+
+#[test]
+fn set_min_tip_amount_requires_owner_auth() {
+    let s = setup();
+    let env = &s.env;
+    let client = TipSplitterClient::new(env, &s.contract);
+
+    let owner = Address::generate(env);
+    let alice = Address::generate(env);
+    let non_owner = Address::generate(env);
+    let jar_id = String::from_str(env, "@authcheck");
+    client.create_jar(
+        &owner,
+        &jar_id,
+        &vec![
+            env,
+            Split {
+                to: alice.clone(),
+                bps: 10000,
+            },
+        ],
+    );
+
+    env.mock_auths(&[MockAuth {
+        address: &non_owner,
+        invoke: &MockAuthInvoke {
+            contract: &s.contract,
+            fn_name: "set_min_tip_amount",
+            args: (jar_id.clone(), Some(100_i128)).into_val(env),
+            sub_invokes: &[],
+        },
+    }]);
+
+    let res = client.try_set_min_tip_amount(&jar_id, &Some(100_i128));
+    assert!(res.is_err());
+    assert_eq!(client.get_min_tip_amount(&jar_id), None);
+}
+
+#[test]
+fn set_min_tip_amount_rejects_non_positive_amount() {
+    let s = setup();
+    let env = &s.env;
+    let client = TipSplitterClient::new(env, &s.contract);
+
+    let owner = Address::generate(env);
+    let alice = Address::generate(env);
+    let jar_id = String::from_str(env, "@nonpos");
+    client.create_jar(
+        &owner,
+        &jar_id,
+        &vec![
+            env,
+            Split {
+                to: alice.clone(),
+                bps: 10000,
+            },
+        ],
+    );
+
+    let res_zero = client.try_set_min_tip_amount(&jar_id, &Some(0_i128));
+    assert_eq!(res_zero, Err(Ok(Error::InvalidAmount.into())));
+
+    let res_neg = client.try_set_min_tip_amount(&jar_id, &Some(-50_i128));
+    assert_eq!(res_neg, Err(Ok(Error::InvalidAmount.into())));
+}
+
+#[test]
+fn set_min_tip_amount_on_missing_jar_fails() {
+    let s = setup();
+    let env = &s.env;
+    let client = TipSplitterClient::new(env, &s.contract);
+
+    let jar_id = String::from_str(env, "@ghost");
+    let res = client.try_set_min_tip_amount(&jar_id, &Some(100_i128));
+    assert_eq!(res, Err(Ok(Error::JarNotFound.into())));
+}
+
+#[test]
+fn get_min_tip_amount_on_missing_jar_fails() {
+    let s = setup();
+    let env = &s.env;
+    let client = TipSplitterClient::new(env, &s.contract);
+
+    let jar_id = String::from_str(env, "@ghost");
+    let res = client.try_get_min_tip_amount(&jar_id);
+    assert_eq!(res, Err(Ok(Error::JarNotFound.into())));
+}
+
+#[test]
+fn tip_enforces_minimum_tip_amount() {
+    let s = setup();
+    let env = &s.env;
+    let client = TipSplitterClient::new(env, &s.contract);
+    let token = token::Client::new(env, &s.token);
+    let token_admin = token::StellarAssetClient::new(env, &s.token);
+
+    let owner = Address::generate(env);
+    let alice = Address::generate(env);
+    let tipper = Address::generate(env);
+    token_admin.mint(&tipper, &10_000);
+
+    let jar_id = String::from_str(env, "@floorjar");
+    client.create_jar(
+        &owner,
+        &jar_id,
+        &vec![
+            env,
+            Split {
+                to: alice.clone(),
+                bps: 10000,
+            },
+        ],
+    );
+
+    // Set minimum to 500
+    client.set_min_tip_amount(&jar_id, &Some(500_i128));
+
+    // Tip below minimum (499) must fail with BelowMinTipAmount
+    let res_low = client.try_tip(&tipper, &jar_id, &499_i128, &String::from_str(env, "small"));
+    assert_eq!(res_low, Err(Ok(Error::BelowMinTipAmount.into())));
+
+    // Tip at exact minimum (500) must succeed
+    let res_exact = client.try_tip(&tipper, &jar_id, &500_i128, &String::from_str(env, "exact"));
+    assert!(res_exact.is_ok());
+    assert_eq!(token.balance(&alice), 500);
+
+    // Tip above minimum (1000) must succeed
+    let res_above = client.try_tip(
+        &tipper,
+        &jar_id,
+        &1000_i128,
+        &String::from_str(env, "above"),
+    );
+    assert!(res_above.is_ok());
+    assert_eq!(token.balance(&alice), 1500);
+}
+
+#[test]
+fn preview_split_enforces_minimum_tip_amount() {
+    let s = setup();
+    let env = &s.env;
+    let client = TipSplitterClient::new(env, &s.contract);
+
+    let owner = Address::generate(env);
+    let alice = Address::generate(env);
+    let jar_id = String::from_str(env, "@previewmin");
+    client.create_jar(
+        &owner,
+        &jar_id,
+        &vec![
+            env,
+            Split {
+                to: alice.clone(),
+                bps: 10000,
+            },
+        ],
+    );
+
+    client.set_min_tip_amount(&jar_id, &Some(100_i128));
+
+    // Preview below minimum must fail with BelowMinTipAmount
+    let res_low = client.try_preview_split(&jar_id, &99_i128);
+    assert_eq!(res_low, Err(Ok(Error::BelowMinTipAmount.into())));
+
+    // Preview at exact minimum succeeds
+    let res_exact = client.try_preview_split(&jar_id, &100_i128);
+    assert!(res_exact.is_ok());
+}
+
 /// A random valid bps distribution over `n` recipients: every share is at
 /// least 1 and the shares sum to exactly `BPS_DENOM`, mirroring what
 /// `validate_splits` requires.
