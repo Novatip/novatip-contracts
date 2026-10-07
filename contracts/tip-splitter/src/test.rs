@@ -1646,6 +1646,109 @@ fn transfer_jar_ownership_moves_control_to_new_owner() {
     );
 }
 
+/// Reads the `(prev_owner, new_owner)` pair out of the `jar_xfer` event for
+/// `jar_id`. The test env's event buffer only retains the most recent
+/// invocation's events, so this is called straight after each transfer.
+fn jar_xfer_owners(env: &Env, contract: &Address, jar_id: &String) -> (Address, Address) {
+    let expected_topics = vec![
+        env,
+        symbol_short!("jar_xfer").into_val(env),
+        jar_id.into_val(env),
+    ];
+    let events: std::vec::Vec<_> = env
+        .events()
+        .all()
+        .iter()
+        .filter(|e| e.0 == *contract && e.1 == expected_topics)
+        .collect();
+    assert_eq!(events.len(), 1, "expected exactly one jar_xfer event");
+    let (_, _, data) = events.first().unwrap();
+    TryFromVal::try_from_val(env, data).expect("jar_xfer event data shape")
+}
+
+/// The `jar_xfer` event must name both ends of the move. An indexer replaying a
+/// partial event log can then see where a jar came from as well as where it
+/// went, without having already indexed every prior event for that jar.
+#[test]
+fn transfer_jar_ownership_emits_jar_xfer_event_with_both_owners() {
+    let s = setup();
+    let env = &s.env;
+    let client = TipSplitterClient::new(env, &s.contract);
+
+    let owner = Address::generate(env);
+    let new_owner = Address::generate(env);
+    let alice = Address::generate(env);
+
+    let jar_id = String::from_str(env, "@xfer");
+    client.create_jar(
+        &owner,
+        &jar_id,
+        &vec![
+            env,
+            Split {
+                to: alice.clone(),
+                bps: 10000,
+            },
+        ],
+    );
+
+    client.transfer_jar_ownership(&jar_id, &new_owner);
+
+    let decoded = jar_xfer_owners(env, &s.contract, &jar_id);
+    assert_eq!(
+        decoded,
+        (owner.clone(), new_owner.clone()),
+        "the payload is (prev_owner, new_owner), in that order"
+    );
+    // The two must not be confusable: the first is the address that no longer
+    // controls the jar, the second is the one that does.
+    assert_ne!(decoded.0, decoded.1);
+    assert_eq!(client.get_jar(&jar_id).owner, new_owner);
+}
+
+/// A second hand-off reports the first recipient as the outgoing owner, so a
+/// consumer can chain the events into a complete ownership history rather than
+/// seeing two disconnected arrivals.
+#[test]
+fn jar_xfer_events_chain_across_successive_transfers() {
+    let s = setup();
+    let env = &s.env;
+    let client = TipSplitterClient::new(env, &s.contract);
+
+    let first = Address::generate(env);
+    let second = Address::generate(env);
+    let third = Address::generate(env);
+    let alice = Address::generate(env);
+
+    let jar_id = String::from_str(env, "@chain");
+    client.create_jar(
+        &first,
+        &jar_id,
+        &vec![
+            env,
+            Split {
+                to: alice.clone(),
+                bps: 10000,
+            },
+        ],
+    );
+
+    client.transfer_jar_ownership(&jar_id, &second);
+    assert_eq!(
+        jar_xfer_owners(env, &s.contract, &jar_id),
+        (first, second.clone())
+    );
+
+    client.transfer_jar_ownership(&jar_id, &third);
+    assert_eq!(
+        jar_xfer_owners(env, &s.contract, &jar_id),
+        (second, third.clone()),
+        "the second event's prev_owner must be the first event's new_owner"
+    );
+
+    assert_eq!(client.get_jar(&jar_id).owner, third);
+}
+
 /// `tip` moves the sender's tokens, so it must carry the sender's signature.
 ///
 /// The mock here authorizes *only* the token `transfer` the contract makes on
