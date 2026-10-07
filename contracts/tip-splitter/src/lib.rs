@@ -323,6 +323,39 @@ impl TipSplitter {
         env.storage().persistent().has(&DataKey::Jar(jar_id))
     }
 
+    /// Whether `address` appears in the jar's splits.
+    ///
+    /// A collaborator added to someone else's jar would otherwise have to
+    /// fetch the whole jar and scan the split vector for their own address,
+    /// which is awkward from a wallet or a one-line script. This reads the
+    /// same single storage key and answers the question directly.
+    ///
+    /// Ownership is a separate thing: a jar owner who is not also a recipient
+    /// gets `false`, because they receive no share of a tip. Check
+    /// `get_jar(jar_id).owner` for control.
+    ///
+    /// Panics with `JarNotFound` if the slug is not registered, matching
+    /// `get_jar`. A missing jar is not the same answer as "not a recipient",
+    /// and conflating the two would hide a typo'd slug; use `jar_exists` to
+    /// test registration.
+    pub fn is_recipient(env: Env, jar_id: String, address: Address) -> bool {
+        let key = DataKey::Jar(jar_id);
+        let jar: Jar = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .unwrap_or_else(|| panic_with_error!(&env, Error::JarNotFound));
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, JAR_TTL_THRESHOLD, JAR_TTL_LEDGERS);
+        for i in 0..jar.splits.len() {
+            if jar.splits.get(i).unwrap().to == address {
+                return true;
+            }
+        }
+        false
+    }
+
     /// The contract admin recorded at deploy time.
     pub fn get_admin(env: Env) -> Address {
         env.storage()

@@ -1745,6 +1745,137 @@ fn create_jar_accepts_jar_id_at_exact_limit() {
     assert_eq!(client.get_jar(&exact).splits.len(), 1);
 }
 
+/// A collaborator's own membership check: a listed recipient gets `true`, an
+/// address nowhere in the splits gets `false`, and the jar owner gets `false`
+/// when they take no share — owning a jar and being paid by it are separate
+/// things.
+#[test]
+fn is_recipient_distinguishes_recipients_owner_and_strangers() {
+    let s = setup();
+    let env = &s.env;
+    let client = TipSplitterClient::new(env, &s.contract);
+
+    let owner = Address::generate(env);
+    let alice = Address::generate(env);
+    let bob = Address::generate(env);
+    let stranger = Address::generate(env);
+
+    let jar_id = String::from_str(env, "@collab");
+    client.create_jar(
+        &owner,
+        &jar_id,
+        &vec![
+            env,
+            Split {
+                to: alice.clone(),
+                bps: 6000,
+            },
+            Split {
+                to: bob.clone(),
+                bps: 4000,
+            },
+        ],
+    );
+
+    // Listed recipients, in both the first and a later position.
+    assert!(client.is_recipient(&jar_id, &alice));
+    assert!(client.is_recipient(&jar_id, &bob));
+
+    // An address that is nowhere in the jar.
+    assert!(!client.is_recipient(&jar_id, &stranger));
+
+    // The owner, who takes no share of a tip here.
+    assert!(
+        !client.is_recipient(&jar_id, &owner),
+        "owning a jar is not the same as receiving a share of its tips"
+    );
+    assert_eq!(
+        client.get_jar(&jar_id).owner,
+        owner,
+        "the owner check lives on get_jar, not is_recipient"
+    );
+}
+
+/// An owner who is also listed in the splits gets `true` — the previous test
+/// asserts a `false` for an owner, so this pins down that the answer tracks the
+/// split vector rather than ownership.
+#[test]
+fn is_recipient_is_true_for_an_owner_who_is_also_a_recipient() {
+    let s = setup();
+    let env = &s.env;
+    let client = TipSplitterClient::new(env, &s.contract);
+
+    let owner = Address::generate(env);
+    let jar_id = String::from_str(env, "@solo");
+    client.create_jar(
+        &owner,
+        &jar_id,
+        &vec![
+            env,
+            Split {
+                to: owner.clone(),
+                bps: 10000,
+            },
+        ],
+    );
+
+    assert!(client.is_recipient(&jar_id, &owner));
+}
+
+/// `update_splits` replaces the recipient list, so membership must follow it —
+/// a dropped collaborator stops being a recipient and a new one starts.
+#[test]
+fn is_recipient_follows_update_splits() {
+    let s = setup();
+    let env = &s.env;
+    let client = TipSplitterClient::new(env, &s.contract);
+
+    let owner = Address::generate(env);
+    let alice = Address::generate(env);
+    let bob = Address::generate(env);
+
+    let jar_id = String::from_str(env, "@reshuffle");
+    client.create_jar(
+        &owner,
+        &jar_id,
+        &vec![
+            env,
+            Split {
+                to: alice.clone(),
+                bps: 10000,
+            },
+        ],
+    );
+    assert!(client.is_recipient(&jar_id, &alice));
+    assert!(!client.is_recipient(&jar_id, &bob));
+
+    client.update_splits(
+        &jar_id,
+        &vec![
+            env,
+            Split {
+                to: bob.clone(),
+                bps: 10000,
+            },
+        ],
+    );
+    assert!(!client.is_recipient(&jar_id, &alice));
+    assert!(client.is_recipient(&jar_id, &bob));
+}
+
+/// An unregistered slug is `JarNotFound`, not a quiet `false` — otherwise a
+/// typo'd jar id would look indistinguishable from a genuine non-membership.
+#[test]
+fn is_recipient_on_missing_jar_fails() {
+    let s = setup();
+    let env = &s.env;
+    let client = TipSplitterClient::new(env, &s.contract);
+
+    let alice = Address::generate(env);
+    let res = client.try_is_recipient(&String::from_str(env, "@nope"), &alice);
+    assert_eq!(res, Err(Ok(Error::JarNotFound.into())));
+}
+
 /// `get_limits` exists so clients stop hardcoding the contract's bounds. This
 /// asserts the view and the constants cannot drift apart: changing one without
 /// the other fails here.
