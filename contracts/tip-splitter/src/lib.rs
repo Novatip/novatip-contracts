@@ -81,6 +81,22 @@ pub struct Jar {
     pub splits: Vec<Split>,
 }
 
+/// The contract's hard bounds, returned by `get_limits`.
+///
+/// Clients that validate input before submitting a transaction need the same
+/// numbers the contract enforces. Shipping them as a view rather than as
+/// hardcoded client constants means a bound can only be changed in one place.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Limits {
+    /// 100% expressed in basis points, the denominator every `bps` is a share of.
+    pub bps_denom: u32,
+    /// Most recipients a single jar may split a tip across.
+    pub max_recipients: u32,
+    /// Longest tip message, in UTF-8 bytes.
+    pub max_message_len: u32,
+}
+
 #[contracttype]
 pub enum DataKey {
     /// Contract admin (deployer); reserved for future migrations.
@@ -180,7 +196,8 @@ impl TipSplitter {
 
     /// Transfer control of a jar to a new owner. Only the current owner may do
     /// this; the new owner does not need to authorize. Splits are unchanged.
-    /// Emits a `jar_xfer` event so indexers can update who controls the jar.
+    /// Emits a `jar_xfer` event carrying both the outgoing and the incoming
+    /// owner, so indexers can update who controls the jar.
     pub fn transfer_jar_ownership(env: Env, jar_id: String, new_owner: Address) {
         let key = DataKey::Jar(jar_id.clone());
         let jar: Jar = env
@@ -192,6 +209,7 @@ impl TipSplitter {
             .persistent()
             .extend_ttl(&key, JAR_TTL_THRESHOLD, JAR_TTL_LEDGERS);
         jar.owner.require_auth();
+        let prev_owner = jar.owner;
         env.storage().persistent().set(
             &key,
             &Jar {
@@ -200,12 +218,18 @@ impl TipSplitter {
             },
         );
 
+        // Both ends of the move, so the event is meaningful on its own. With
+        // only the new owner, an indexer starting from a partial history can
+        // see where a jar went but not where it came from, unless it has
+        // already replayed every prior event for that jar.
         env.events()
-            .publish((symbol_short!("jar_xfer"), jar_id), new_owner);
+            .publish((symbol_short!("jar_xfer"), jar_id), (prev_owner, new_owner));
     }
 
     /// Send a tip. Transfers `amount` of USDC from `from`, split across the jar's
-    /// recipients atomically, then emits a `("tip", jar_id)` event.
+    /// recipients atomically, then emits a `("tip", jar_id)` event carrying the
+    /// sender, the total, the message, and the per-recipient breakdown in split
+    /// order.
     ///
     /// `message` may be at most `MAX_MESSAGE_LEN` bytes; it is rejected before
     /// any funds move.
@@ -244,6 +268,12 @@ impl TipSplitter {
         let shares = Self::compute_shares(&env, &jar.splits, amount);
 
         let mut skipped: i128 = 0;
+        // The per-recipient breakdown published in the `tip` event, in split
+        // order. Recording it as the transfers happen is what makes the event
+        // self-describing: an indexer that recomputed the split arithmetic
+        // from `get_jar` could get a different answer, because the jar's
+        // splits may have changed between the tip and the read.
+        let mut breakdown: Vec<(Address, i128)> = Vec::new(&env);
         for i in 0..n {
             let split = jar.splits.get(i).unwrap();
             let mut share = shares.get(i).unwrap();
@@ -254,18 +284,27 @@ impl TipSplitter {
                 // accumulated only the amounts it actually transferred.
                 share += skipped;
             }
-            if share > 0 && split.to != from {
+            let paid = if share > 0 && split.to != from {
                 // Skip self-transfers: a tipper who is also a recipient would
                 // otherwise pay themselves with a no-op transfer that burns gas
                 // and emits a confusing token event.
                 client.transfer(&from, &split.to, &share);
+                share
             } else {
                 skipped += share;
-            }
+                // Nothing moved, so the breakdown reports 0 rather than the
+                // notional share. The event is a record of the transfers this
+                // call actually made, which is what a balance-tracking indexer
+                // needs to stay in step with the ledger.
+                0
+            };
+            breakdown.push_back((split.to, paid));
         }
 
-        env.events()
-            .publish((symbol_short!("tip"), jar_id), (from, amount, message));
+        env.events().publish(
+            (symbol_short!("tip"), jar_id),
+            (from, amount, message, breakdown),
+        );
     }
 
     /// Read a jar's configuration.
@@ -375,6 +414,39 @@ impl TipSplitter {
         env.storage().persistent().has(&DataKey::Jar(jar_id))
     }
 
+    /// Whether `address` appears in the jar's splits.
+    ///
+    /// A collaborator added to someone else's jar would otherwise have to
+    /// fetch the whole jar and scan the split vector for their own address,
+    /// which is awkward from a wallet or a one-line script. This reads the
+    /// same single storage key and answers the question directly.
+    ///
+    /// Ownership is a separate thing: a jar owner who is not also a recipient
+    /// gets `false`, because they receive no share of a tip. Use
+    /// `get_jar_owner` to ask who controls a jar.
+    ///
+    /// Panics with `JarNotFound` if the slug is not registered, matching
+    /// `get_jar`. A missing jar is not the same answer as "not a recipient",
+    /// and conflating the two would hide a typo'd slug; use `jar_exists` to
+    /// test registration.
+    pub fn is_recipient(env: Env, jar_id: String, address: Address) -> bool {
+        let key = DataKey::Jar(jar_id);
+        let jar: Jar = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .unwrap_or_else(|| panic_with_error!(&env, Error::JarNotFound));
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, JAR_TTL_THRESHOLD, JAR_TTL_LEDGERS);
+        for i in 0..jar.splits.len() {
+            if jar.splits.get(i).unwrap().to == address {
+                return true;
+            }
+        }
+        false
+    }
+
     /// The contract admin recorded at deploy time.
     pub fn get_admin(env: Env) -> Address {
         env.storage()
@@ -389,6 +461,21 @@ impl TipSplitter {
             .instance()
             .get(&DataKey::Token)
             .unwrap_or_else(|| panic_with_error!(&env, Error::NotInitialized))
+    }
+
+    /// The bounds this contract enforces: the basis-point denominator, the
+    /// maximum recipient count, and the maximum tip-message length in bytes.
+    ///
+    /// These are compile-time constants, so the view reads no storage. It
+    /// exists so a client can discover the limits of the contract it is
+    /// actually talking to instead of hardcoding its own copy, which would
+    /// silently desynchronise the moment a bound here changed.
+    pub fn get_limits(_env: Env) -> Limits {
+        Limits {
+            bps_denom: BPS_DENOM,
+            max_recipients: MAX_RECIPIENTS,
+            max_message_len: MAX_MESSAGE_LEN,
+        }
     }
 
     /// Split `amount` across `splits` in basis points, returning one share per

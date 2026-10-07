@@ -20,8 +20,9 @@ basis-point shares, atomically, in one transaction.
 ## Types
 
 ```rust
-struct Split { to: Address, bps: u32 }
-struct Jar   { owner: Address, splits: Vec<Split> }
+struct Split  { to: Address, bps: u32 }
+struct Jar    { owner: Address, splits: Vec<Split> }
+struct Limits { bps_denom: u32, max_recipients: u32, max_message_len: u32 }
 ```
 
 ## Functions
@@ -31,15 +32,77 @@ struct Jar   { owner: Address, splits: Vec<Split> }
 | `__constructor(admin, token)` | — | Deploy-time init. Stores the admin and USDC token address. |
 | `create_jar(owner, jar_id, splits)` | `owner` | Register a new jar. Fails if the slug is empty, over `MAX_JAR_ID_LEN` bytes, already exists, or splits are invalid. Emits a `jar_crtd` event. |
 | `update_splits(jar_id, splits)` | jar `owner` | Replace a jar's splits. Subject to the same validation as `create_jar`. Emits a `splits` event. |
-| `transfer_jar_ownership(jar_id, new_owner)` | current jar `owner` | Hand control of a jar to `new_owner`. Splits are unchanged; the new owner does not need to authorize. Emits a `jar_xfer` event. |
-| `tip(from, jar_id, amount, message)` | `from` | Transfer `amount` USDC from `from`, split across the jar's recipients. |
+| `transfer_jar_ownership(jar_id, new_owner)` | current jar `owner` | Hand control of a jar to `new_owner`. Splits are unchanged; the new owner does not need to authorize. Emits a `jar_xfer` event carrying both owners. |
+| `tip(from, jar_id, amount, message)` | `from` | Transfer `amount` USDC from `from`, split across the jar's recipients. Emits a `tip` event carrying the per-recipient breakdown. |
 | `get_jar(jar_id) -> Jar` | — | Read a jar's configuration. Panics with `JarNotFound` if the slug is free. |
 | `get_jar_owner(jar_id) -> Address` | — | Read just a jar's owner. Panics with `JarNotFound` if the slug is free. |
 | `get_split_count(jar_id) -> u32` | — | How many recipients a jar pays. Panics with `JarNotFound` if the slug is free. |
 | `preview_split(jar_id, amount) -> Vec<i128>` | — | What each recipient would receive from a tip of `amount`, in split order. Rejects the amounts `tip` rejects; panics with `JarNotFound` if the slug is free. |
 | `jar_exists(jar_id) -> bool` | — | Whether the slug is already registered. |
+| `is_recipient(jar_id, address) -> bool` | — | Whether `address` appears in the jar's splits. Panics with `JarNotFound` if the slug is free. |
 | `get_token() -> Address` | — | The USDC token address tips settle in. |
 | `get_admin() -> Address` | — | The contract admin recorded at deploy time. |
+| `get_limits() -> Limits` | — | The bounds this contract enforces: `bps_denom`, `max_recipients`, `max_message_len`. Reads no storage. |
+
+### Confirming you are a recipient
+
+A collaborator added to someone else's jar has no cheap way to confirm they are
+actually in it. The alternative is fetching the whole jar with `get_jar` and
+scanning the split vector for your own address, which is awkward from a wallet
+or a one-line script.
+
+`is_recipient(jar_id, address)` answers it directly and returns a plain
+`bool`. It reads the same single persistent key `get_jar` does, so it is
+cheap enough for a lightweight client.
+
+**Membership is not ownership.** The answer tracks the split vector only: a jar
+owner who takes no share of a tip gets `false`, and an address listed in the
+splits gets `true` whether or not it owns the jar. Use
+[`get_jar_owner`](#reading-just-the-owner) to ask who controls a jar.
+
+**A missing jar is an error, not a `false`.** An unregistered slug panics with
+`JarNotFound`, exactly as `get_jar` does. Returning `false` would make a typo'd
+jar id indistinguishable from a genuine non-membership. Use `jar_exists` when
+the question is whether the slug is registered at all.
+
+Membership follows `update_splits`: a collaborator removed by a splits update
+immediately reads as `false`, and one added reads as `true`. There is no
+historical view — the answer describes the jar's current splits, so it is not a
+record of who was paid by past tips. For that, read the per-recipient
+breakdown in the [`tip` event](#tip--published-on-every-successful-tip). For
+what a *future* tip would pay each of them, use
+[`preview_split`](#previewing-a-tip).
+
+### Reading the contract's limits
+
+`BPS_DENOM`, `MAX_RECIPIENTS` and `MAX_MESSAGE_LEN` are private constants, so a
+client that wants to validate input before paying for a transaction has no way
+to read them. The result was that every client carried its own copy — the tip
+form capped messages at its own number, the splits editor hardcoded the twenty
+recipient limit — and changing a bound here silently desynchronised the stack.
+
+`get_limits` returns all three:
+
+```rust
+Limits {
+    bps_denom: 10_000,       // BPS_DENOM — the denominator every `bps` is a share of
+    max_recipients: 20,      // MAX_RECIPIENTS — most recipients in one jar
+    max_message_len: 280,    // MAX_MESSAGE_LEN — longest tip message, in UTF-8 bytes
+}
+```
+
+All three are compile-time constants, so the view reads no storage and costs
+the same regardless of contract state. A client can fetch it once at startup
+and cache it for the session.
+
+`max_message_len` is a **byte** count, not a character count — see
+[Message](#concepts) above. A client showing a remaining-characters indicator
+must count UTF-8 bytes against this number, not `message.length`.
+
+A test asserts the returned values equal the constants, so the view and the
+enforcement cannot drift apart. The current values are also asserted
+literally, which means changing a bound fails the suite until this document is
+updated with it.
 
 ### Reading just the owner
 
@@ -105,6 +168,9 @@ One caveat: `tip` withholds a recipient's share when that recipient is also the
 tipper, rather than making them pay themselves. `preview_split` does not take a
 `from` address, so it reports every recipient's full share. A client whose
 connected wallet appears in the jar's splits should account for that itself.
+The `tip` event's [`breakdown`](#tip--published-on-every-successful-tip) does
+know who tipped, so it is the authoritative record of what each recipient was
+actually paid.
 
 ### Checking slug availability
 
@@ -184,6 +250,9 @@ the code, so flipping that profile setting cannot turn it into a bypass.
 - The whole tip reverts if any single transfer fails — tips are all-or-nothing.
 - `preview_split(jar_id, amount)` runs this same calculation as a view, so a
   client can show the exact per-recipient amounts before the supporter signs.
+- The amounts actually transferred are published in the `tip` event's
+  `breakdown`, so no consumer has to reproduce this arithmetic after the fact
+  either.
 
 ## Errors
 
@@ -235,19 +304,69 @@ having to re-poll every jar on a schedule. The indexer refetches the jar via
 ### `jar_xfer` — published on every successful `transfer_jar_ownership`
 
 - **Topics:** `(symbol "jar_xfer", jar_id: String)`
-- **Data:** `new_owner: Address`
+- **Data:** `(prev_owner: Address, new_owner: Address)`
 
 Lets an indexer update who controls a jar without re-polling `get_jar` for
 every jar on a schedule.
 
+Both ends of the move are published, in that order, so each event is
+independently meaningful. With only the new owner, a consumer replaying the log
+could see where a jar went but not where it came from, unless it had already
+indexed every prior event for that jar and kept the running state — which an
+indexer starting from a partial history has not. Carrying `prev_owner` also
+means successive transfers chain: each event's `prev_owner` is the previous
+event's `new_owner`, so an ownership history can be reconstructed from the
+events alone.
+
+`prev_owner` is the address that authorized the call — only the current owner
+may transfer a jar — and is always different from `new_owner` in practice,
+though the contract does not reject a transfer to the existing owner. Splits
+are unchanged by a transfer, so no `splits` event accompanies this one.
+
+> **Consumer impact.** The data was a bare `Address` and is now a
+> two-element tuple. A decoder that reads it as a single address must be
+> updated before it reads events from a contract built from this version.
+
 ### `tip` — published on every successful tip
 
 - **Topics:** `(symbol "tip", jar_id: String)`
-- **Data:** `(from: Address, amount: i128, message: String)`
+- **Data:** `(from: Address, amount: i128, message: String, breakdown: Vec<(Address, i128)>)`
 
 The backend indexer subscribes to this event to update balances, leaderboards,
 and notifications. `message` is at most 280 bytes, so the payload size is
 bounded and a `varchar(280)` column is enough to store it.
+
+`breakdown` lists one `(recipient, amount)` pair per split, **in split order**,
+so the event is self-describing: a consumer that wants per-collaborator
+earnings never has to fetch the jar and redo the arithmetic. That matters
+because a recomputed figure can disagree with the contract's — the jar's splits
+may have been changed by `update_splits` between the tip and the read, and the
+last recipient's share includes rounding dust that depends on the exact
+amount. The amounts always sum to `amount`.
+
+The pairs report **what each transfer actually moved**, not the notional
+`amount * bps / 10_000` that [`preview_split`](#previewing-a-tip) quotes. The
+two differ in one case: `tip` skips paying a recipient who is also the sender,
+so that entry reports `0` where the preview would have shown their full share. The recipient is
+still listed, which lets a consumer tell "listed but paid nothing this tip"
+apart from "not in this jar". Because the skipped share is never deducted from
+the running total, the final recipient absorbs it — so a self-tip shows up as a
+`0` entry and a correspondingly larger one at the end.
+
+`breakdown.len()` equals the jar's split count at the moment of the tip, so it
+is at most `MAX_RECIPIENTS` (20) pairs — see
+[`get_limits`](#reading-the-contracts-limits). The payload stays bounded.
+
+Note that `breakdown` is a snapshot, not the jar's current state. To ask
+whether an address is a recipient *now*, use
+[`is_recipient`](#confirming-you-are-a-recipient).
+
+> **Consumer impact.** The data tuple grew from three elements to four.
+> A decoder that reads it positionally — `decodeTipEvent` in `@novatip/sdk`,
+> and the backend indexer — must be updated to accept the fourth element
+> before it reads events from a contract built from this version. The first
+> three elements are unchanged and keep their positions, so a consumer that
+> ignores trailing elements is unaffected.
 
 ## Jar discovery — design decision
 

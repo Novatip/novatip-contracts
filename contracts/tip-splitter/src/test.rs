@@ -2,7 +2,7 @@
 use super::*;
 use proptest::prelude::*;
 use soroban_sdk::testutils::{Address as _, Events as _, MockAuth, MockAuthInvoke};
-use soroban_sdk::{symbol_short, token, vec, Address, Env, IntoVal, String, TryFromVal};
+use soroban_sdk::{symbol_short, token, vec, Address, Env, IntoVal, String, TryFromVal, Vec};
 
 /// Shared test fixture: a fresh env with a USDC-like token and a deployed
 /// TipSplitter pointed at it. All auths are mocked.
@@ -136,7 +136,8 @@ fn tip_emits_tip_event_with_expected_topics_and_data() {
     client.tip(&tipper, &jar_id, &100, &message);
 
     // decodeTipEvent in novatip-sdk reads topic 0 as the "tip" symbol, topic 1
-    // as the jar id, and the data as the (from, amount, message) tuple.
+    // as the jar id, and the data as the (from, amount, message, breakdown)
+    // tuple.
     let tip_events: std::vec::Vec<_> = env
         .events()
         .all()
@@ -153,9 +154,154 @@ fn tip_emits_tip_event_with_expected_topics_and_data() {
             jar_id.into_val(env)
         ]
     );
-    let decoded: (Address, i128, String) =
+    let decoded: (Address, i128, String, Vec<(Address, i128)>) =
         TryFromVal::try_from_val(env, data).expect("tip event data shape");
-    assert_eq!(decoded, (tipper, 100i128, message));
+    assert_eq!(
+        decoded,
+        (tipper, 100i128, message, vec![env, (alice, 100i128)])
+    );
+}
+
+/// Reads the per-recipient breakdown out of the single `tip` event this
+/// contract published.
+fn tip_breakdown(env: &Env, contract: &Address, jar_id: &String) -> std::vec::Vec<(Address, i128)> {
+    let expected_topics = vec![
+        env,
+        symbol_short!("tip").into_val(env),
+        jar_id.into_val(env),
+    ];
+    let events: std::vec::Vec<_> = env
+        .events()
+        .all()
+        .iter()
+        .filter(|e| e.0 == *contract && e.1 == expected_topics)
+        .collect();
+    assert_eq!(events.len(), 1, "expected exactly one tip event");
+    let (_, _, data) = events.first().unwrap();
+    let (_, _, _, breakdown): (Address, i128, String, Vec<(Address, i128)>) =
+        TryFromVal::try_from_val(env, data).expect("tip event data shape");
+    (0..breakdown.len())
+        .map(|i| breakdown.get(i).unwrap())
+        .collect()
+}
+
+/// The point of the breakdown is that an indexer never has to redo the split
+/// arithmetic. So it must match, recipient for recipient and in split order,
+/// the balances the transfers actually produced — including the dust the last
+/// recipient absorbs, which is where a recomputed figure would go wrong.
+#[test]
+fn tip_event_breakdown_matches_the_balances_the_transfers_produced() {
+    let s = setup();
+    let env = &s.env;
+    let client = TipSplitterClient::new(env, &s.contract);
+    let token = token::Client::new(env, &s.token);
+    let token_admin = token::StellarAssetClient::new(env, &s.token);
+
+    let owner = Address::generate(env);
+    let a = Address::generate(env);
+    let b = Address::generate(env);
+    let c = Address::generate(env);
+    let tipper = Address::generate(env);
+    token_admin.mint(&tipper, &100);
+
+    // 33.33 / 33.33 / 33.34 over 100 units leaves rounding dust for `c`.
+    let jar_id = String::from_str(env, "@breakdown");
+    client.create_jar(
+        &owner,
+        &jar_id,
+        &vec![
+            env,
+            Split {
+                to: a.clone(),
+                bps: 3333,
+            },
+            Split {
+                to: b.clone(),
+                bps: 3333,
+            },
+            Split {
+                to: c.clone(),
+                bps: 3334,
+            },
+        ],
+    );
+
+    client.tip(
+        &tipper,
+        &jar_id,
+        &100,
+        &String::from_str(env, "split three ways"),
+    );
+
+    let breakdown = tip_breakdown(env, &s.contract, &jar_id);
+    assert_eq!(
+        breakdown,
+        std::vec![
+            (a.clone(), token.balance(&a)),
+            (b.clone(), token.balance(&b)),
+            (c.clone(), token.balance(&c)),
+        ],
+        "the breakdown must report what each recipient was actually paid, in split order"
+    );
+    // Pin the figures down, so a change in the splitting rule shows up here
+    // rather than being absorbed by comparing the event against itself.
+    assert_eq!(breakdown, std::vec![(a, 33i128), (b, 33i128), (c, 34i128)]);
+    assert_eq!(
+        breakdown.iter().map(|(_, amt)| amt).sum::<i128>(),
+        100,
+        "the breakdown must account for the whole tip"
+    );
+}
+
+/// `tip` skips a transfer when the sender is also a recipient. The breakdown is
+/// a record of the transfers the call made, so that entry reports `0` — and the
+/// recipient's balance confirms nothing moved.
+#[test]
+fn tip_event_breakdown_reports_zero_for_a_skipped_self_transfer() {
+    let s = setup();
+    let env = &s.env;
+    let client = TipSplitterClient::new(env, &s.contract);
+    let token = token::Client::new(env, &s.token);
+    let token_admin = token::StellarAssetClient::new(env, &s.token);
+
+    let owner = Address::generate(env);
+    let alice = Address::generate(env);
+    let tipper = Address::generate(env);
+    token_admin.mint(&tipper, &100);
+
+    // The tipper is listed first; `tip` skips paying them and the final
+    // recipient absorbs the whole amount.
+    let jar_id = String::from_str(env, "@selftip");
+    client.create_jar(
+        &owner,
+        &jar_id,
+        &vec![
+            env,
+            Split {
+                to: tipper.clone(),
+                bps: 5000,
+            },
+            Split {
+                to: alice.clone(),
+                bps: 5000,
+            },
+        ],
+    );
+
+    client.tip(&tipper, &jar_id, &100, &String::from_str(env, "half mine"));
+
+    let breakdown = tip_breakdown(env, &s.contract, &jar_id);
+    assert_eq!(
+        breakdown,
+        std::vec![(tipper.clone(), 0i128), (alice.clone(), 100i128)],
+        "a skipped self-transfer is reported as 0, not as the notional share"
+    );
+    assert_eq!(token.balance(&alice), 100);
+    assert_eq!(token.balance(&tipper), 0);
+    // Every entry still names its recipient in split order, so an indexer can
+    // tell "listed but paid nothing" apart from "not listed at all".
+    assert_eq!(breakdown[0].0, tipper);
+    assert_eq!(breakdown[1].0, alice);
 }
 
 #[test]
@@ -1956,6 +2102,109 @@ fn transfer_jar_ownership_moves_control_to_new_owner() {
     );
 }
 
+/// Reads the `(prev_owner, new_owner)` pair out of the `jar_xfer` event for
+/// `jar_id`. The test env's event buffer only retains the most recent
+/// invocation's events, so this is called straight after each transfer.
+fn jar_xfer_owners(env: &Env, contract: &Address, jar_id: &String) -> (Address, Address) {
+    let expected_topics = vec![
+        env,
+        symbol_short!("jar_xfer").into_val(env),
+        jar_id.into_val(env),
+    ];
+    let events: std::vec::Vec<_> = env
+        .events()
+        .all()
+        .iter()
+        .filter(|e| e.0 == *contract && e.1 == expected_topics)
+        .collect();
+    assert_eq!(events.len(), 1, "expected exactly one jar_xfer event");
+    let (_, _, data) = events.first().unwrap();
+    TryFromVal::try_from_val(env, data).expect("jar_xfer event data shape")
+}
+
+/// The `jar_xfer` event must name both ends of the move. An indexer replaying a
+/// partial event log can then see where a jar came from as well as where it
+/// went, without having already indexed every prior event for that jar.
+#[test]
+fn transfer_jar_ownership_emits_jar_xfer_event_with_both_owners() {
+    let s = setup();
+    let env = &s.env;
+    let client = TipSplitterClient::new(env, &s.contract);
+
+    let owner = Address::generate(env);
+    let new_owner = Address::generate(env);
+    let alice = Address::generate(env);
+
+    let jar_id = String::from_str(env, "@xfer");
+    client.create_jar(
+        &owner,
+        &jar_id,
+        &vec![
+            env,
+            Split {
+                to: alice.clone(),
+                bps: 10000,
+            },
+        ],
+    );
+
+    client.transfer_jar_ownership(&jar_id, &new_owner);
+
+    let decoded = jar_xfer_owners(env, &s.contract, &jar_id);
+    assert_eq!(
+        decoded,
+        (owner.clone(), new_owner.clone()),
+        "the payload is (prev_owner, new_owner), in that order"
+    );
+    // The two must not be confusable: the first is the address that no longer
+    // controls the jar, the second is the one that does.
+    assert_ne!(decoded.0, decoded.1);
+    assert_eq!(client.get_jar(&jar_id).owner, new_owner);
+}
+
+/// A second hand-off reports the first recipient as the outgoing owner, so a
+/// consumer can chain the events into a complete ownership history rather than
+/// seeing two disconnected arrivals.
+#[test]
+fn jar_xfer_events_chain_across_successive_transfers() {
+    let s = setup();
+    let env = &s.env;
+    let client = TipSplitterClient::new(env, &s.contract);
+
+    let first = Address::generate(env);
+    let second = Address::generate(env);
+    let third = Address::generate(env);
+    let alice = Address::generate(env);
+
+    let jar_id = String::from_str(env, "@chain");
+    client.create_jar(
+        &first,
+        &jar_id,
+        &vec![
+            env,
+            Split {
+                to: alice.clone(),
+                bps: 10000,
+            },
+        ],
+    );
+
+    client.transfer_jar_ownership(&jar_id, &second);
+    assert_eq!(
+        jar_xfer_owners(env, &s.contract, &jar_id),
+        (first, second.clone())
+    );
+
+    client.transfer_jar_ownership(&jar_id, &third);
+    assert_eq!(
+        jar_xfer_owners(env, &s.contract, &jar_id),
+        (second, third.clone()),
+        "the second event's prev_owner must be the first event's new_owner"
+    );
+
+    assert_eq!(client.get_jar(&jar_id).owner, third);
+}
+
 /// `tip` moves the sender's tokens, so it must carry the sender's signature.
 ///
 /// The mock here authorizes *only* the token `transfer` the contract makes on
@@ -2199,6 +2448,223 @@ fn create_jar_accepts_jar_id_at_exact_limit() {
     client.create_jar(&owner, &exact, &splits);
 
     assert_eq!(client.get_jar(&exact).splits.len(), 1);
+}
+
+/// A collaborator's own membership check: a listed recipient gets `true`, an
+/// address nowhere in the splits gets `false`, and the jar owner gets `false`
+/// when they take no share — owning a jar and being paid by it are separate
+/// things.
+#[test]
+fn is_recipient_distinguishes_recipients_owner_and_strangers() {
+    let s = setup();
+    let env = &s.env;
+    let client = TipSplitterClient::new(env, &s.contract);
+
+    let owner = Address::generate(env);
+    let alice = Address::generate(env);
+    let bob = Address::generate(env);
+    let stranger = Address::generate(env);
+
+    let jar_id = String::from_str(env, "@collab");
+    client.create_jar(
+        &owner,
+        &jar_id,
+        &vec![
+            env,
+            Split {
+                to: alice.clone(),
+                bps: 6000,
+            },
+            Split {
+                to: bob.clone(),
+                bps: 4000,
+            },
+        ],
+    );
+
+    // Listed recipients, in both the first and a later position.
+    assert!(client.is_recipient(&jar_id, &alice));
+    assert!(client.is_recipient(&jar_id, &bob));
+
+    // An address that is nowhere in the jar.
+    assert!(!client.is_recipient(&jar_id, &stranger));
+
+    // The owner, who takes no share of a tip here.
+    assert!(
+        !client.is_recipient(&jar_id, &owner),
+        "owning a jar is not the same as receiving a share of its tips"
+    );
+    assert_eq!(
+        client.get_jar(&jar_id).owner,
+        owner,
+        "the owner check lives on get_jar, not is_recipient"
+    );
+}
+
+/// An owner who is also listed in the splits gets `true` — the previous test
+/// asserts a `false` for an owner, so this pins down that the answer tracks the
+/// split vector rather than ownership.
+#[test]
+fn is_recipient_is_true_for_an_owner_who_is_also_a_recipient() {
+    let s = setup();
+    let env = &s.env;
+    let client = TipSplitterClient::new(env, &s.contract);
+
+    let owner = Address::generate(env);
+    let jar_id = String::from_str(env, "@solo");
+    client.create_jar(
+        &owner,
+        &jar_id,
+        &vec![
+            env,
+            Split {
+                to: owner.clone(),
+                bps: 10000,
+            },
+        ],
+    );
+
+    assert!(client.is_recipient(&jar_id, &owner));
+}
+
+/// `update_splits` replaces the recipient list, so membership must follow it —
+/// a dropped collaborator stops being a recipient and a new one starts.
+#[test]
+fn is_recipient_follows_update_splits() {
+    let s = setup();
+    let env = &s.env;
+    let client = TipSplitterClient::new(env, &s.contract);
+
+    let owner = Address::generate(env);
+    let alice = Address::generate(env);
+    let bob = Address::generate(env);
+
+    let jar_id = String::from_str(env, "@reshuffle");
+    client.create_jar(
+        &owner,
+        &jar_id,
+        &vec![
+            env,
+            Split {
+                to: alice.clone(),
+                bps: 10000,
+            },
+        ],
+    );
+    assert!(client.is_recipient(&jar_id, &alice));
+    assert!(!client.is_recipient(&jar_id, &bob));
+
+    client.update_splits(
+        &jar_id,
+        &vec![
+            env,
+            Split {
+                to: bob.clone(),
+                bps: 10000,
+            },
+        ],
+    );
+    assert!(!client.is_recipient(&jar_id, &alice));
+    assert!(client.is_recipient(&jar_id, &bob));
+}
+
+/// An unregistered slug is `JarNotFound`, not a quiet `false` — otherwise a
+/// typo'd jar id would look indistinguishable from a genuine non-membership.
+#[test]
+fn is_recipient_on_missing_jar_fails() {
+    let s = setup();
+    let env = &s.env;
+    let client = TipSplitterClient::new(env, &s.contract);
+
+    let alice = Address::generate(env);
+    let res = client.try_is_recipient(&String::from_str(env, "@nope"), &alice);
+    assert_eq!(res, Err(Ok(Error::JarNotFound.into())));
+}
+
+/// `get_limits` exists so clients stop hardcoding the contract's bounds. This
+/// asserts the view and the constants cannot drift apart: changing one without
+/// the other fails here.
+#[test]
+fn get_limits_matches_contract_constants() {
+    let s = setup();
+    let env = &s.env;
+    let client = TipSplitterClient::new(env, &s.contract);
+
+    let limits = client.get_limits();
+
+    assert_eq!(limits.bps_denom, BPS_DENOM);
+    assert_eq!(limits.max_recipients, MAX_RECIPIENTS);
+    assert_eq!(limits.max_message_len, MAX_MESSAGE_LEN);
+    assert_eq!(
+        limits,
+        Limits {
+            bps_denom: 10_000,
+            max_recipients: 20,
+            max_message_len: 280,
+        },
+        "the published limits are part of the public interface; changing one \
+         means clients and docs/CONTRACT.md have to change with it"
+    );
+}
+
+/// The limits are only useful if they describe what the contract actually
+/// enforces, so exercise each returned bound against the rejection it predicts.
+#[test]
+fn get_limits_describes_the_enforced_bounds() {
+    let s = setup();
+    let env = &s.env;
+    let client = TipSplitterClient::new(env, &s.contract);
+    let token_admin = token::StellarAssetClient::new(env, &s.token);
+
+    let limits = client.get_limits();
+    let owner = Address::generate(env);
+    let tipper = Address::generate(env);
+    token_admin.mint(&tipper, &1_000);
+
+    // max_recipients: a jar with exactly that many recipients is accepted, and
+    // one more is not.
+    let mut splits = vec![env];
+    for _ in 0..limits.max_recipients {
+        splits.push_back(Split {
+            to: Address::generate(env),
+            bps: limits.bps_denom / limits.max_recipients,
+        });
+    }
+    let jar_id = String::from_str(env, "@limits");
+    client.create_jar(&owner, &jar_id, &splits);
+
+    let mut too_many = splits.clone();
+    too_many.push_back(Split {
+        to: Address::generate(env),
+        bps: 1,
+    });
+    assert_eq!(
+        client.try_create_jar(&owner, &String::from_str(env, "@over"), &too_many),
+        Err(Ok(Error::TooManyRecipients.into()))
+    );
+
+    // bps_denom: the shares of an accepted jar sum to exactly the denominator.
+    let stored = client.get_jar(&jar_id);
+    let total: u32 = (0..stored.splits.len())
+        .map(|i| stored.splits.get(i).unwrap().bps)
+        .sum();
+    assert_eq!(total, limits.bps_denom);
+
+    // max_message_len: a message of exactly that many bytes is accepted, and
+    // one byte more is not.
+    let exact = String::from_bytes(env, &vec_of_bytes(limits.max_message_len));
+    client.tip(&tipper, &jar_id, &1_000, &exact);
+
+    let over = String::from_bytes(env, &vec_of_bytes(limits.max_message_len + 1));
+    assert_eq!(
+        client.try_tip(&tipper, &jar_id, &1, &over),
+        Err(Ok(Error::MessageTooLong.into()))
+    );
+}
+
+/// `n` filler ASCII bytes — one UTF-8 byte each, so the byte length is `n`.
+fn vec_of_bytes(n: u32) -> std::vec::Vec<u8> {
+    std::vec![b'a'; n as usize]
 }
 
 #[test]
