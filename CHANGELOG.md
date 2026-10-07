@@ -13,6 +13,15 @@ All notable changes to `novatip-contracts` are documented here.
   the whole jar and scanning it. An unregistered slug is `JarNotFound`, not a
   quiet `false`
 
+### Changed (breaking: event payload)
+- The `tip` event's data tuple gained a fourth element, `breakdown:
+  Vec<(Address, i128)>`, listing each recipient and the amount they were
+  actually paid in split order. An indexer no longer has to fetch the jar and
+  redo the split arithmetic — which could disagree with the contract if the
+  jar's splits changed between the tip and the read. A positional decoder
+  (`decodeTipEvent` in `@novatip/sdk`, the backend indexer) must be updated to
+  accept the fourth element; the first three keep their positions and meaning
+
 ### Fixed
 - `extend_ttl` was called with two arguments where the SDK takes three
   (`key`, `threshold`, `extend_to`), so the crate did not compile. A

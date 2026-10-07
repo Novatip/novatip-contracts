@@ -33,7 +33,7 @@ struct Limits { bps_denom: u32, max_recipients: u32, max_message_len: u32 }
 | `create_jar(owner, jar_id, splits)` | `owner` | Register a new jar. Fails if the slug is empty, over `MAX_JAR_ID_LEN` bytes, already exists, or splits are invalid. Emits a `jar_crtd` event. |
 | `update_splits(jar_id, splits)` | jar `owner` | Replace a jar's splits. Subject to the same validation as `create_jar`. Emits a `splits` event. |
 | `transfer_jar_ownership(jar_id, new_owner)` | current jar `owner` | Hand control of a jar to `new_owner`. Splits are unchanged; the new owner does not need to authorize. Emits a `jar_xfer` event. |
-| `tip(from, jar_id, amount, message)` | `from` | Transfer `amount` USDC from `from`, split across the jar's recipients. |
+| `tip(from, jar_id, amount, message)` | `from` | Transfer `amount` USDC from `from`, split across the jar's recipients. Emits a `tip` event carrying the per-recipient breakdown. |
 | `get_jar(jar_id) -> Jar` | — | Read a jar's configuration. Panics with `JarNotFound` if the slug is free. |
 | `jar_exists(jar_id) -> bool` | — | Whether the slug is already registered. |
 | `is_recipient(jar_id, address) -> bool` | — | Whether `address` appears in the jar's splits. Panics with `JarNotFound` if the slug is free. |
@@ -175,6 +175,8 @@ the code, so flipping that profile setting cannot turn it into a bypass.
 - The **last** recipient receives `amount - (sum of prior shares)`, so rounding
   dust is never lost and the full amount is always distributed.
 - The whole tip reverts if any single transfer fails — tips are all-or-nothing.
+- The amounts actually transferred are published in the `tip` event's
+  `breakdown`, so no consumer has to reproduce this arithmetic.
 
 ## Errors
 
@@ -234,11 +236,42 @@ every jar on a schedule.
 ### `tip` — published on every successful tip
 
 - **Topics:** `(symbol "tip", jar_id: String)`
-- **Data:** `(from: Address, amount: i128, message: String)`
+- **Data:** `(from: Address, amount: i128, message: String, breakdown: Vec<(Address, i128)>)`
 
 The backend indexer subscribes to this event to update balances, leaderboards,
 and notifications. `message` is at most 280 bytes, so the payload size is
 bounded and a `varchar(280)` column is enough to store it.
+
+`breakdown` lists one `(recipient, amount)` pair per split, **in split order**,
+so the event is self-describing: a consumer that wants per-collaborator
+earnings never has to fetch the jar and redo the arithmetic. That matters
+because a recomputed figure can disagree with the contract's — the jar's splits
+may have been changed by `update_splits` between the tip and the read, and the
+last recipient's share includes rounding dust that depends on the exact
+amount. The amounts always sum to `amount`.
+
+The pairs report **what each transfer actually moved**, not the notional
+`amount * bps / 10_000`. The two differ in one case: `tip` skips paying a
+recipient who is also the sender, so that entry reports `0`. The recipient is
+still listed, which lets a consumer tell "listed but paid nothing this tip"
+apart from "not in this jar". Because the skipped share is never deducted from
+the running total, the final recipient absorbs it — so a self-tip shows up as a
+`0` entry and a correspondingly larger one at the end.
+
+`breakdown.len()` equals the jar's split count at the moment of the tip, so it
+is at most `MAX_RECIPIENTS` (20) pairs — see
+[`get_limits`](#reading-the-contracts-limits). The payload stays bounded.
+
+Note that `breakdown` is a snapshot, not the jar's current state. To ask
+whether an address is a recipient *now*, use
+[`is_recipient`](#confirming-you-are-a-recipient).
+
+> **Consumer impact.** The data tuple grew from three elements to four.
+> A decoder that reads it positionally — `decodeTipEvent` in `@novatip/sdk`,
+> and the backend indexer — must be updated to accept the fourth element
+> before it reads events from a contract built from this version. The first
+> three elements are unchanged and keep their positions, so a consumer that
+> ignores trailing elements is unaffected.
 
 ## Jar discovery — design decision
 
