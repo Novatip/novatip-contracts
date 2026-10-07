@@ -36,9 +36,37 @@ struct Limits { bps_denom: u32, max_recipients: u32, max_message_len: u32 }
 | `tip(from, jar_id, amount, message)` | `from` | Transfer `amount` USDC from `from`, split across the jar's recipients. |
 | `get_jar(jar_id) -> Jar` | — | Read a jar's configuration. Panics with `JarNotFound` if the slug is free. |
 | `jar_exists(jar_id) -> bool` | — | Whether the slug is already registered. |
+| `is_recipient(jar_id, address) -> bool` | — | Whether `address` appears in the jar's splits. Panics with `JarNotFound` if the slug is free. |
 | `get_token() -> Address` | — | The USDC token address tips settle in. |
 | `get_admin() -> Address` | — | The contract admin recorded at deploy time. |
 | `get_limits() -> Limits` | — | The bounds this contract enforces: `bps_denom`, `max_recipients`, `max_message_len`. Reads no storage. |
+
+### Confirming you are a recipient
+
+A collaborator added to someone else's jar has no cheap way to confirm they are
+actually in it. The alternative is fetching the whole jar with `get_jar` and
+scanning the split vector for your own address, which is awkward from a wallet
+or a one-line script.
+
+`is_recipient(jar_id, address)` answers it directly and returns a plain
+`bool`. It reads the same single persistent key `get_jar` does, so it is
+cheap enough for a lightweight client.
+
+**Membership is not ownership.** The answer tracks the split vector only: a jar
+owner who takes no share of a tip gets `false`, and an address listed in the
+splits gets `true` whether or not it owns the jar. Use `get_jar(jar_id).owner`
+to ask who controls a jar.
+
+**A missing jar is an error, not a `false`.** An unregistered slug panics with
+`JarNotFound`, exactly as `get_jar` does. Returning `false` would make a typo'd
+jar id indistinguishable from a genuine non-membership. Use `jar_exists` when
+the question is whether the slug is registered at all.
+
+Membership follows `update_splits`: a collaborator removed by a splits update
+immediately reads as `false`, and one added reads as `true`. There is no
+historical view — the answer describes the jar's current splits, so it is not a
+record of who was paid by past tips. For that, read the per-recipient
+breakdown in the [`tip` event](#tip--published-on-every-successful-tip).
 
 ### Reading the contract's limits
 

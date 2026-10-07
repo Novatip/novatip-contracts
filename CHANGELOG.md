@@ -8,6 +8,10 @@ All notable changes to `novatip-contracts` are documented here.
 - `get_limits() -> Limits` returns `bps_denom`, `max_recipients` and
   `max_message_len`, so clients read the bounds from the contract they are
   talking to instead of hardcoding their own copy
+- `is_recipient(jar_id, address) -> bool` answers whether an address appears in
+  a jar's splits, so a collaborator can confirm their share without fetching
+  the whole jar and scanning it. An unregistered slug is `JarNotFound`, not a
+  quiet `false`
 
 ### Fixed
 - `extend_ttl` was called with two arguments where the SDK takes three
