@@ -817,6 +817,138 @@ fn get_jar_owner_follows_ownership_transfer() {
     assert_ne!(client.get_jar_owner(&jar_id), owner);
 }
 
+/// A single-recipient jar counts 1 — the degenerate case a badge still has to
+/// render, and the one an off-by-one would most likely get wrong.
+#[test]
+fn get_split_count_counts_single_recipient() {
+    let s = setup();
+    let env = &s.env;
+    let client = TipSplitterClient::new(env, &s.contract);
+
+    let owner = Address::generate(env);
+    let alice = Address::generate(env);
+    let jar_id = String::from_str(env, "@solo");
+
+    client.create_jar(
+        &owner,
+        &jar_id,
+        &vec![
+            env,
+            Split {
+                to: alice.clone(),
+                bps: 10000,
+            },
+        ],
+    );
+
+    assert_eq!(client.get_split_count(&jar_id), 1);
+}
+
+/// A multi-recipient jar counts every entry, and agrees with the length of the
+/// vector `get_jar` returns — the cheap read must not drift from the full one.
+#[test]
+fn get_split_count_counts_every_recipient() {
+    let s = setup();
+    let env = &s.env;
+    let client = TipSplitterClient::new(env, &s.contract);
+
+    let owner = Address::generate(env);
+    let jar_id = String::from_str(env, "@collective");
+
+    // Four recipients at 2500 bps each.
+    let mut splits = vec![env];
+    for _ in 0..4 {
+        splits.push_back(Split {
+            to: Address::generate(env),
+            bps: 2500,
+        });
+    }
+    client.create_jar(&owner, &jar_id, &splits);
+
+    assert_eq!(client.get_split_count(&jar_id), 4);
+    assert_eq!(
+        client.get_split_count(&jar_id),
+        client.get_jar(&jar_id).splits.len()
+    );
+}
+
+/// `update_splits` replaces the stored vector, so the count must follow it both
+/// upwards and back down rather than serving a cached length.
+#[test]
+fn get_split_count_follows_update_splits() {
+    let s = setup();
+    let env = &s.env;
+    let client = TipSplitterClient::new(env, &s.contract);
+
+    let owner = Address::generate(env);
+    let alice = Address::generate(env);
+    let bob = Address::generate(env);
+    let carol = Address::generate(env);
+    let jar_id = String::from_str(env, "@growing");
+
+    client.create_jar(
+        &owner,
+        &jar_id,
+        &vec![
+            env,
+            Split {
+                to: alice.clone(),
+                bps: 10000,
+            },
+        ],
+    );
+    assert_eq!(client.get_split_count(&jar_id), 1);
+
+    client.update_splits(
+        &jar_id,
+        &vec![
+            env,
+            Split {
+                to: alice.clone(),
+                bps: 4000,
+            },
+            Split {
+                to: bob.clone(),
+                bps: 4000,
+            },
+            Split {
+                to: carol.clone(),
+                bps: 2000,
+            },
+        ],
+    );
+    assert_eq!(client.get_split_count(&jar_id), 3);
+
+    // Shrinking the list must lower the count too.
+    client.update_splits(
+        &jar_id,
+        &vec![
+            env,
+            Split {
+                to: alice.clone(),
+                bps: 5000,
+            },
+            Split {
+                to: bob.clone(),
+                bps: 5000,
+            },
+        ],
+    );
+    assert_eq!(client.get_split_count(&jar_id), 2);
+}
+
+/// An unregistered slug is a `JarNotFound` panic, not `0` — a zero count would
+/// be indistinguishable from a jar, and no stored jar can have zero splits.
+#[test]
+fn get_split_count_on_missing_jar_fails() {
+    let s = setup();
+    let env = &s.env;
+    let client = TipSplitterClient::new(env, &s.contract);
+
+    let res = client.try_get_split_count(&String::from_str(env, "@ghost"));
+    assert_eq!(res, Err(Ok(Error::JarNotFound.into())));
+}
+
 #[test]
 fn tip_on_missing_jar_fails() {
     let s = setup();

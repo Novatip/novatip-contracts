@@ -320,6 +320,32 @@ impl TipSplitter {
         jar.owner
     }
 
+    /// How many recipients a jar pays, without reading the recipients.
+    ///
+    /// A tip page showing a "3 collaborators" badge needs one integer, and
+    /// `get_jar(jar_id).splits.len()` makes it pay for the whole recipient
+    /// vector to get it. This also gives a client a way to decide whether
+    /// fetching the full split list is worth it.
+    ///
+    /// The count is always between 1 and `MAX_RECIPIENTS`: `validate_splits`
+    /// rejects an empty list, so a stored jar always has at least one
+    /// recipient.
+    ///
+    /// Panics with `JarNotFound` if the slug is unregistered, matching
+    /// `get_jar`.
+    pub fn get_split_count(env: Env, jar_id: String) -> u32 {
+        let key = DataKey::Jar(jar_id);
+        let jar: Jar = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .unwrap_or_else(|| panic_with_error!(&env, Error::JarNotFound));
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, JAR_TTL_THRESHOLD, JAR_TTL_LEDGERS);
+        jar.splits.len()
+    }
+
     /// Whether `jar_id` is already registered.
     ///
     /// A slug-availability check would otherwise have to call `get_jar` and
