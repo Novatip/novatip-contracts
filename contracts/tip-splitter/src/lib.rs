@@ -239,43 +239,28 @@ impl TipSplitter {
         let client = token::Client::new(&env, &token_addr);
 
         let n = jar.splits.len();
+        // One shared calculation with `preview_split`, so the number a client
+        // shows before signing is the number paid out here.
+        let shares = Self::compute_shares(&env, &jar.splits, amount);
 
-        // Reject amounts too small to pay every recipient a non-zero share.
-        // With integer division, a recipient's share of `amount * bps / 10_000`
-        // truncates to zero when `amount < 10_000 / bps`. If that happens, the
-        // recipient is silently skipped and the final recipient absorbs the
-        // dust — the tip succeeds but the collaborator never sees it.
-        // Better to fail loudly with InvalidAmount than to pay nobody.
+        let mut skipped: i128 = 0;
         for i in 0..n {
             let split = jar.splits.get(i).unwrap();
-            let bps = split.bps as i128;
-            if amount * bps < (BPS_DENOM as i128) {
-                panic_with_error!(&env, Error::InvalidAmount);
+            let mut share = shares.get(i).unwrap();
+            if i == n - 1 {
+                // A share withheld from a self-transfer above was never sent,
+                // so it stays with the tipper by rolling into the last
+                // recipient's remainder — exactly as it did when this loop
+                // accumulated only the amounts it actually transferred.
+                share += skipped;
             }
-        }
-
-        let mut distributed: i128 = 0;
-        for i in 0..n {
-            let split = jar.splits.get(i).unwrap();
-            // Last recipient absorbs any rounding dust so the full amount is sent.
-            let share = if i == n - 1 {
-                amount - distributed
-            } else {
-                amount.checked_mul(split.bps as i128).unwrap_or_else(|| {
-                    // `amount * bps` overflows i128 before the division
-                    // can bring the result back into range. This is a
-                    // caller error — the tip amount is too large for the
-                    // contract to split safely — so we surface a typed
-                    // error rather than an opaque wasm trap.
-                    panic_with_error!(&env, Error::InvalidAmount)
-                }) / (BPS_DENOM as i128)
-            };
             if share > 0 && split.to != from {
                 // Skip self-transfers: a tipper who is also a recipient would
                 // otherwise pay themselves with a no-op transfer that burns gas
                 // and emits a confusing token event.
                 client.transfer(&from, &split.to, &share);
-                distributed += share;
+            } else {
+                skipped += share;
             }
         }
 
@@ -346,6 +331,40 @@ impl TipSplitter {
         jar.splits.len()
     }
 
+    /// What each recipient would receive from a tip of `amount`, in split
+    /// order.
+    ///
+    /// Clients previously recomputed the split themselves to show "Alice gets
+    /// 7.00, Bob gets 3.00" before the supporter signs, which put the rounding
+    /// rule in two places and let the two drift apart. This runs the same
+    /// arithmetic `tip` does, so the preview is the payout — dust included.
+    ///
+    /// The returned shares always sum to exactly `amount`: the final recipient
+    /// absorbs whatever the integer divisions truncated.
+    ///
+    /// Rejects the same amounts `tip` rejects — non-positive, or small enough
+    /// that some recipient's share would truncate to zero — so a preview that
+    /// returns at all describes a tip that can go through. Panics with
+    /// `JarNotFound` if the slug is unregistered.
+    ///
+    /// One caveat: `tip` withholds a recipient's share when that recipient is
+    /// the tipper, rather than making them pay themselves. This view does not
+    /// know who is tipping, so it reports every recipient's full share. A
+    /// client whose connected wallet appears in the splits should account for
+    /// that itself.
+    pub fn preview_split(env: Env, jar_id: String, amount: i128) -> Vec<i128> {
+        let key = DataKey::Jar(jar_id);
+        let jar: Jar = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .unwrap_or_else(|| panic_with_error!(&env, Error::JarNotFound));
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, JAR_TTL_THRESHOLD, JAR_TTL_LEDGERS);
+        Self::compute_shares(&env, &jar.splits, amount)
+    }
+
     /// Whether `jar_id` is already registered.
     ///
     /// A slug-availability check would otherwise have to call `get_jar` and
@@ -370,6 +389,65 @@ impl TipSplitter {
             .instance()
             .get(&DataKey::Token)
             .unwrap_or_else(|| panic_with_error!(&env, Error::NotInitialized))
+    }
+
+    /// Split `amount` across `splits` in basis points, returning one share per
+    /// recipient in split order.
+    ///
+    /// This is the single source of the rounding rule: each non-final recipient
+    /// gets `amount * bps / 10_000` (truncating integer division) and the final
+    /// recipient gets the remainder, so the shares always sum to exactly
+    /// `amount` and no dust is lost. `tip` pays these out and `preview_split`
+    /// reports them, which is what keeps the quoted split and the paid split
+    /// identical.
+    ///
+    /// Panics with `InvalidAmount` if `amount` is not positive, if it is small
+    /// enough that some recipient's share would truncate to zero, or if it is
+    /// so large that `amount * bps` overflows `i128`.
+    fn compute_shares(env: &Env, splits: &Vec<Split>, amount: i128) -> Vec<i128> {
+        if amount <= 0 {
+            panic_with_error!(env, Error::InvalidAmount);
+        }
+        let n = splits.len();
+        let denom = BPS_DENOM as i128;
+
+        // Reject amounts too small to pay every recipient a non-zero share.
+        // With integer division, a recipient's share of `amount * bps / 10_000`
+        // truncates to zero when `amount < 10_000 / bps`. If that happens, the
+        // recipient is silently skipped and the final recipient absorbs the
+        // dust — the tip succeeds but the collaborator never sees it.
+        // Better to fail loudly with InvalidAmount than to pay nobody.
+        for i in 0..n {
+            let bps = splits.get(i).unwrap().bps as i128;
+            // `checked_mul`: `amount * bps` can overflow i128 before the
+            // division brings it back into range. That is a caller error — the
+            // amount is too large for the contract to split safely — so it
+            // surfaces as a typed error rather than an opaque wasm trap.
+            let product = amount
+                .checked_mul(bps)
+                .unwrap_or_else(|| panic_with_error!(env, Error::InvalidAmount));
+            if product < denom {
+                panic_with_error!(env, Error::InvalidAmount);
+            }
+        }
+
+        let mut shares = Vec::new(env);
+        let mut distributed: i128 = 0;
+        for i in 0..n {
+            // Last recipient absorbs any rounding dust so the full amount is
+            // accounted for.
+            let share = if i == n - 1 {
+                amount - distributed
+            } else {
+                amount
+                    .checked_mul(splits.get(i).unwrap().bps as i128)
+                    .unwrap_or_else(|| panic_with_error!(env, Error::InvalidAmount))
+                    / denom
+            };
+            distributed += share;
+            shares.push_back(share);
+        }
+        shares
     }
 
     /// Validate that splits are non-empty, within bounds, carry a share that is
