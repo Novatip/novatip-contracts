@@ -34,9 +34,23 @@ struct Jar   { owner: Address, splits: Vec<Split> }
 | `transfer_jar_ownership(jar_id, new_owner)` | current jar `owner` | Hand control of a jar to `new_owner`. Splits are unchanged; the new owner does not need to authorize. Emits a `jar_xfer` event. |
 | `tip(from, jar_id, amount, message)` | `from` | Transfer `amount` USDC from `from`, split across the jar's recipients. |
 | `get_jar(jar_id) -> Jar` | — | Read a jar's configuration. Panics with `JarNotFound` if the slug is free. |
+| `get_jar_owner(jar_id) -> Address` | — | Read just a jar's owner. Panics with `JarNotFound` if the slug is free. |
 | `jar_exists(jar_id) -> bool` | — | Whether the slug is already registered. |
 | `get_token() -> Address` | — | The USDC token address tips settle in. |
 | `get_admin() -> Address` | — | The contract admin recorded at deploy time. |
+
+### Reading just the owner
+
+`get_jar_owner` answers "who controls this jar?" without moving the recipient
+list. The alternative — `get_jar(jar_id).owner` — deserializes the whole
+`splits` vector to read one address, which for a jar near the 20 recipient cap
+is a lot of data to render a "you own this jar" badge or to decide whether the
+connected wallet may call `update_splits`.
+
+It reads the same stored jar `get_jar` does, so the two never disagree, and it
+tracks `transfer_jar_ownership` immediately. A free slug is a `JarNotFound`
+panic rather than a placeholder address — a zero address in a return value
+would read to a client as a jar somebody owns.
 
 ### Checking slug availability
 
