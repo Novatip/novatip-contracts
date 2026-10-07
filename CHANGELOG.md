@@ -4,6 +4,11 @@ All notable changes to `novatip-contracts` are documented here.
 
 ## [Unreleased]
 
+### Added
+- `get_limits() -> Limits` returns `bps_denom`, `max_recipients` and
+  `max_message_len`, so clients read the bounds from the contract they are
+  talking to instead of hardcoding their own copy
+
 ### Fixed
 - `extend_ttl` was called with two arguments where the SDK takes three
   (`key`, `threshold`, `extend_to`), so the crate did not compile. A

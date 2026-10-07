@@ -20,8 +20,9 @@ basis-point shares, atomically, in one transaction.
 ## Types
 
 ```rust
-struct Split { to: Address, bps: u32 }
-struct Jar   { owner: Address, splits: Vec<Split> }
+struct Split  { to: Address, bps: u32 }
+struct Jar    { owner: Address, splits: Vec<Split> }
+struct Limits { bps_denom: u32, max_recipients: u32, max_message_len: u32 }
 ```
 
 ## Functions
@@ -37,6 +38,38 @@ struct Jar   { owner: Address, splits: Vec<Split> }
 | `jar_exists(jar_id) -> bool` | — | Whether the slug is already registered. |
 | `get_token() -> Address` | — | The USDC token address tips settle in. |
 | `get_admin() -> Address` | — | The contract admin recorded at deploy time. |
+| `get_limits() -> Limits` | — | The bounds this contract enforces: `bps_denom`, `max_recipients`, `max_message_len`. Reads no storage. |
+
+### Reading the contract's limits
+
+`BPS_DENOM`, `MAX_RECIPIENTS` and `MAX_MESSAGE_LEN` are private constants, so a
+client that wants to validate input before paying for a transaction has no way
+to read them. The result was that every client carried its own copy — the tip
+form capped messages at its own number, the splits editor hardcoded the twenty
+recipient limit — and changing a bound here silently desynchronised the stack.
+
+`get_limits` returns all three:
+
+```rust
+Limits {
+    bps_denom: 10_000,       // BPS_DENOM — the denominator every `bps` is a share of
+    max_recipients: 20,      // MAX_RECIPIENTS — most recipients in one jar
+    max_message_len: 280,    // MAX_MESSAGE_LEN — longest tip message, in UTF-8 bytes
+}
+```
+
+All three are compile-time constants, so the view reads no storage and costs
+the same regardless of contract state. A client can fetch it once at startup
+and cache it for the session.
+
+`max_message_len` is a **byte** count, not a character count — see
+[Message](#concepts) above. A client showing a remaining-characters indicator
+must count UTF-8 bytes against this number, not `message.length`.
+
+A test asserts the returned values equal the constants, so the view and the
+enforcement cannot drift apart. The current values are also asserted
+literally, which means changing a bound fails the suite until this document is
+updated with it.
 
 ### Checking slug availability
 
