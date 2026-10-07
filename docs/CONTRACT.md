@@ -34,9 +34,77 @@ struct Jar   { owner: Address, splits: Vec<Split> }
 | `transfer_jar_ownership(jar_id, new_owner)` | current jar `owner` | Hand control of a jar to `new_owner`. Splits are unchanged; the new owner does not need to authorize. Emits a `jar_xfer` event. |
 | `tip(from, jar_id, amount, message)` | `from` | Transfer `amount` USDC from `from`, split across the jar's recipients. |
 | `get_jar(jar_id) -> Jar` | — | Read a jar's configuration. Panics with `JarNotFound` if the slug is free. |
+| `get_jar_owner(jar_id) -> Address` | — | Read just a jar's owner. Panics with `JarNotFound` if the slug is free. |
+| `get_split_count(jar_id) -> u32` | — | How many recipients a jar pays. Panics with `JarNotFound` if the slug is free. |
+| `preview_split(jar_id, amount) -> Vec<i128>` | — | What each recipient would receive from a tip of `amount`, in split order. Rejects the amounts `tip` rejects; panics with `JarNotFound` if the slug is free. |
 | `jar_exists(jar_id) -> bool` | — | Whether the slug is already registered. |
 | `get_token() -> Address` | — | The USDC token address tips settle in. |
 | `get_admin() -> Address` | — | The contract admin recorded at deploy time. |
+
+### Reading just the owner
+
+`get_jar_owner` answers "who controls this jar?" without moving the recipient
+list. The alternative — `get_jar(jar_id).owner` — deserializes the whole
+`splits` vector to read one address, which for a jar near the 20 recipient cap
+is a lot of data to render a "you own this jar" badge or to decide whether the
+connected wallet may call `update_splits`.
+
+It reads the same stored jar `get_jar` does, so the two never disagree, and it
+tracks `transfer_jar_ownership` immediately. A free slug is a `JarNotFound`
+panic rather than a placeholder address — a zero address in a return value
+would read to a client as a jar somebody owns.
+
+### Counting recipients
+
+`get_split_count` returns the number of entries in a jar's `splits`. A tip page
+rendering a "3 collaborators" badge needs that one integer, and
+`get_jar(jar_id).splits.len()` makes it pay for the whole recipient vector —
+up to 20 addresses and shares — to compute it. It also gives a client a cheap
+way to decide whether fetching the full list is worth it at all.
+
+The count is always between `1` and `20` (`MAX_RECIPIENTS`) for a stored jar,
+since validation rejects an empty splits list. An unregistered slug therefore
+panics with `JarNotFound` rather than returning `0`, which no real jar can
+have.
+
+### Previewing a tip
+
+`preview_split` answers "what does each collaborator actually get?" before the
+supporter signs. It returns one `i128` per recipient, in the same order as the
+jar's `splits`, computed by the same code path `tip` pays out with — the two
+share one internal helper, so the quoted split and the paid split cannot drift.
+
+Clients should call it instead of recomputing the split themselves. Doing the
+arithmetic client-side puts the rounding rule in two places, and the copy
+inevitably falls behind.
+
+```
+splits:  alice 70%, bob 30%
+preview_split(jar_id, 101) -> [70, 31]
+```
+
+Alice's share truncates from 70.7 to 70 and Bob absorbs the leftover 1 on top
+of his 30 — the dust goes to the **last** recipient, so a UI that rounds evenly
+would show Bob the wrong number.
+
+The shares always sum to exactly `amount`. That holds for awkward amounts too:
+a 3333 / 3333 / 3334 jar previewing `100` returns `[33, 33, 34]`, not `[33, 33,
+33]` with a unit lost.
+
+`preview_split` rejects exactly what `tip` rejects, so a preview that returns
+at all describes a tip that can go through:
+
+- `amount <= 0` — `InvalidAmount`.
+- an `amount` small enough that some recipient's share would truncate to zero
+  (`amount * bps < 10_000`) — `InvalidAmount`.
+- an `amount` so large that `amount * bps` overflows `i128` — `InvalidAmount`.
+- an unregistered slug — `JarNotFound`, rather than an empty vector, which
+  would read as a jar that pays nobody.
+
+One caveat: `tip` withholds a recipient's share when that recipient is also the
+tipper, rather than making them pay themselves. `preview_split` does not take a
+`from` address, so it reports every recipient's full share. A client whose
+connected wallet appears in the jar's splits should account for that itself.
 
 ### Checking slug availability
 
@@ -114,6 +182,8 @@ the code, so flipping that profile setting cannot turn it into a bypass.
 - The **last** recipient receives `amount - (sum of prior shares)`, so rounding
   dust is never lost and the full amount is always distributed.
 - The whole tip reverts if any single transfer fails — tips are all-or-nothing.
+- `preview_split(jar_id, amount)` runs this same calculation as a view, so a
+  client can show the exact per-recipient amounts before the supporter signs.
 
 ## Errors
 
@@ -123,7 +193,7 @@ the code, so flipping that profile setting cannot turn it into a bypass.
 | 2 | `JarExists` | Slug already registered. |
 | 3 | `JarNotFound` | Slug not registered. |
 | 4 | `InvalidSplits` | **No longer raised.** Split validation now reports the specific failure as code 10, 11 or 12. The variant is retained so existing codes keep their values. |
-| 5 | `InvalidAmount` | Tip amount ≤ 0, or so large that `amount * bps` overflows `i128` before the division. |
+| 5 | `InvalidAmount` | Tip amount ≤ 0, small enough that some recipient's share would truncate to zero, or so large that `amount * bps` overflows `i128` before the division. Raised by `tip` and by `preview_split`. |
 | 6 | `TooManyRecipients` | More than 20 recipients. |
 | 7 | `DuplicateRecipient` | The same address appears more than once in the splits. |
 | 8 | `MessageTooLong` | Tip message exceeds 280 bytes. |
