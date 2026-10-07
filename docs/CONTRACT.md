@@ -35,6 +35,7 @@ struct Jar   { owner: Address, splits: Vec<Split> }
 | `tip(from, jar_id, amount, message)` | `from` | Transfer `amount` USDC from `from`, split across the jar's recipients. |
 | `get_jar(jar_id) -> Jar` | — | Read a jar's configuration. Panics with `JarNotFound` if the slug is free. |
 | `get_jar_owner(jar_id) -> Address` | — | Read just a jar's owner. Panics with `JarNotFound` if the slug is free. |
+| `get_split_count(jar_id) -> u32` | — | How many recipients a jar pays. Panics with `JarNotFound` if the slug is free. |
 | `jar_exists(jar_id) -> bool` | — | Whether the slug is already registered. |
 | `get_token() -> Address` | — | The USDC token address tips settle in. |
 | `get_admin() -> Address` | — | The contract admin recorded at deploy time. |
@@ -51,6 +52,19 @@ It reads the same stored jar `get_jar` does, so the two never disagree, and it
 tracks `transfer_jar_ownership` immediately. A free slug is a `JarNotFound`
 panic rather than a placeholder address — a zero address in a return value
 would read to a client as a jar somebody owns.
+
+### Counting recipients
+
+`get_split_count` returns the number of entries in a jar's `splits`. A tip page
+rendering a "3 collaborators" badge needs that one integer, and
+`get_jar(jar_id).splits.len()` makes it pay for the whole recipient vector —
+up to 20 addresses and shares — to compute it. It also gives a client a cheap
+way to decide whether fetching the full list is worth it at all.
+
+The count is always between `1` and `20` (`MAX_RECIPIENTS`) for a stored jar,
+since validation rejects an empty splits list. An unregistered slug therefore
+panics with `JarNotFound` rather than returning `0`, which no real jar can
+have.
 
 ### Checking slug availability
 
