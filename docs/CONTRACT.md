@@ -726,6 +726,64 @@ slug names at submission time.
 > A test that pins the `tip` authorization behaviour is tracked separately from
 > this document; link it here once it lands.
 
+### Admin-only functions
+
+A single address — recorded at deploy time and readable through `get_admin()` —
+authorizes the contract's configuration entry points. All of them go through the
+same `require_admin` helper, which loads the stored address and demands its
+signature, so the table below is exhaustive: an entry point that is not in it
+does not check the admin.
+
+| Function | What only the admin can change |
+|----------|--------------------------------|
+| `allow_token(token)` | Add an asset to the tip allowlist. Idempotent. |
+| `disallow_token(token)` | Remove one, except the deploy-time token (`CannotDisallowDefault`). |
+| `set_tip_hook(hook)` | Point the post-tip callback at a contract, or clear it. |
+| `set_registrar(registrar)` | Require a registrar co-signature for new jars, or clear it. |
+| `set_fee_bps(fee_bps)` | Set the protocol fee in `0..=500` bps; the fee is paid to the admin. |
+| `transfer_admin(new_admin)` | Hand the role to another address. It takes effect immediately; there is no acceptance step. |
+| `pause()` / `resume()` | Stop and restart `tip`, `tip_with_ref` and `tip_in_token`. |
+| `upgrade(new_wasm_hash)` | Replace the running Wasm, keeping the address and all stored state. |
+
+The powers are configuration, not custody. The admin **cannot**:
+
+- move a jar's funds. Nothing can: tips go straight from the tipper to the
+  recipients in the same invocation. There is no sweep, no withdraw-all, and
+  `withdraw_held` pays only the address it names.
+- edit a jar it does not own. Splits, minimum, ownership and lock state are
+  gated on the jar's owner — plus each affected recipient for a reduction on a
+  locked jar — regardless of who holds the admin key.
+- repoint the settlement token. `DataKey::Token` is written exactly once, in
+  `__constructor`, and there is no setter, so `get_token()` is immutable after
+  deploy. The admin may add other assets to the allowlist, but `tip` always
+  pays through the default one and `disallow_token` refuses to remove it.
+- charge more than 500 bps (5%). `set_fee_bps` rejects larger values with
+  `FeeTooHigh` and leaves the stored fee unchanged.
+- change the compiled-in bounds: 20 recipients, a 280-byte message, 10 000 bps
+  for the whole split. They ship with the code, so changing one means shipping
+  new code.
+- stop scheduled collection. `pause` gates the three tip entry points only;
+  `collect_recurring` and `withdraw_held` keep working while paused.
+
+`upgrade` is the widest power on the list and it is deliberately in the admin's
+hands: new Wasm can change everything the bullets above pin down. Operators
+should treat the admin key as the contract's root authority for that reason,
+and `transfer_admin` as the rotation mechanism. The stored token address
+survives an upgrade because storage is kept.
+
+**The token address is immutable after deploy.** It is fixed by the
+`__constructor` argument, exposed read-only through `get_token()`, and used by
+`tip`, `collect_recurring` and the fee transfer. Rotating the settlement asset
+means deploying a new contract, not reconfiguring this one; the allowlist
+exists so supporters can pay in *additional* assets without that migration.
+
+**Maintenance note.** This table is the complete list of admin-gated entry
+points. When a function starts or stops calling `require_admin`, update this
+section, the `Auth` column of the [function tables](#functions), and the
+`DataKey::Admin` comment in `contracts/tip-splitter/src/lib.rs` in the same
+change — otherwise the "what can the admin do?" answer drifts from the code
+exactly the way issue #87 found it had.
+
 ## Errors
 
 | Code | Name | Cause |

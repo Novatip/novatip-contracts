@@ -306,7 +306,10 @@ pub struct Recurring {
 
 #[contracttype(export = false)]
 pub enum DataKey {
-    /// Contract admin (deployer); reserved for future migrations.
+    /// Contract admin: the address that gates the nine configuration entry
+    /// points listed under "Admin-only functions" in `docs/CONTRACT.md`.
+    /// Written by the constructor and by `transfer_admin`; grants nothing
+    /// beyond that list.
     Admin,
     /// Address of the USDC Stellar Asset Contract used for all tips.
     Token,
