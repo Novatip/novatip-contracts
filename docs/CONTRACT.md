@@ -103,6 +103,7 @@ one belongs to a jar, the other to a `(jar, supporter)` pair.
 | `jar_exists(jar_id) -> bool` | — | Whether the slug is already registered. |
 | `is_recipient(jar_id, address) -> bool` | — | Whether `address` appears in the jar's splits. Panics with `JarNotFound` if the slug is free. |
 | `get_min_tip_amount(jar_id) -> Option<i128>` | — | Read a jar's optional minimum tip amount. Returns `None` if no minimum is set. Panics with `JarNotFound` if the slug is free. |
+| `get_min_accepted_tip(jar_id) -> i128` | — | The smallest tip this jar accepts: the larger of the amount needed to give every recipient a non-zero share and the jar's configured minimum. See [the smallest amount a jar accepts](#the-smallest-amount-a-jar-accepts-86). Panics with `JarNotFound` if the slug is free. |
 | `get_token() -> Address` | — | The USDC token address tips settle in. |
 | `get_admin() -> Address` | — | The contract admin recorded at deploy time. |
 | `transfer_admin(new_admin)` | contract `admin` | Hand admin control to `new_admin`. Rejected with `AdminExists` when it is already the current admin. Emits an `adm_xfer` event carrying both addresses. |
@@ -129,17 +130,19 @@ written as raised only when every earlier check has passed.
 | `set_min_tip_amount(jar_id, min_amount)` | jar `owner` | `JarNotFound` → `InvalidMinimumAmount` | Set or clear an optional minimum tip amount for a jar. `min_amount` must be strictly positive (`> 0`) or `None` to clear. Emits a `min_tip` event. |
 | `transfer_jar_ownership(jar_id, new_owner)` | current jar `owner` | `JarNotFound` → `InvalidRecipient` (owner is the contract or its token) | Hand control of a jar to `new_owner`. Splits are unchanged; the new owner does not need to authorize. Emits a `jar_xfer` event carrying both owners. |
 | `rename_jar(jar_id, new_jar_id)` | jar `owner` | `InvalidJarId` (new id not a canonical `@`-prefixed `[a-z0-9_-]{3,32}` slug) → `JarNotFound` → `JarIdInUse` | Move a jar, its stats and its minimum to `new_jar_id`. The old id stops resolving once the move is complete. Emits a `jar_rnm` event carrying both ids. |
-| `tip(from, jar_id, amount, message)` | `from` | `AmountZero` / `AmountNegative` → `MessageTooLong` → `JarNotFound` → `BelowMinTipAmount` → `NotInitialized` → `SplitAmountTooSmall` / `AmountOverflow` (a share truncates to zero, or `amount * bps` overflows `i128`) | Transfer `amount` USDC from `from`, split across the jar's recipients. Emits a `tip` event carrying the per-recipient breakdown. Rejects amounts below the jar's minimum with `BelowMinTipAmount`. A failing token `transfer` reverts the whole call with the **token contract's own error**, not one of this contract's codes (e.g. an insufficient balance). |
+| `tip(from, jar_id, amount, message)` | `from` | `ContractPaused` → `NotInitialized` → `AmountZero` (amount = 0) / `AmountNegative` (amount < 0) → `MessageTooLong` → `JarNotFound` → `BelowMinTipAmount` → `InsufficientBalance` → `SplitAmountTooSmall` (a share truncates to zero) / `AmountOverflow` (`amount * bps` overflows `i128`) | Transfer `amount` USDC from `from`, split across the jar's recipients. Emits a `tip` event carrying the per-recipient breakdown. Rejects amounts below the jar's minimum with `BelowMinTipAmount` and amounts that cannot pay every recipient with `SplitAmountTooSmall`; see [the smallest amount a jar accepts](#the-smallest-amount-a-jar-accepts-86). A failing token `transfer` reverts the whole call with the **token contract's own error**, not one of this contract's codes (e.g. an insufficient balance). |
 | `get_jar(jar_id) -> Jar` | — | `JarNotFound` | Read a jar's configuration. Panics with `JarNotFound` if the slug is free. |
 | `get_jar_owner(jar_id) -> Address` | — | `JarNotFound` | Read just a jar's owner. Panics with `JarNotFound` if the slug is free. |
 | `get_split_count(jar_id) -> u32` | — | `JarNotFound` | How many recipients a jar pays. Panics with `JarNotFound` if the slug is free. |
 | `preview_split(jar_id, amount) -> Vec<i128>` | — | `AmountZero` / `AmountNegative` → `JarNotFound` → `BelowMinTipAmount` → `SplitAmountTooSmall` / `AmountOverflow` | What each recipient would receive from a tip of `amount`, in split order. Rejects amounts below the jar's minimum with `BelowMinTipAmount` as well as the amounts `tip` rejects, in the same order; panics with `JarNotFound` if the slug is free. |
+| `preview_tip(jar_id, from, amount) -> Vec<i128>` | — | `AmountZero` (amount = 0) / `AmountNegative` (amount < 0) → `JarNotFound` → `BelowMinTipAmount` → `SplitAmountTooSmall` / `AmountOverflow` | The sender-aware preview (#177): exactly the amounts `tip` will transfer for `from`, helper-shared with the payout. |
 | `preview_tip(jar_id, from, amount) -> Vec<i128>` | — | `InvalidAmount` (amount ≤ 0) → `JarNotFound` → `BelowMinTipAmount` → `InvalidAmount` (a share truncates to zero, or `amount * bps` overflows) | The sender-aware preview (#177): exactly the amounts `tip` will transfer for `from`, helper-shared with the payout. |
 | `tip_many(from, tips) -> Vec<u64>` | `from` | Soroban auth error (missing `from` signature) → `ContractPaused` → `BatchEmpty` → `BatchTooLarge` → `NotInitialized`, then per entry the same sequence as `tip`: `AmountZero` / `AmountNegative` → `MessageTooLong` → `JarNotFound` → `BelowMinTipAmount` → `SplitAmountTooSmall` / `AmountOverflow` → `InsufficientBalance` → the token contract's own error | Tip several jars in one transaction (#84). The batch-size and pause checks run first, before any jar is looked up; each entry is then settled exactly as `tip` would settle it, and a failure in any entry reverts the whole call. |
 | `collect_recurring(id)` | — | `RecurringNotFound` → `NotDue` → `JarNotFound` → `NotInitialized` → `InsufficientAllowance` → `InsufficientBalance` | Collect one due period of a recurring schedule through the supporter's token allowance (#175). Publishes the same `tip` event and fires the post-tip hook. |
 | `jar_exists(jar_id) -> bool` | — | — | Whether the slug is already registered. Reads one key and returns a plain `bool`; never panics on a free slug. |
 | `is_recipient(jar_id, address) -> bool` | — | `JarNotFound` | Whether `address` appears in the jar's splits. Panics with `JarNotFound` if the slug is free. |
 | `get_min_tip_amount(jar_id) -> Option<i128>` | — | `JarNotFound` | Read a jar's optional minimum tip amount. Returns `None` if no minimum is set. Panics with `JarNotFound` if the slug is free. |
+| `get_min_accepted_tip(jar_id) -> i128` | — | `JarNotFound` | The smallest tip this jar accepts: the larger of the truncation floor and the configured minimum. See [the smallest amount a jar accepts](#the-smallest-amount-a-jar-accepts-86). |
 | `get_token() -> Address` | — | `NotInitialized` | The USDC token address tips settle in. Reads instance storage; `NotInitialized` if the deploy-time token is absent. |
 | `get_admin() -> Address` | — | `NotInitialized` | The contract admin recorded at deploy time. Reads instance storage; `NotInitialized` if the deploy-time admin is absent. |
 | `get_limits() -> Limits` | — | — | The bounds this contract enforces: `bps_denom`, `max_recipients`, `max_message_len`, `max_batch_tips`. Reads no storage. |
@@ -350,7 +353,9 @@ at all describes a tip that can go through:
 - `amount == 0` — `AmountZero`, checked before the jar lookup and the minimum.
 - `amount < 0` — `AmountNegative`, at the same point.
 - an `amount` small enough that some recipient's share would truncate to zero
-  (`amount * bps < 10_000`) — `SplitAmountTooSmall`.
+  (`amount * bps < 10_000`) — `SplitAmountTooSmall`. See
+  [the smallest amount a jar accepts](#the-smallest-amount-a-jar-accepts-86)
+  for the floor this implies.
 - an `amount` so large that `amount * bps` overflows `i128` — `AmountOverflow`.
 - an unregistered slug — `JarNotFound`, rather than an empty vector, which
   would read as a jar that pays nobody.
@@ -402,7 +407,7 @@ By default, jars have no minimum tip amount (`None`), accepting any positive amo
 `set_min_tip_amount(jar_id, min_amount)` lets the jar owner configure an optional
 minimum tip amount (`Some(amount)` where `amount > 0`) or clear it (`None`). Only the
 jar owner may authorize this call. Passing a non-positive amount (`<= 0`) panics with
-`InvalidAmount` (error code 5).
+`InvalidMinimumAmount` (error code 29).
 
 When a minimum is configured, any tip with `amount < min_amount` is rejected with
 `BelowMinTipAmount` (error code 13) before any tokens move or events emit. `preview_split`
@@ -412,6 +417,80 @@ similarly rejects amounts below the minimum with `BelowMinTipAmount`.
 - Returns `None` if no minimum is set (the default for all newly created jars).
 - Returns `Some(amount)` if a minimum floor has been configured.
 - Panics with `JarNotFound` (error code 3) if the slug is not registered.
+
+### The smallest amount a jar accepts (86)
+
+The configured minimum is only one of two floors. Independently of it, `tip`
+rejects any amount that cannot give **every** recipient a non-zero share. A
+jar's effective minimum is the larger of the two, and
+`get_min_accepted_tip(jar_id)` returns it.
+
+**1. The truncation floor.** A recipient on `bps` receives
+`amount * bps / 10_000` with integer division, so their share is zero unless
+`net * bps >= 10_000`, where `net` is what is left after the
+[protocol fee](#the-protocol-fee-79). The smallest net that pays everyone is
+
+```
+net_min = max over every recipient of ceil(10_000 / bps)
+```
+
+Every entry is checked, including the last one — even though the last entry
+absorbs the rounding remainder, the guard runs before any share is computed.
+
+**2. The fee gross-up.** The fee comes off the top, so the signed amount must
+be large enough that `net_min` survives it. Since `net = amount -
+floor(amount * fee_bps / 10_000)`, the first gross amount that leaves a net of
+at least `net_min` is
+
+```
+gross_min = floor((net_min - 1) * 10_000 / (10_000 - fee_bps)) + 1
+```
+
+With no fee (`fee_bps = 0`) this is simply `net_min`.
+
+**3. The configured minimum.** The owner's optional floor is applied last:
+
+```
+accepted_min = max(gross_min, configured_minimum)
+```
+
+(no configured minimum counts as `0`).
+
+`get_min_accepted_tip` runs exactly this calculation, so a client can show the
+floor — and disable a submit button below it — without reimplementing the
+arithmetic. It is a view: it reads no balance, so it says nothing about whether
+the tipper can actually pay. The configured component is a default-token
+amount; `tip_in_token` only enforces it when the tip is paid in the default
+token, while the truncation floor is pure basis-point arithmetic and applies to
+any allowed token.
+
+**Worked example — a jar with a 1 bps share.** Splits of `1` bps for a
+micro-collaborator and `9 999` bps for everyone else. `ceil(10_000 / 1)` is
+`10 000`, so with no fee:
+
+| Tip | Result |
+|-----|--------|
+| 9 999 | rejected with `SplitAmountTooSmall` (27); nothing moves |
+| 10 000 | accepted: `1` to the 1 bps recipient, `9 999` to the other |
+
+**Worked example — a fee raises the floor.** Keep the 1 bps share but set a 5%
+protocol fee (`fee_bps = 500`). A gross of `104` leaves a net of
+`104 - floor(104 * 500 / 10_000) = 99`, which truncates the 1 bps share to
+zero; `105` leaves `100`, the first net that pays it. `get_min_accepted_tip`
+reports `105`, a tip of `104` fails with `SplitAmountTooSmall`, and `105`
+succeeds.
+
+**Which error a too-small amount returns.** The floors are enforced by
+different checks, so the code tells the client which one it missed:
+
+- below the **configured** minimum — `BelowMinTipAmount` (13);
+- below the **truncation** floor — `SplitAmountTooSmall` (27), even when the
+  configured minimum is unset or smaller.
+
+An amount below `get_min_accepted_tip` is therefore always one of those two.
+`InvalidAmount` (5) is **not** returned; the variant is retired and kept only
+so existing codes keep their values. A client that handles `InvalidAmount` as
+the minimum-tip error will never see it, and should handle 13 and 27 instead.
 
 ### Checking slug availability
 
@@ -655,7 +734,7 @@ slug names at submission time.
 | 2 | `JarExists` | Slug already registered. |
 | 3 | `JarNotFound` | Slug not registered. |
 | 4 | `InvalidSplits` | **No longer raised.** Split validation now reports the specific failure as code 10, 11 or 12. The variant is retained so existing codes keep their values. |
-| 5 | `InvalidAmount` | Amount ≤ 0, small enough that some recipient's share would truncate to zero, or so large that `amount * bps` overflows `i128` before the division. Raised by `tip` and `preview_split` (over the tip amount) and by `set_min_tip_amount` (for a non-positive minimum). |
+| 5 | `InvalidAmount` | **No longer raised.** Amount validation reports the specific failure: `AmountZero` (25), `AmountNegative` (26), `SplitAmountTooSmall` (27), `AmountOverflow` (28), or `InvalidMinimumAmount` (29). The variant is retained so existing codes keep their values. |
 | 6 | `TooManyRecipients` | More than 20 recipients. |
 | 7 | `DuplicateRecipient` | The same address appears more than once in the splits. |
 | 8 | `MessageTooLong` | Tip message exceeds 280 bytes. |

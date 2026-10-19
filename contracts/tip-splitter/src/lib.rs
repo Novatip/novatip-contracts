@@ -2663,9 +2663,10 @@ impl TipSplitter {
     /// reports them, which is what keeps the quoted split and the paid split
     /// identical.
     ///
-    /// Panics with `InvalidAmount` if `amount` is not positive, if it is small
-    /// enough that some recipient's share would truncate to zero, or if it is
-    /// so large that `amount * bps` overflows `i128`.
+    /// Panics with `AmountZero` / `AmountNegative` if `amount` is not positive,
+    /// `SplitAmountTooSmall` if it is small enough that some recipient's share
+    /// would truncate to zero, and `AmountOverflow` if `amount * bps` overflows
+    /// `i128`.
     fn compute_shares(env: &Env, splits: &Vec<Split>, amount: i128) -> Vec<i128> {
         if amount == 0 {
             panic_with_error!(env, Error::AmountZero);
@@ -2681,7 +2682,7 @@ impl TipSplitter {
         // truncates to zero when `amount < 10_000 / bps`. If that happens, the
         // recipient is silently skipped and the final recipient absorbs the
         // dust — the tip succeeds but the collaborator never sees it.
-        // Better to fail loudly with InvalidAmount than to pay nobody.
+        // Better to fail loudly with SplitAmountTooSmall than to pay nobody.
         for i in 0..n {
             let bps = splits.get(i).unwrap().bps as i128;
             // `checked_mul`: `amount * bps` can overflow i128 before the
