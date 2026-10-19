@@ -61,6 +61,7 @@ one belongs to a jar, the other to a `(jar, supporter)` pair.
 | `leave_jar(jar_id, recipient)` | `recipient` | Remove `recipient` from the jar's splits. Their share is added to the last remaining entry so the splits still sum to 10 000. Rejected with `SoleRecipient` (only entry) or `NotRecipient` (not in the jar). Emits a `splits` event. |
 | `set_min_tip_amount(jar_id, min_amount)` | jar `owner` | Set or clear an optional minimum tip amount for a jar. `min_amount` must be strictly positive (`> 0`) or `None` to clear. Emits a `min_tip` event. |
 | `transfer_jar_ownership(jar_id, new_owner)` | current jar `owner` | Hand control of a jar to `new_owner`. Splits are unchanged; the new owner does not need to authorize. Emits a `jar_xfer` event carrying both owners. |
+| `rename_jar(jar_id, new_jar_id)` | jar `owner` | Move a jar, its stats and its minimum to a new slug. The old slug stops resolving immediately; `new_jar_id` must be free and pass the same length checks as `create_jar`. Emits a `jar_rnm` event carrying both ids. |
 | `tip(from, jar_id, amount, message)` | `from` | Move `amount` USDC out of `from` and route it across the jar's recipients. A recipient who cannot receive the token has their share **escrowed in the contract** (see `get_held`/`withdraw_held`) instead of reverting the tip. Emits a `tip` event carrying the per-recipient breakdown. Rejects amounts below the jar's minimum with `BelowMinTipAmount`. |
 | `get_held(recipient) -> i128` | — | How much the contract is holding for `recipient` because a past tip could not deliver their share. `0` when nothing is held. |
 | `withdraw_held(recipient)` | `recipient` | Pay a recipient their held balance once they can receive again. Rejected with `NothingHeld` when nothing is owed. Emits a `withdraw` event. |
@@ -91,6 +92,11 @@ one belongs to a jar, the other to a `(jar, supporter)` pair.
 | `get_min_accepted_tip(jar_id) -> i128` | — | The smallest positive amount that pays every configured recipient a non-zero share, raised to the jar's minimum when that minimum is larger. Panics with `JarNotFound` if the slug is free. |
 | `get_token() -> Address` | — | The USDC token address tips settle in. |
 | `get_admin() -> Address` | — | The contract admin recorded at deploy time. |
+| `transfer_admin(new_admin)` | contract `admin` | Hand admin control to `new_admin`. Rejected with `AdminExists` when it is already the current admin. Emits an `adm_xfer` event carrying both addresses. |
+| `pause()` | contract `admin` | Pause tipping: `tip`, `tip_with_ref` and `tip_in_token` reject with `ContractPaused`. Emits a `pause` event. |
+| `resume()` | contract `admin` | Lift a pause. Emits a `resume` event. |
+| `is_paused() -> bool` | — | Whether tipping is currently paused. Reads instance storage. |
+| `upgrade(new_wasm_hash)` | contract `admin` | Replace the running contract Wasm while keeping the address and all stored state. Emits an `upgrade` event carrying the new hash. |
 | `get_limits() -> Limits` | — | The bounds this contract enforces: `bps_denom`, `max_recipients`, `max_message_len`. Reads no storage. |
 | `version() -> u32` | — | Which interface shape this deployment speaks. Reads no storage. See [detecting the interface version](#detecting-the-interface-version). |
 | `get_jar_stats(jar_id) -> JarStats` | — | A jar's on-chain tip count and total. Zeros for a jar nobody has tipped; `JarNotFound` if the slug is free. |
@@ -107,7 +113,8 @@ written as raised only when every earlier check has passed.
 | `create_jar(owner, jar_id, splits)` | `owner` (+ registrar co-auth when set) | `InvalidJarId` → `JarExists` → `SplitsEmpty` → `TooManyRecipients` → `SplitOutOfRange` / `DuplicateRecipient` (per entry) → `SplitSumNot100Pct` → Soroban auth error (missing registrar co-signature, #178) | Register a new jar. Fails if the slug is empty, over `MAX_JAR_ID_LEN` bytes, already exists, or splits are invalid. The registrar's co-signature is demanded only after validation passes, so a malformed request never burns one. Emits a `jar_crtd` event. |
 | `update_splits(jar_id, splits)` | jar `owner` | `JarNotFound` → `SplitsEmpty` → `TooManyRecipients` → `SplitOutOfRange` / `DuplicateRecipient` (per entry) → `SplitSumNot100Pct` | Replace a jar's splits. Subject to the same validation as `create_jar`. Emits a `splits` event. |
 | `set_min_tip_amount(jar_id, min_amount)` | jar `owner` | `JarNotFound` → `InvalidMinimumAmount` | Set or clear an optional minimum tip amount for a jar. `min_amount` must be strictly positive (`> 0`) or `None` to clear. Emits a `min_tip` event. |
-| `transfer_jar_ownership(jar_id, new_owner)` | current jar `owner` | `JarNotFound` | Hand control of a jar to `new_owner`. Splits are unchanged; the new owner does not need to authorize. Emits a `jar_xfer` event carrying both owners. |
+| `transfer_jar_ownership(jar_id, new_owner)` | current jar `owner` | `JarNotFound` → `InvalidRecipient` (owner is the contract or its token) | Hand control of a jar to `new_owner`. Splits are unchanged; the new owner does not need to authorize. Emits a `jar_xfer` event carrying both owners. |
+| `rename_jar(jar_id, new_jar_id)` | jar `owner` | `InvalidJarId` (new id empty or over `MAX_JAR_ID_LEN`) → `JarNotFound` → `JarIdInUse` | Move a jar, its stats and its minimum to `new_jar_id`. The old id stops resolving once the move is complete. Emits a `jar_rnm` event carrying both ids. |
 | `tip(from, jar_id, amount, message)` | `from` | `AmountZero` / `AmountNegative` → `MessageTooLong` → `JarNotFound` → `BelowMinTipAmount` → `NotInitialized` → `SplitAmountTooSmall` / `AmountOverflow` (a share truncates to zero, or `amount * bps` overflows `i128`) | Transfer `amount` USDC from `from`, split across the jar's recipients. Emits a `tip` event carrying the per-recipient breakdown. Rejects amounts below the jar's minimum with `BelowMinTipAmount`. A failing token `transfer` reverts the whole call with the **token contract's own error**, not one of this contract's codes (e.g. an insufficient balance). |
 | `get_jar(jar_id) -> Jar` | — | `JarNotFound` | Read a jar's configuration. Panics with `JarNotFound` if the slug is free. |
 | `get_jar_owner(jar_id) -> Address` | — | `JarNotFound` | Read just a jar's owner. Panics with `JarNotFound` if the slug is free. |
@@ -122,6 +129,11 @@ written as raised only when every earlier check has passed.
 | `get_min_accepted_tip(jar_id) -> i128` | — | `JarNotFound` | The smallest positive amount that pays every configured recipient a non-zero share, raised to the jar's minimum when that minimum is larger. The share floor is a per-recipient property of the split configuration, so a configured minimum can only raise it, never lower it. |
 | `get_token() -> Address` | — | `NotInitialized` | The USDC token address tips settle in. Reads instance storage; `NotInitialized` if the deploy-time token is absent. |
 | `get_admin() -> Address` | — | `NotInitialized` | The contract admin recorded at deploy time. Reads instance storage; `NotInitialized` if the deploy-time admin is absent. |
+| `transfer_admin(new_admin)` | contract `admin` | `NotInitialized` → `AdminExists` | Hand admin control to `new_admin`. Emits an `adm_xfer` event carrying both addresses. |
+| `pause()` | contract `admin` | `NotInitialized` | Pause tipping. Emits a `pause` event. |
+| `resume()` | contract `admin` | `NotInitialized` | Lift a pause. Emits a `resume` event. |
+| `is_paused() -> bool` | — | — | Whether tipping is currently paused. |
+| `upgrade(new_wasm_hash)` | contract `admin` | `NotInitialized` | Replace the running Wasm, keeping the address and stored state. Emits an `upgrade` event carrying the new hash. |
 | `get_limits() -> Limits` | — | — | The bounds this contract enforces: `bps_denom`, `max_recipients`, `max_message_len`. Reads no storage. |
 
 Two ordering notes that are easy to get wrong:
@@ -505,6 +517,11 @@ slug names at submission time.
 | 27 | `SplitAmountTooSmall` | `amount * bps` is below `10_000` for some recipient, so their share would truncate to zero and they would silently be paid nothing. Refused before any transfer. |
 | 28 | `AmountOverflow` | `amount * bps` would overflow `i128` before the division brings it back into range. A typed error instead of a wasm trap. |
 | 29 | `InvalidMinimumAmount` | `set_min_tip_amount` was given a non-positive `Some(amount)`. `None` (clear the minimum) stays valid. |
+| 30 | `AdminExists` | `transfer_admin` was given the address that is already the admin. |
+| 31 | `ContractPaused` | A tipping call (`tip`, `tip_with_ref`, `tip_in_token`) ran while an admin had paused the contract. |
+| 32 | `JarIdInUse` | `rename_jar` was given a new id that already has a jar. |
+| 33 | `NoFundsMoved` | A tip transferred nothing: every recipient's share was skipped (for example because every recipient is the sender), so publishing a `tip` event would claim a payout that never happened. Raised before totals and the event. |
+| 34 | `InvalidRecipient` | A split recipient, jar owner or new owner is the contract itself or its token — an address that could never spend the funds. |
 
 Error codes are part of the public interface: `@novatip/sdk` and the frontend
 both map these numbers to user-facing messages. New variants are **appended**

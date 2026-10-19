@@ -20,10 +20,17 @@ All notable changes to `novatip-contracts` are documented here.
 - `get_min_accepted_tip(jar_id) -> i128` reports the smallest tip that pays every recipient a non-zero share, raised to the jar's minimum when that is larger
 - `preview_split_details(jar_id, amount) -> Vec<PreviewSplit>` returns the preview paired with each recipient's address, so a client needs one call instead of `preview_split` plus `get_jar`
 - Error codes 25 `AmountZero`, 26 `AmountNegative`, 27 `SplitAmountTooSmall`, 28 `AmountOverflow` and 29 `InvalidMinimumAmount`; `InvalidAmount` (5) is retired and no longer raised
+- `transfer_admin(new_admin)`, `pause()`, `resume()`, `is_paused()` and `upgrade(new_wasm_hash)`; error codes 30 `AdminExists`, 31 `ContractPaused`
+- `rename_jar(jar_id, new_jar_id)` moves a jar, its stats and its minimum to a new slug; error code 32 `JarIdInUse`
+- Error codes 33 `NoFundsMoved` (a tip where every share was skipped) and 34 `InvalidRecipient` (contract or token used as recipient/owner)
+- `create_jar` extends the contract instance TTL, and jar-scoped calls extend the jar and minimum in lockstep (#91, #92)
 - `contracts/tip-splitter/interface.json` is now a populated public-interface snapshot instead of a placeholder
 
 ### Changed (breaking: event payload)
-- The `tip` event's data is the named `TipEvent` struct (`from`, `amount`, `message`, `breakdown`, `token`, `seq`, `reference`) on both payout paths; `collect_recurring` previously still published the positional tuple
+- Every event struct carries a leading `version: u32` field, currently `1`
+- The `tip` event's data is the named `TipEvent` struct (`version`, `from`, `amount`, `message`, `breakdown`, `token`, `seq`, `reference`) on both payout paths; `collect_recurring` previously still published the positional tuple
+- Invalid owners and recipients (the contract itself or its token) are rejected with `InvalidRecipient` (#94)
+- `update_splits` is a no-op when the new splits equal the current ones (#100)
 - The `tip` event's data tuple gained `token: Address` (5th element) and `tip_count: u64` (6th element)
 - `tip` withholds a recipient's share when that recipient is also the tipper
 

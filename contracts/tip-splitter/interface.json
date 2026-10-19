@@ -299,6 +299,26 @@
         {
           "name": "InvalidMinimumAmount",
           "value": 29
+        },
+        {
+          "name": "AdminExists",
+          "value": 30
+        },
+        {
+          "name": "ContractPaused",
+          "value": 31
+        },
+        {
+          "name": "JarIdInUse",
+          "value": 32
+        },
+        {
+          "name": "NoFundsMoved",
+          "value": 33
+        },
+        {
+          "name": "InvalidRecipient",
+          "value": 34
         }
       ]
     }
@@ -311,6 +331,10 @@
         {
           "name": "owner",
           "type_": "address"
+        },
+        {
+          "name": "version",
+          "type_": "u32"
         }
       ]
     }
@@ -322,6 +346,10 @@
       "fields": [
         {
           "name": "count",
+          "type_": "u32"
+        },
+        {
+          "name": "version",
           "type_": "u32"
         }
       ]
@@ -339,6 +367,10 @@
         {
           "name": "previous_owner",
           "type_": "address"
+        },
+        {
+          "name": "version",
+          "type_": "u32"
         }
       ]
     }
@@ -355,6 +387,10 @@
               "value_type": "i128"
             }
           }
+        },
+        {
+          "name": "version",
+          "type_": "u32"
         }
       ]
     }
@@ -411,6 +447,30 @@
         {
           "name": "token",
           "type_": "address"
+        },
+        {
+          "name": "version",
+          "type_": "u32"
+        }
+      ]
+    }
+  },
+  {
+    "udt_struct_v0": {
+      "lib": "",
+      "name": "UpgradedEvent",
+      "fields": [
+        {
+          "name": "admin",
+          "type_": "address"
+        },
+        {
+          "name": "new_hash",
+          "type_": {
+            "bytes_n": {
+              "n": 32
+            }
+          }
         }
       ]
     }
@@ -572,6 +632,73 @@
         {
           "name": "new_owner",
           "type_": "address"
+        }
+      ],
+      "outputs": []
+    }
+  },
+  {
+    "function_v0": {
+      "name": "transfer_admin",
+      "inputs": [
+        {
+          "name": "new_admin",
+          "type_": "address"
+        }
+      ],
+      "outputs": []
+    }
+  },
+  {
+    "function_v0": {
+      "name": "pause",
+      "inputs": [],
+      "outputs": []
+    }
+  },
+  {
+    "function_v0": {
+      "name": "resume",
+      "inputs": [],
+      "outputs": []
+    }
+  },
+  {
+    "function_v0": {
+      "name": "is_paused",
+      "inputs": [],
+      "outputs": [
+        "bool"
+      ]
+    }
+  },
+  {
+    "function_v0": {
+      "name": "upgrade",
+      "inputs": [
+        {
+          "name": "new_wasm_hash",
+          "type_": {
+            "bytes_n": {
+              "n": 32
+            }
+          }
+        }
+      ],
+      "outputs": []
+    }
+  },
+  {
+    "function_v0": {
+      "name": "rename_jar",
+      "inputs": [
+        {
+          "name": "jar_id",
+          "type_": "string"
+        },
+        {
+          "name": "new_jar_id",
+          "type_": "string"
         }
       ],
       "outputs": []

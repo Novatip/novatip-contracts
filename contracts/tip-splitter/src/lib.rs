@@ -86,6 +86,20 @@ const JAR_TTL_LEDGERS: u32 = 1_000_000;
 /// pays for the write occasionally rather than on every single access.
 const JAR_TTL_THRESHOLD: u32 = 500_000;
 
+/// Extend the contract instance TTL to this many ledgers on use.
+///
+/// The instance storage holds the admin and token addresses, plus the Wasm code
+/// entry itself in soroban-sdk 22. Once archived, every call fails until someone
+/// restores it. Reusing the same target as jars keeps the lifetime consistent
+/// across all persistent state (~58 days at 5s per ledger).
+const INSTANCE_TTL_LEDGERS: u32 = JAR_TTL_LEDGERS;
+
+/// Threshold below which the instance TTL is extended.
+///
+/// Matches `JAR_TTL_THRESHOLD`: extend when half the lifetime remains so active
+/// contracts don't pay the write cost on every call.
+const INSTANCE_TTL_THRESHOLD: u32 = JAR_TTL_THRESHOLD;
+
 /// The public interface this deployment speaks.
 ///
 /// `tip` has already changed shape twice (three event elements, then four) and
@@ -278,6 +292,8 @@ pub enum DataKey {
     /// while it is set (#178). Instance storage; absence means jar creation
     /// stays exactly as it was: owner auth only.
     Registrar,
+    /// Contract-wide pause flag. When present in instance storage, tipping is disabled.
+    Paused,
 }
 
 /// Public error codes. The numbers are part of the client interface —
@@ -358,6 +374,16 @@ pub enum Error {
     AmountOverflow = 28,
     /// A configured minimum tip must be positive.
     InvalidMinimumAmount = 29,
+    /// `transfer_admin` was called with the same address as the current admin.
+    AdminExists = 30,
+    /// An operation was attempted while the contract is paused.
+    ContractPaused = 31,
+    /// `rename_jar` was given a jar id that is already in use.
+    JarIdInUse = 32,
+    /// A tip where every transfer was skipped moved no funds.
+    NoFundsMoved = 33,
+    /// A split recipient or jar owner is the contract itself or its token.
+    InvalidRecipient = 34,
 }
 
 /// The interface a post-tip hook contract must implement (#176).
@@ -385,6 +411,7 @@ pub struct TipSplitter;
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct JarCreatedEvent {
+    pub version: u32,
     pub owner: Address,
 }
 
@@ -392,6 +419,7 @@ pub struct JarCreatedEvent {
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SplitsUpdatedEvent {
+    pub version: u32,
     pub count: u32,
 }
 
@@ -399,6 +427,7 @@ pub struct SplitsUpdatedEvent {
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct JarTransferredEvent {
+    pub version: u32,
     pub previous_owner: Address,
     pub new_owner: Address,
 }
@@ -407,6 +436,7 @@ pub struct JarTransferredEvent {
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct MinTipEvent {
+    pub version: u32,
     pub amount: Option<i128>,
 }
 
@@ -414,6 +444,7 @@ pub struct MinTipEvent {
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TipEvent {
+    pub version: u32,
     pub from: Address,
     pub amount: i128,
     pub message: String,
@@ -421,6 +452,14 @@ pub struct TipEvent {
     pub token: Address,
     pub seq: u64,
     pub reference: Option<BytesN<32>>,
+}
+
+/// Data published when the contract is upgraded (#102).
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct UpgradedEvent {
+    pub admin: Address,
+    pub new_hash: BytesN<32>,
 }
 
 #[contractimpl]
@@ -508,6 +547,16 @@ impl TipSplitter {
         if jar_id.is_empty() || jar_id.len() > MAX_JAR_ID_LEN {
             panic_with_error!(&env, Error::InvalidJarId);
         }
+        // Issue #94: reject the contract itself or its token as jar owner.
+        let contract_addr = env.current_contract_address();
+        let token_addr: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Token)
+            .unwrap_or_else(|| panic_with_error!(&env, Error::NotInitialized));
+        if owner == contract_addr || owner == token_addr {
+            panic_with_error!(&env, Error::InvalidRecipient);
+        }
         let key = DataKey::Jar(jar_id.clone());
         if env.storage().persistent().has(&key) {
             panic_with_error!(&env, Error::JarExists);
@@ -527,9 +576,15 @@ impl TipSplitter {
             },
         );
 
+        // Issue #91: extend instance TTL on jar creation so the contract stays
+        // alive alongside its jars.
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
+
         env.events().publish(
             (symbol_short!("jar_crtd"), jar_id),
-            JarCreatedEvent { owner },
+            JarCreatedEvent { version: 1, owner },
         );
     }
 
@@ -551,11 +606,15 @@ impl TipSplitter {
             .persistent()
             .get(&key)
             .unwrap_or_else(|| panic_with_error!(&env, Error::JarNotFound));
-        env.storage()
-            .persistent()
-            .extend_ttl(&key, JAR_TTL_THRESHOLD, JAR_TTL_LEDGERS);
+        // Issue #92: extend both jar and min-tip in lockstep.
+        Self::extend_jar_and_min_ttl(&env, &jar_id);
         jar.owner.require_auth();
         Self::validate_splits(&env, &splits);
+
+        // Skip if the splits haven't changed (issue #100).
+        if jar.splits == splits {
+            return;
+        }
 
         if jar.locked {
             // Consent rule: a current recipient must sign iff their share
@@ -579,6 +638,7 @@ impl TipSplitter {
         }
 
         let split_count = splits.len();
+        let key = DataKey::Jar(jar_id.clone());
         env.storage().persistent().set(
             &key,
             &Jar {
@@ -590,7 +650,10 @@ impl TipSplitter {
 
         env.events().publish(
             (symbol_short!("splits"), jar_id),
-            SplitsUpdatedEvent { count: split_count },
+            SplitsUpdatedEvent {
+                version: 1,
+                count: split_count,
+            },
         );
     }
 
@@ -612,11 +675,11 @@ impl TipSplitter {
             .persistent()
             .get(&key)
             .unwrap_or_else(|| panic_with_error!(&env, Error::JarNotFound));
-        env.storage()
-            .persistent()
-            .extend_ttl(&key, JAR_TTL_THRESHOLD, JAR_TTL_LEDGERS);
+        // Issue #92: extend both jar and min-tip in lockstep.
+        Self::extend_jar_and_min_ttl(&env, &jar_id);
         jar.owner.require_auth();
 
+        let key = DataKey::Jar(jar_id.clone());
         env.storage().persistent().set(
             &key,
             &Jar {
@@ -647,9 +710,8 @@ impl TipSplitter {
             .persistent()
             .get(&key)
             .unwrap_or_else(|| panic_with_error!(&env, Error::JarNotFound));
-        env.storage()
-            .persistent()
-            .extend_ttl(&key, JAR_TTL_THRESHOLD, JAR_TTL_LEDGERS);
+        // Issue #92: extend both jar and min-tip in lockstep.
+        Self::extend_jar_and_min_ttl(&env, &jar_id);
         jar.owner.require_auth();
 
         // All current recipients must consent to disarm the protection.
@@ -754,6 +816,7 @@ impl TipSplitter {
 
         Self::validate_splits(&env, &remaining);
         let split_count = remaining.len();
+        let key = DataKey::Jar(jar_id.clone());
         env.storage().persistent().set(
             &key,
             &Jar {
@@ -778,10 +841,19 @@ impl TipSplitter {
             .persistent()
             .get(&key)
             .unwrap_or_else(|| panic_with_error!(&env, Error::JarNotFound));
-        env.storage()
-            .persistent()
-            .extend_ttl(&key, JAR_TTL_THRESHOLD, JAR_TTL_LEDGERS);
+        // Issue #92: extend both jar and min-tip in lockstep.
+        Self::extend_jar_and_min_ttl(&env, &jar_id);
         jar.owner.require_auth();
+        // Issue #94: reject the contract itself or its token as new owner.
+        let contract_addr = env.current_contract_address();
+        let token_addr: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Token)
+            .unwrap_or_else(|| panic_with_error!(&env, Error::NotInitialized));
+        if new_owner == contract_addr || new_owner == token_addr {
+            panic_with_error!(&env, Error::InvalidRecipient);
+        }
         let prev_owner = jar.owner;
         env.storage().persistent().set(
             &key,
@@ -801,10 +873,136 @@ impl TipSplitter {
         env.events().publish(
             (symbol_short!("jar_xfer"), jar_id),
             JarTransferredEvent {
+                version: 1,
                 previous_owner: prev_owner,
                 new_owner,
             },
         );
+    }
+
+    /// Transfer admin control to a new address. Only the current admin may do this.
+    /// Rejects if the new admin is the same as the current one. Emits an event
+    /// carrying both addresses so indexers can track the handover.
+    pub fn transfer_admin(env: Env, new_admin: Address) {
+        let current_admin = Self::require_admin(&env);
+        if current_admin == new_admin {
+            panic_with_error!(&env, Error::AdminExists);
+        }
+        env.storage()
+            .instance()
+            .set(&DataKey::Admin, &new_admin.clone());
+        env.events()
+            .publish((symbol_short!("adm_xfer"),), (current_admin, new_admin));
+    }
+
+    /// Pause all tipping operations. Only the admin may call this.
+    /// Once paused, `tip`, `tip_with_ref`, and `tip_in_token` will reject with
+    /// `ContractPaused` until the admin calls `resume`. Emits a pause event.
+    pub fn pause(env: Env) {
+        let admin = Self::require_admin(&env);
+        env.storage().instance().set(&DataKey::Paused, &true);
+        env.events().publish((symbol_short!("pause"),), admin);
+    }
+
+    /// Resume tipping operations after a pause. Only the admin may call this.
+    /// Removes the pause flag from storage and emits a resume event.
+    pub fn resume(env: Env) {
+        let admin = Self::require_admin(&env);
+        env.storage().instance().remove(&DataKey::Paused);
+        env.events().publish((symbol_short!("resume"),), admin);
+    }
+
+    /// Check whether the contract is currently paused.
+    pub fn is_paused(env: Env) -> bool {
+        env.storage().instance().has(&DataKey::Paused)
+    }
+
+    /// Upgrade the contract to a new WASM hash. Admin-only (#102).
+    ///
+    /// This allows the deployer to replace the contract code without changing
+    /// its address or losing any stored state (jars, tips, recurring schedules).
+    /// Only the current admin may authorize this call. Emits an `upgrade` event
+    /// carrying the new hash so indexers can track which code version handled
+    /// each tip.
+    pub fn upgrade(env: Env, new_wasm_hash: BytesN<32>) {
+        let admin = Self::require_admin(&env);
+
+        // Deployer's update_current_contract_wasm replaces the running WASM
+        env.deployer()
+            .update_current_contract_wasm(new_wasm_hash.clone());
+
+        env.events().publish(
+            (symbol_short!("upgrade"),),
+            UpgradedEvent {
+                admin,
+                new_hash: new_wasm_hash,
+            },
+        );
+    }
+
+    /// Rename a jar by moving it to a new id. Only the jar owner may do this.
+    /// The old id stops resolving immediately, and the new id must not already be in use.
+    /// Emits a `jar_rnm` event carrying both ids for indexer tracking.
+    pub fn rename_jar(env: Env, jar_id: String, new_jar_id: String) {
+        if new_jar_id.is_empty() || new_jar_id.len() > MAX_JAR_ID_LEN {
+            panic_with_error!(&env, Error::InvalidJarId);
+        }
+        let old_key = DataKey::Jar(jar_id.clone());
+        let jar: Jar = env
+            .storage()
+            .persistent()
+            .get(&old_key)
+            .unwrap_or_else(|| panic_with_error!(&env, Error::JarNotFound));
+        env.storage()
+            .persistent()
+            .extend_ttl(&old_key, JAR_TTL_THRESHOLD, JAR_TTL_LEDGERS);
+        jar.owner.require_auth();
+
+        // Check if new id is already in use
+        let new_key = DataKey::Jar(new_jar_id.clone());
+        if env.storage().persistent().has(&new_key) {
+            panic_with_error!(&env, Error::JarIdInUse);
+        }
+
+        // Copy jar to new id
+        env.storage().persistent().set(&new_key, &jar);
+        env.storage()
+            .persistent()
+            .extend_ttl(&new_key, JAR_TTL_THRESHOLD, JAR_TTL_LEDGERS);
+
+        // Delete old id
+        env.storage().persistent().remove(&old_key);
+
+        // Move stats too
+        let old_stats_key = DataKey::Stats(jar_id.clone());
+        let new_stats_key = DataKey::Stats(new_jar_id.clone());
+        if let Some(stats) = env
+            .storage()
+            .persistent()
+            .get::<_, JarStats>(&old_stats_key)
+        {
+            env.storage().persistent().set(&new_stats_key, &stats);
+            env.storage().persistent().extend_ttl(
+                &new_stats_key,
+                JAR_TTL_THRESHOLD,
+                JAR_TTL_LEDGERS,
+            );
+            env.storage().persistent().remove(&old_stats_key);
+        }
+
+        // Move min tip if present
+        let old_min_key = DataKey::MinTip(jar_id.clone());
+        let new_min_key = DataKey::MinTip(new_jar_id.clone());
+        if let Some(min_amount) = env.storage().persistent().get::<_, i128>(&old_min_key) {
+            env.storage().persistent().set(&new_min_key, &min_amount);
+            env.storage()
+                .persistent()
+                .extend_ttl(&new_min_key, JAR_TTL_THRESHOLD, JAR_TTL_LEDGERS);
+            env.storage().persistent().remove(&old_min_key);
+        }
+
+        env.events()
+            .publish((symbol_short!("jar_rnm"),), (jar_id, new_jar_id));
     }
 
     /// Set an optional minimum tip amount for a jar. Only the jar owner may do this.
@@ -843,7 +1041,10 @@ impl TipSplitter {
 
         env.events().publish(
             (symbol_short!("min_tip"), jar_id),
-            MinTipEvent { amount: min_amount },
+            MinTipEvent {
+                version: 1,
+                amount: min_amount,
+            },
         );
     }
 
@@ -908,6 +1109,9 @@ impl TipSplitter {
         reference: Option<BytesN<32>>,
     ) -> u64 {
         from.require_auth();
+        if env.storage().instance().has(&DataKey::Paused) {
+            panic_with_error!(&env, Error::ContractPaused);
+        }
         let token_addr: Address = env
             .storage()
             .instance()
@@ -959,6 +1163,9 @@ impl TipSplitter {
         message: String,
     ) -> u64 {
         from.require_auth();
+        if env.storage().instance().has(&DataKey::Paused) {
+            panic_with_error!(&env, Error::ContractPaused);
+        }
         if !env
             .storage()
             .instance()
@@ -1040,10 +1247,18 @@ impl TipSplitter {
         }
 
         // Bump the jar's storage entry so a jar that is tipped regularly
-        // is never archived, and a jar idle for a few years still works.
+        // is never archived. An idle jar survives roughly 58 days at the default
+        // 5-second close rate (JAR_TTL_LEDGERS = 1_000_000 ledgers).
         env.storage()
             .persistent()
             .extend_ttl(&jar_key, JAR_TTL_THRESHOLD, JAR_TTL_LEDGERS);
+
+        // Issue #91: extend the contract instance TTL alongside the jar so the
+        // contract itself doesn't expire while jars are still active. In
+        // soroban-sdk 22 this also extends the Wasm code entry.
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
 
         let client = token::Client::new(env, token_addr);
         let contract_addr = env.current_contract_address();
@@ -1072,6 +1287,7 @@ impl TipSplitter {
         // `get_jar` could get a different answer, because the jar's splits may
         // have changed between the tip and the read.
         let mut breakdown: Vec<(Address, i128, bool)> = Vec::new(env);
+        let mut total_transferred: i128 = 0;
         for i in 0..n {
             let split = jar.splits.get(i).unwrap();
             let share = plan.get(i).unwrap();
@@ -1086,6 +1302,7 @@ impl TipSplitter {
             }
             let delivered = matches!(client.try_transfer(from, &split.to, &share), Ok(Ok(_)));
             if delivered {
+                total_transferred += share;
                 breakdown.push_back((split.to, share, false));
             } else {
                 // The recipient cannot receive the token (dropped trustline,
@@ -1095,6 +1312,7 @@ impl TipSplitter {
                 // had succeeded, and `withdraw_held` pays them once the
                 // recipient can receive again (#171).
                 client.transfer(from, &contract_addr, &share);
+                total_transferred += share;
                 let held_key = DataKey::Held(split.to.clone());
                 let held: i128 = env.storage().persistent().get(&held_key).unwrap_or(0);
                 env.storage().persistent().set(&held_key, &(held + share));
@@ -1105,6 +1323,14 @@ impl TipSplitter {
                 );
                 breakdown.push_back((split.to, share, true));
             }
+        }
+
+        // Issue #93: reject a tip where no funds actually moved. When every
+        // recipient is the tipper themselves, all shares are skipped and the
+        // event would claim a tip occurred at zero cost — forgeable and
+        // misleading for indexers, leaderboards, and notifications.
+        if total_transferred == 0 {
+            panic_with_error!(env, Error::NoFundsMoved);
         }
 
         Self::bump_totals(env, jar_id, from, amount);
@@ -1129,6 +1355,7 @@ impl TipSplitter {
         env.events().publish(
             (symbol_short!("tip"), jar_id.clone()),
             TipEvent {
+                version: 1,
                 from: from.clone(),
                 amount,
                 message: message.clone(),
@@ -1662,6 +1889,7 @@ impl TipSplitter {
         env.events().publish(
             (symbol_short!("tip"), entry.jar_id.clone()),
             TipEvent {
+                version: 1,
                 from: entry.supporter.clone(),
                 amount: entry.amount,
                 message: entry.message.clone(),
@@ -1677,15 +1905,14 @@ impl TipSplitter {
 
     /// Read a jar's configuration.
     pub fn get_jar(env: Env, jar_id: String) -> Jar {
-        let key = DataKey::Jar(jar_id);
+        let key = DataKey::Jar(jar_id.clone());
         let jar: Jar = env
             .storage()
             .persistent()
             .get(&key)
             .unwrap_or_else(|| panic_with_error!(&env, Error::JarNotFound));
-        env.storage()
-            .persistent()
-            .extend_ttl(&key, JAR_TTL_THRESHOLD, JAR_TTL_LEDGERS);
+        // Issue #92: extend both jar and min-tip in lockstep.
+        Self::extend_jar_and_min_ttl(&env, &jar_id);
         jar
     }
 
@@ -1700,15 +1927,14 @@ impl TipSplitter {
     /// Panics with `JarNotFound` if the slug is unregistered, matching
     /// `get_jar`.
     pub fn get_jar_owner(env: Env, jar_id: String) -> Address {
-        let key = DataKey::Jar(jar_id);
+        let key = DataKey::Jar(jar_id.clone());
         let jar: Jar = env
             .storage()
             .persistent()
             .get(&key)
             .unwrap_or_else(|| panic_with_error!(&env, Error::JarNotFound));
-        env.storage()
-            .persistent()
-            .extend_ttl(&key, JAR_TTL_THRESHOLD, JAR_TTL_LEDGERS);
+        // Issue #92: extend both jar and min-tip in lockstep.
+        Self::extend_jar_and_min_ttl(&env, &jar_id);
         jar.owner
     }
 
@@ -1726,15 +1952,14 @@ impl TipSplitter {
     /// Panics with `JarNotFound` if the slug is unregistered, matching
     /// `get_jar`.
     pub fn get_split_count(env: Env, jar_id: String) -> u32 {
-        let key = DataKey::Jar(jar_id);
+        let key = DataKey::Jar(jar_id.clone());
         let jar: Jar = env
             .storage()
             .persistent()
             .get(&key)
             .unwrap_or_else(|| panic_with_error!(&env, Error::JarNotFound));
-        env.storage()
-            .persistent()
-            .extend_ttl(&key, JAR_TTL_THRESHOLD, JAR_TTL_LEDGERS);
+        // Issue #92: extend both jar and min-tip in lockstep.
+        Self::extend_jar_and_min_ttl(&env, &jar_id);
         jar.splits.len()
     }
 
@@ -2057,15 +2282,14 @@ impl TipSplitter {
     /// and conflating the two would hide a typo'd slug; use `jar_exists` to
     /// test registration.
     pub fn is_recipient(env: Env, jar_id: String, address: Address) -> bool {
-        let key = DataKey::Jar(jar_id);
+        let key = DataKey::Jar(jar_id.clone());
         let jar: Jar = env
             .storage()
             .persistent()
             .get(&key)
             .unwrap_or_else(|| panic_with_error!(&env, Error::JarNotFound));
-        env.storage()
-            .persistent()
-            .extend_ttl(&key, JAR_TTL_THRESHOLD, JAR_TTL_LEDGERS);
+        // Issue #92: extend both jar and min-tip in lockstep.
+        Self::extend_jar_and_min_ttl(&env, &jar_id);
         for i in 0..jar.splits.len() {
             if jar.splits.get(i).unwrap().to == address {
                 return true;
@@ -2205,6 +2429,26 @@ impl TipSplitter {
         shares
     }
 
+    /// Extend a jar's TTL and its minimum-tip entry in lockstep (issue #92).
+    ///
+    /// The min-tip lives in a separate persistent key with its own TTL. If only
+    /// the jar is extended, an idle jar can still tip: `get_jar` succeeds but
+    /// `tip` fails once the min-tip entry expires. This helper keeps them
+    /// aligned so a jar is only as available as its least-recently-touched entry.
+    fn extend_jar_and_min_ttl(env: &Env, jar_id: &String) {
+        let key = DataKey::Jar(jar_id.clone());
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, JAR_TTL_THRESHOLD, JAR_TTL_LEDGERS);
+
+        let min_key = DataKey::MinTip(jar_id.clone());
+        if env.storage().persistent().has(&min_key) {
+            env.storage()
+                .persistent()
+                .extend_ttl(&min_key, JAR_TTL_THRESHOLD, JAR_TTL_LEDGERS);
+        }
+    }
+
     /// Validate splits in one pass: range, duplicate recipient, then total sum.
     ///
     /// A zero-bps entry is dead weight that consumes a slot and misleads clients.
@@ -2221,6 +2465,18 @@ impl TipSplitter {
         if n > MAX_RECIPIENTS {
             panic_with_error!(env, Error::TooManyRecipients);
         }
+
+        // Issue #94: reject the contract itself or its token as a recipient.
+        // Funds sent to either address are locked forever — the contract has no
+        // withdrawal function for tips, and the token contract cannot receive
+        // transfers meant for end users.
+        let contract_addr = env.current_contract_address();
+        let token_addr: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Token)
+            .unwrap_or_else(|| panic_with_error!(env, Error::NotInitialized));
+
         let mut total: u32 = 0;
         let mut seen: Vec<Address> = Vec::new(env);
         for i in 0..n {
@@ -2228,6 +2484,10 @@ impl TipSplitter {
             let bps = split.bps;
             if bps == 0 || bps > BPS_DENOM {
                 panic_with_error!(env, Error::SplitOutOfRange);
+            }
+            // Reject contract or token address as recipient (#94).
+            if split.to == contract_addr || split.to == token_addr {
+                panic_with_error!(env, Error::InvalidRecipient);
             }
             // `checked_add` rather than `+=`: `bps` is caller-supplied, and an
             // overflow must surface as the same typed `SplitSumNot100Pct` every
