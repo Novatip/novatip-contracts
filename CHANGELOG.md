@@ -17,12 +17,20 @@ All notable changes to `novatip-contracts` are documented here.
 - `min_tip` event and `BelowMinTipAmount` error (code 13)
 - `scripts/transfer-jar.sh`, `scripts/set-min-tip.sh`, `scripts/update-splits.sh`
 - Error codes 14 `TokenNotAllowed`, 15 `CannotDisallowDefault`, 16 `StatsOverflow`
+- `get_min_accepted_tip(jar_id) -> i128` reports the smallest tip that pays every recipient a non-zero share, raised to the jar's minimum when that is larger
+- `preview_split_details(jar_id, amount) -> Vec<PreviewSplit>` returns the preview paired with each recipient's address, so a client needs one call instead of `preview_split` plus `get_jar`
+- Error codes 25 `AmountZero`, 26 `AmountNegative`, 27 `SplitAmountTooSmall`, 28 `AmountOverflow` and 29 `InvalidMinimumAmount`; `InvalidAmount` (5) is retired and no longer raised
+- `contracts/tip-splitter/interface.json` is now a populated public-interface snapshot instead of a placeholder
 
 ### Changed (breaking: event payload)
+- The `tip` event's data is the named `TipEvent` struct (`from`, `amount`, `message`, `breakdown`, `token`, `seq`, `reference`) on both payout paths; `collect_recurring` previously still published the positional tuple
 - The `tip` event's data tuple gained `token: Address` (5th element) and `tip_count: u64` (6th element)
 - `tip` withholds a recipient's share when that recipient is also the tipper
 
 ### Fixed
+- Restored the test suite that a truncated paste destroyed in the #195/#196 merge train: 22 test functions (including the proptest strategies) and every call site that decoded the `tip` event
+- Repaired `compute_shares`, whose two competing bodies had been spliced together without a separator, so the crate did not compile
+- `examples/tip-forwarder` builds for wasm again (`#![cfg_attr(not(test), no_std)]`)
 - Zero-share splits rejected with `SplitOutOfRange` (was `InvalidSplits`)
 - Split validation reports specific codes: `SplitsEmpty` (10), `SplitOutOfRange` (11), `SplitSumNot100Pct` (12)
 - u32 overflow in split sum handled by `checked_add` instead of relying on `overflow-checks`

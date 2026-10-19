@@ -21,6 +21,10 @@
 //! production both contracts are deployed and the client calls the real
 //! `splitter` address stored at construction.
 
+// `no_std` only applies to the real (wasm) build; the contract logic itself
+// stays testable on the host, where `testutils` needs the standard library.
+#![cfg_attr(not(test), no_std)]
+
 use soroban_sdk::{
     auth::{ContractContext, InvokerContractAuthEntry, SubContractInvocation},
     contract, contractclient, contracterror, contractimpl, contracttype, panic_with_error,

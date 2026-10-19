@@ -1,1 +1,1137 @@
-{"note":"run make interface after a stellar contract build to populate this snapshot"}
+[
+  {
+    "udt_struct_v0": {
+      "lib": "",
+      "name": "Split",
+      "fields": [
+        {
+          "name": "bps",
+          "type_": "u32"
+        },
+        {
+          "name": "to",
+          "type_": "address"
+        }
+      ]
+    }
+  },
+  {
+    "udt_struct_v0": {
+      "lib": "",
+      "name": "CompactSplit",
+      "fields": [
+        {
+          "name": "0",
+          "type_": "address"
+        },
+        {
+          "name": "1",
+          "type_": "u32"
+        }
+      ]
+    }
+  },
+  {
+    "udt_struct_v0": {
+      "lib": "",
+      "name": "Jar",
+      "fields": [
+        {
+          "name": "locked",
+          "type_": "bool"
+        },
+        {
+          "name": "owner",
+          "type_": "address"
+        },
+        {
+          "name": "splits",
+          "type_": {
+            "vec": {
+              "element_type": {
+                "udt": {
+                  "name": "Split"
+                }
+              }
+            }
+          }
+        }
+      ]
+    }
+  },
+  {
+    "udt_union_v0": {
+      "lib": "",
+      "name": "JarRecord",
+      "cases": [
+        {
+          "tuple_v0": {
+            "name": "V1",
+            "type_": [
+              {
+                "udt": {
+                  "name": "Jar"
+                }
+              }
+            ]
+          }
+        }
+      ]
+    }
+  },
+  {
+    "udt_struct_v0": {
+      "lib": "",
+      "name": "PreviewSplit",
+      "fields": [
+        {
+          "name": "amount",
+          "type_": "i128"
+        },
+        {
+          "name": "to",
+          "type_": "address"
+        }
+      ]
+    }
+  },
+  {
+    "udt_struct_v0": {
+      "lib": "",
+      "name": "JarStats",
+      "fields": [
+        {
+          "name": "tip_count",
+          "type_": "u64"
+        },
+        {
+          "name": "total",
+          "type_": "i128"
+        }
+      ]
+    }
+  },
+  {
+    "udt_struct_v0": {
+      "lib": "",
+      "name": "SupporterStats",
+      "fields": [
+        {
+          "name": "tip_count",
+          "type_": "u64"
+        },
+        {
+          "name": "total",
+          "type_": "i128"
+        }
+      ]
+    }
+  },
+  {
+    "udt_struct_v0": {
+      "lib": "",
+      "name": "Limits",
+      "fields": [
+        {
+          "name": "bps_denom",
+          "type_": "u32"
+        },
+        {
+          "name": "max_message_len",
+          "type_": "u32"
+        },
+        {
+          "name": "max_recipients",
+          "type_": "u32"
+        }
+      ]
+    }
+  },
+  {
+    "udt_struct_v0": {
+      "lib": "",
+      "name": "Recurring",
+      "fields": [
+        {
+          "name": "amount",
+          "type_": "i128"
+        },
+        {
+          "name": "jar_id",
+          "type_": "string"
+        },
+        {
+          "name": "message",
+          "type_": "string"
+        },
+        {
+          "name": "next_due_ledger",
+          "type_": "u32"
+        },
+        {
+          "name": "period_ledgers",
+          "type_": "u32"
+        },
+        {
+          "name": "supporter",
+          "type_": "address"
+        }
+      ]
+    }
+  },
+  {
+    "udt_error_enum_v0": {
+      "lib": "",
+      "name": "Error",
+      "cases": [
+        {
+          "name": "NotInitialized",
+          "value": 1
+        },
+        {
+          "name": "JarExists",
+          "value": 2
+        },
+        {
+          "name": "JarNotFound",
+          "value": 3
+        },
+        {
+          "name": "InvalidSplits",
+          "value": 4
+        },
+        {
+          "name": "InvalidAmount",
+          "value": 5
+        },
+        {
+          "name": "TooManyRecipients",
+          "value": 6
+        },
+        {
+          "name": "DuplicateRecipient",
+          "value": 7
+        },
+        {
+          "name": "MessageTooLong",
+          "value": 8
+        },
+        {
+          "name": "InvalidJarId",
+          "value": 9
+        },
+        {
+          "name": "SplitsEmpty",
+          "value": 10
+        },
+        {
+          "name": "SplitOutOfRange",
+          "value": 11
+        },
+        {
+          "name": "SplitSumNot100Pct",
+          "value": 12
+        },
+        {
+          "name": "BelowMinTipAmount",
+          "value": 13
+        },
+        {
+          "name": "NotRecipient",
+          "value": 14
+        },
+        {
+          "name": "SoleRecipient",
+          "value": 15
+        },
+        {
+          "name": "RecurringNotFound",
+          "value": 16
+        },
+        {
+          "name": "InvalidPeriod",
+          "value": 17
+        },
+        {
+          "name": "NothingHeld",
+          "value": 18
+        },
+        {
+          "name": "TokenNotAllowed",
+          "value": 19
+        },
+        {
+          "name": "CannotDisallowDefault",
+          "value": 20
+        },
+        {
+          "name": "StatsOverflow",
+          "value": 21
+        },
+        {
+          "name": "InsufficientBalance",
+          "value": 22
+        },
+        {
+          "name": "NotDue",
+          "value": 23
+        },
+        {
+          "name": "InsufficientAllowance",
+          "value": 24
+        },
+        {
+          "name": "AmountZero",
+          "value": 25
+        },
+        {
+          "name": "AmountNegative",
+          "value": 26
+        },
+        {
+          "name": "SplitAmountTooSmall",
+          "value": 27
+        },
+        {
+          "name": "AmountOverflow",
+          "value": 28
+        },
+        {
+          "name": "InvalidMinimumAmount",
+          "value": 29
+        }
+      ]
+    }
+  },
+  {
+    "udt_struct_v0": {
+      "lib": "",
+      "name": "JarCreatedEvent",
+      "fields": [
+        {
+          "name": "owner",
+          "type_": "address"
+        }
+      ]
+    }
+  },
+  {
+    "udt_struct_v0": {
+      "lib": "",
+      "name": "SplitsUpdatedEvent",
+      "fields": [
+        {
+          "name": "count",
+          "type_": "u32"
+        }
+      ]
+    }
+  },
+  {
+    "udt_struct_v0": {
+      "lib": "",
+      "name": "JarTransferredEvent",
+      "fields": [
+        {
+          "name": "new_owner",
+          "type_": "address"
+        },
+        {
+          "name": "previous_owner",
+          "type_": "address"
+        }
+      ]
+    }
+  },
+  {
+    "udt_struct_v0": {
+      "lib": "",
+      "name": "MinTipEvent",
+      "fields": [
+        {
+          "name": "amount",
+          "type_": {
+            "option": {
+              "value_type": "i128"
+            }
+          }
+        }
+      ]
+    }
+  },
+  {
+    "udt_struct_v0": {
+      "lib": "",
+      "name": "TipEvent",
+      "fields": [
+        {
+          "name": "amount",
+          "type_": "i128"
+        },
+        {
+          "name": "breakdown",
+          "type_": {
+            "vec": {
+              "element_type": {
+                "tuple": {
+                  "value_types": [
+                    "address",
+                    "i128",
+                    "bool"
+                  ]
+                }
+              }
+            }
+          }
+        },
+        {
+          "name": "from",
+          "type_": "address"
+        },
+        {
+          "name": "message",
+          "type_": "string"
+        },
+        {
+          "name": "reference",
+          "type_": {
+            "option": {
+              "value_type": {
+                "bytes_n": {
+                  "n": 32
+                }
+              }
+            }
+          }
+        },
+        {
+          "name": "seq",
+          "type_": "u64"
+        },
+        {
+          "name": "token",
+          "type_": "address"
+        }
+      ]
+    }
+  },
+  {
+    "function_v0": {
+      "name": "__constructor",
+      "inputs": [
+        {
+          "name": "admin",
+          "type_": "address"
+        },
+        {
+          "name": "token",
+          "type_": "address"
+        }
+      ],
+      "outputs": []
+    }
+  },
+  {
+    "function_v0": {
+      "name": "allow_token",
+      "inputs": [
+        {
+          "name": "token",
+          "type_": "address"
+        }
+      ],
+      "outputs": []
+    }
+  },
+  {
+    "function_v0": {
+      "name": "disallow_token",
+      "inputs": [
+        {
+          "name": "token",
+          "type_": "address"
+        }
+      ],
+      "outputs": []
+    }
+  },
+  {
+    "function_v0": {
+      "name": "create_jar",
+      "inputs": [
+        {
+          "name": "owner",
+          "type_": "address"
+        },
+        {
+          "name": "jar_id",
+          "type_": "string"
+        },
+        {
+          "name": "splits",
+          "type_": {
+            "vec": {
+              "element_type": {
+                "udt": {
+                  "name": "Split"
+                }
+              }
+            }
+          }
+        }
+      ],
+      "outputs": []
+    }
+  },
+  {
+    "function_v0": {
+      "name": "update_splits",
+      "inputs": [
+        {
+          "name": "jar_id",
+          "type_": "string"
+        },
+        {
+          "name": "splits",
+          "type_": {
+            "vec": {
+              "element_type": {
+                "udt": {
+                  "name": "Split"
+                }
+              }
+            }
+          }
+        }
+      ],
+      "outputs": []
+    }
+  },
+  {
+    "function_v0": {
+      "name": "lock_splits",
+      "inputs": [
+        {
+          "name": "jar_id",
+          "type_": "string"
+        }
+      ],
+      "outputs": []
+    }
+  },
+  {
+    "function_v0": {
+      "name": "unlock_splits",
+      "inputs": [
+        {
+          "name": "jar_id",
+          "type_": "string"
+        }
+      ],
+      "outputs": []
+    }
+  },
+  {
+    "function_v0": {
+      "name": "is_splits_locked",
+      "inputs": [
+        {
+          "name": "jar_id",
+          "type_": "string"
+        }
+      ],
+      "outputs": [
+        "bool"
+      ]
+    }
+  },
+  {
+    "function_v0": {
+      "name": "leave_jar",
+      "inputs": [
+        {
+          "name": "jar_id",
+          "type_": "string"
+        },
+        {
+          "name": "recipient",
+          "type_": "address"
+        }
+      ],
+      "outputs": []
+    }
+  },
+  {
+    "function_v0": {
+      "name": "transfer_jar_ownership",
+      "inputs": [
+        {
+          "name": "jar_id",
+          "type_": "string"
+        },
+        {
+          "name": "new_owner",
+          "type_": "address"
+        }
+      ],
+      "outputs": []
+    }
+  },
+  {
+    "function_v0": {
+      "name": "set_min_tip_amount",
+      "inputs": [
+        {
+          "name": "jar_id",
+          "type_": "string"
+        },
+        {
+          "name": "min_amount",
+          "type_": {
+            "option": {
+              "value_type": "i128"
+            }
+          }
+        }
+      ],
+      "outputs": []
+    }
+  },
+  {
+    "function_v0": {
+      "name": "tip",
+      "inputs": [
+        {
+          "name": "from",
+          "type_": "address"
+        },
+        {
+          "name": "jar_id",
+          "type_": "string"
+        },
+        {
+          "name": "amount",
+          "type_": "i128"
+        },
+        {
+          "name": "message",
+          "type_": "string"
+        }
+      ],
+      "outputs": [
+        "u64"
+      ]
+    }
+  },
+  {
+    "function_v0": {
+      "name": "tip_with_ref",
+      "inputs": [
+        {
+          "name": "from",
+          "type_": "address"
+        },
+        {
+          "name": "jar_id",
+          "type_": "string"
+        },
+        {
+          "name": "amount",
+          "type_": "i128"
+        },
+        {
+          "name": "message",
+          "type_": "string"
+        },
+        {
+          "name": "reference",
+          "type_": {
+            "option": {
+              "value_type": {
+                "bytes_n": {
+                  "n": 32
+                }
+              }
+            }
+          }
+        }
+      ],
+      "outputs": [
+        "u64"
+      ]
+    }
+  },
+  {
+    "function_v0": {
+      "name": "tip_in_token",
+      "inputs": [
+        {
+          "name": "from",
+          "type_": "address"
+        },
+        {
+          "name": "jar_id",
+          "type_": "string"
+        },
+        {
+          "name": "token",
+          "type_": "address"
+        },
+        {
+          "name": "amount",
+          "type_": "i128"
+        },
+        {
+          "name": "message",
+          "type_": "string"
+        }
+      ],
+      "outputs": [
+        "u64"
+      ]
+    }
+  },
+  {
+    "function_v0": {
+      "name": "set_tip_hook",
+      "inputs": [
+        {
+          "name": "hook",
+          "type_": {
+            "option": {
+              "value_type": "address"
+            }
+          }
+        }
+      ],
+      "outputs": []
+    }
+  },
+  {
+    "function_v0": {
+      "name": "get_tip_hook",
+      "inputs": [],
+      "outputs": [
+        {
+          "option": {
+            "value_type": "address"
+          }
+        }
+      ]
+    }
+  },
+  {
+    "function_v0": {
+      "name": "set_registrar",
+      "inputs": [
+        {
+          "name": "registrar",
+          "type_": {
+            "option": {
+              "value_type": "address"
+            }
+          }
+        }
+      ],
+      "outputs": []
+    }
+  },
+  {
+    "function_v0": {
+      "name": "get_registrar",
+      "inputs": [],
+      "outputs": [
+        {
+          "option": {
+            "value_type": "address"
+          }
+        }
+      ]
+    }
+  },
+  {
+    "function_v0": {
+      "name": "get_tip_count",
+      "inputs": [],
+      "outputs": [
+        "u64"
+      ]
+    }
+  },
+  {
+    "function_v0": {
+      "name": "get_held",
+      "inputs": [
+        {
+          "name": "recipient",
+          "type_": "address"
+        }
+      ],
+      "outputs": [
+        "i128"
+      ]
+    }
+  },
+  {
+    "function_v0": {
+      "name": "withdraw_held",
+      "inputs": [
+        {
+          "name": "recipient",
+          "type_": "address"
+        }
+      ],
+      "outputs": []
+    }
+  },
+  {
+    "function_v0": {
+      "name": "create_recurring",
+      "inputs": [
+        {
+          "name": "supporter",
+          "type_": "address"
+        },
+        {
+          "name": "jar_id",
+          "type_": "string"
+        },
+        {
+          "name": "amount",
+          "type_": "i128"
+        },
+        {
+          "name": "period_ledgers",
+          "type_": "u32"
+        },
+        {
+          "name": "message",
+          "type_": "string"
+        }
+      ],
+      "outputs": [
+        "u128"
+      ]
+    }
+  },
+  {
+    "function_v0": {
+      "name": "cancel_recurring",
+      "inputs": [
+        {
+          "name": "id",
+          "type_": "u128"
+        }
+      ],
+      "outputs": []
+    }
+  },
+  {
+    "function_v0": {
+      "name": "get_recurring",
+      "inputs": [
+        {
+          "name": "id",
+          "type_": "u128"
+        }
+      ],
+      "outputs": [
+        {
+          "udt": {
+            "name": "Recurring"
+          }
+        }
+      ]
+    }
+  },
+  {
+    "function_v0": {
+      "name": "collect_recurring",
+      "inputs": [
+        {
+          "name": "id",
+          "type_": "u128"
+        }
+      ],
+      "outputs": []
+    }
+  },
+  {
+    "function_v0": {
+      "name": "get_jar",
+      "inputs": [
+        {
+          "name": "jar_id",
+          "type_": "string"
+        }
+      ],
+      "outputs": [
+        {
+          "udt": {
+            "name": "Jar"
+          }
+        }
+      ]
+    }
+  },
+  {
+    "function_v0": {
+      "name": "get_jar_owner",
+      "inputs": [
+        {
+          "name": "jar_id",
+          "type_": "string"
+        }
+      ],
+      "outputs": [
+        "address"
+      ]
+    }
+  },
+  {
+    "function_v0": {
+      "name": "get_split_count",
+      "inputs": [
+        {
+          "name": "jar_id",
+          "type_": "string"
+        }
+      ],
+      "outputs": [
+        "u32"
+      ]
+    }
+  },
+  {
+    "function_v0": {
+      "name": "preview_split",
+      "inputs": [
+        {
+          "name": "jar_id",
+          "type_": "string"
+        },
+        {
+          "name": "amount",
+          "type_": "i128"
+        }
+      ],
+      "outputs": [
+        {
+          "vec": {
+            "element_type": "i128"
+          }
+        }
+      ]
+    }
+  },
+  {
+    "function_v0": {
+      "name": "preview_split_details",
+      "inputs": [
+        {
+          "name": "jar_id",
+          "type_": "string"
+        },
+        {
+          "name": "amount",
+          "type_": "i128"
+        }
+      ],
+      "outputs": [
+        {
+          "vec": {
+            "element_type": {
+              "udt": {
+                "name": "PreviewSplit"
+              }
+            }
+          }
+        }
+      ]
+    }
+  },
+  {
+    "function_v0": {
+      "name": "preview_tip",
+      "inputs": [
+        {
+          "name": "jar_id",
+          "type_": "string"
+        },
+        {
+          "name": "from",
+          "type_": "address"
+        },
+        {
+          "name": "amount",
+          "type_": "i128"
+        }
+      ],
+      "outputs": [
+        {
+          "vec": {
+            "element_type": "i128"
+          }
+        }
+      ]
+    }
+  },
+  {
+    "function_v0": {
+      "name": "get_min_tip_amount",
+      "inputs": [
+        {
+          "name": "jar_id",
+          "type_": "string"
+        }
+      ],
+      "outputs": [
+        {
+          "option": {
+            "value_type": "i128"
+          }
+        }
+      ]
+    }
+  },
+  {
+    "function_v0": {
+      "name": "get_min_accepted_tip",
+      "inputs": [
+        {
+          "name": "jar_id",
+          "type_": "string"
+        }
+      ],
+      "outputs": [
+        "i128"
+      ]
+    }
+  },
+  {
+    "function_v0": {
+      "name": "get_jar_stats",
+      "inputs": [
+        {
+          "name": "jar_id",
+          "type_": "string"
+        }
+      ],
+      "outputs": [
+        {
+          "udt": {
+            "name": "JarStats"
+          }
+        }
+      ]
+    }
+  },
+  {
+    "function_v0": {
+      "name": "get_supporter_stats",
+      "inputs": [
+        {
+          "name": "jar_id",
+          "type_": "string"
+        },
+        {
+          "name": "supporter",
+          "type_": "address"
+        }
+      ],
+      "outputs": [
+        {
+          "udt": {
+            "name": "SupporterStats"
+          }
+        }
+      ]
+    }
+  },
+  {
+    "function_v0": {
+      "name": "version",
+      "inputs": [],
+      "outputs": [
+        "u32"
+      ]
+    }
+  },
+  {
+    "function_v0": {
+      "name": "is_token_allowed",
+      "inputs": [
+        {
+          "name": "token",
+          "type_": "address"
+        }
+      ],
+      "outputs": [
+        "bool"
+      ]
+    }
+  },
+  {
+    "function_v0": {
+      "name": "jar_exists",
+      "inputs": [
+        {
+          "name": "jar_id",
+          "type_": "string"
+        }
+      ],
+      "outputs": [
+        "bool"
+      ]
+    }
+  },
+  {
+    "function_v0": {
+      "name": "is_recipient",
+      "inputs": [
+        {
+          "name": "jar_id",
+          "type_": "string"
+        },
+        {
+          "name": "address",
+          "type_": "address"
+        }
+      ],
+      "outputs": [
+        "bool"
+      ]
+    }
+  },
+  {
+    "function_v0": {
+      "name": "get_admin",
+      "inputs": [],
+      "outputs": [
+        "address"
+      ]
+    }
+  },
+  {
+    "function_v0": {
+      "name": "get_token",
+      "inputs": [],
+      "outputs": [
+        "address"
+      ]
+    }
+  },
+  {
+    "function_v0": {
+      "name": "get_limits",
+      "inputs": [],
+      "outputs": [
+        {
+          "udt": {
+            "name": "Limits"
+          }
+        }
+      ]
+    }
+  }
+]
