@@ -4,6 +4,7 @@ version = "0.0.0"
 edition = "2021"
 # Matches the workspace MSRV pin so the resolver keeps deps parseable.
 rust-version = "1.84"
+license.workspace = true
 publish = false
 
 [lib]
@@ -15,4 +16,4 @@ soroban-sdk = { workspace = true }
 
 [dev-dependencies]
 soroban-sdk = { workspace = true, features = ["testutils"] }
-tip-splitter = { path = "../../contracts/tip-splitter" }
+tip-splitter = { path = "../../contracts/tip-splitter", version = "0.1.0" }

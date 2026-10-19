@@ -10,6 +10,7 @@ members = ["contracts/*", "examples/*"]
 # Keep major.minor in sync with channel in rust-toolchain.toml (CI check-msrv).
 edition = "2021"
 rust-version = "1.84"
+license = "MIT"
 
 [workspace.dependencies]
 soroban-sdk = "22"

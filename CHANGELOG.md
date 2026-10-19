@@ -31,6 +31,7 @@ All notable changes to `novatip-contracts` are documented here.
 - `tip` withholds a recipient's share when that recipient is also the tipper
 
 ### Fixed
+- Workspace wasm builds and `cargo deny check` work again: `examples/tip-forwarder` declares `no_std` outside tests (the wasm builds failed with `E0152: duplicate lang item panic_impl`), both crates declare the workspace MIT license, and the path dependency carries a version instead of a wildcard
 - `preview_split` checks the amount's sign before the jar's minimum, so a zero or negative amount reports `AmountZero`/`AmountNegative` exactly as `tip` does (#97)
 - `tip` and `create_recurring` reject messages that are not valid UTF-8 or that contain control characters other than newline, before any transfer, with the appended error 36 `InvalidMessage` (#96)
 - Zero-share splits rejected with `SplitOutOfRange` (was `InvalidSplits`)
