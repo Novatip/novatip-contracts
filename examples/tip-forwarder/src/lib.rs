@@ -23,6 +23,8 @@
 //! production both contracts are deployed and the client calls the real
 //! `splitter` address stored at construction.
 
+#![cfg_attr(not(test), no_std)]
+
 use soroban_sdk::{
     auth::{ContractContext, InvokerContractAuthEntry, SubContractInvocation},
     contract, contractclient, contracterror, contractimpl, contracttype, panic_with_error,

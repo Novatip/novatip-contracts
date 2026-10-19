@@ -5,6 +5,7 @@ version = "0.1.0"
 # kept in sync with rust-toolchain.toml by the CI check-msrv job (#133).
 edition.workspace = true
 rust-version.workspace = true
+license.workspace = true
 publish = false
 
 [lib]
