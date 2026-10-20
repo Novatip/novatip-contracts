@@ -48,6 +48,7 @@ set -a; source .env; set +a
 
 ./scripts/deploy.sh          # build (optimized), deploy; writes .contract-id.<NETWORK>
 ./scripts/create-jar.sh      # register a jar (RECIPIENT or SPLITS)
+./scripts/tip.sh             # send AMOUNT of the jar's token to every recipient
 ./scripts/transfer-jar.sh    # hand a jar to NEW_OWNER
 ./scripts/set-min-tip.sh     # set a jar's minimum tip, or clear it
 ./scripts/set-fee.sh         # set the protocol fee (default 100 bps = 1%)
@@ -57,6 +58,7 @@ set -a; source .env; set +a
 |--------|-------|-------|
 | `deploy.sh` | `NETWORK`, `SOURCE`, `ADMIN`, `USDC_TOKEN` | Prints and saves the deployed contract id to `.contract-id.<NETWORK>` |
 | `create-jar.sh` | `NETWORK`, `SOURCE`, `OWNER`, `SLUG`, and `RECIPIENT` or `SPLITS` | `SPLITS` is validated locally (1–20 recipients, bps summing to 10000) before any call |
+| `tip.sh` | `NETWORK`, `SOURCE`, `JAR_ID`, `AMOUNT`, and optionally `FROM` and `MESSAGE` | `tip` takes the tipper and the message text as arguments; `FROM` defaults to `SOURCE` (only the submitting identity can sign) and `MESSAGE` to a placeholder, since the CLI rejects an empty message |
 | `transfer-jar.sh` | `NETWORK`, `SOURCE`, `SLUG`, `NEW_OWNER` | Reads and prints the jar's current owner first, so a wrong `SOURCE` or contract is visible before the hand-over |
 | `set-min-tip.sh` | `NETWORK`, `SOURCE`, `SLUG`, and optionally `MIN_TIP` | `MIN_TIP` is a positive integer in the token's smallest unit. Unset or `none` **clears** the minimum — which means invoking without the `--min_amount` flag at all, the only way to send `Option::None`. Zero, negative and non-numeric values are rejected locally |
 | `set-fee.sh` | `NETWORK`, `SOURCE` (the contract admin), and optionally `FEE_BPS` | Sets the protocol fee taken from every tip before the split. `FEE_BPS` defaults to `100` (1%); `0` turns the fee off; above `500` (5%) is rejected locally and by the contract. Reads the value back |
