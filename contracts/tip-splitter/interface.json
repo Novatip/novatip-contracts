@@ -390,6 +390,21 @@
           "type_": "u32"
         },
         {
+          "name": "splits",
+          "type_": {
+            "vec": {
+              "element_type": {
+                "tuple": {
+                  "value_types": [
+                    "address",
+                    "u32"
+                  ]
+                }
+              }
+            }
+          }
+        },
+        {
           "name": "version",
           "type_": "u32"
         }
@@ -408,6 +423,22 @@
         {
           "name": "previous_owner",
           "type_": "address"
+        },
+        {
+          "name": "version",
+          "type_": "u32"
+        }
+      ]
+    }
+  },
+  {
+    "udt_struct_v0": {
+      "lib": "",
+      "name": "JarDeletedEvent",
+      "fields": [
+        {
+          "name": "jar_id",
+          "type_": "string"
         },
         {
           "name": "version",
