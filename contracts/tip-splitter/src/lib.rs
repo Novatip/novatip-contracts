@@ -548,6 +548,15 @@ impl TipSplitter {
     /// deployment is usable through `tip_in_token` immediately and
     /// `get_token`/`is_token_allowed` can never disagree about it.
     pub fn __constructor(env: Env, admin: Address, token: Address) {
+        // The admin manages privileged operations (fees, pause, hooks, allowlist)
+        // while the token address represents the Stellar Asset Contract that all tips
+        // settle through. Providing the same address for both is a deployment error.
+        // The token address is recorded permanently and can never be changed post-deploy,
+        // so catching this misconfiguration at construction prevents deploying a permanently
+        // bricked contract requiring complete redeployment and migration of jars.
+        if admin == token {
+            panic!("admin and token cannot be the same address");
+        }
         env.storage().instance().set(&DataKey::Admin, &admin);
         env.storage().instance().set(&DataKey::Token, &token);
         env.storage()
