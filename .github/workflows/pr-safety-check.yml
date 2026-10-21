@@ -1,0 +1,199 @@
+name: PR safety check
+
+# Flags pull requests that make risky changes, so they get a careful review before anyone merges them.
+# Uses pull_request_target so the check always runs from the default branch's copy of this file:
+# a PR cannot edit the check to make itself pass. NEVER check out or run PR code in this workflow;
+# it only reads the PR's files and commits through the GitHub API.
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened, ready_for_review]
+
+permissions:
+  contents: read
+  pull-requests: read
+  statuses: write
+
+concurrency:
+  group: pr-safety-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  pr-safety:
+    name: PR safety check
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/github-script@v8
+        with:
+          # Retry transient 5xx responses; 4xx responses are not retried.
+          retries: 3
+          script: |
+            const { owner, repo } = context.repo;
+            const pr = context.payload.pull_request;
+            const sha = pr.head.sha;
+            const CONTEXT = 'PR safety check';
+            const runUrl = `${context.serverUrl}/${owner}/${repo}/actions/runs/${context.runId}`;
+            const setStatus = (state, description) => github.rest.repos.createCommitStatus({
+              owner, repo, sha, state, context: CONTEXT, description: description.slice(0, 140), target_url: runUrl,
+            });
+
+            // Pending until the check finishes, so a crash or cancellation still blocks the merge.
+            await setStatus('pending', 'Checking the PR for risky changes');
+
+            const findings = [];
+            const seen = new Set();
+            const flag = (where, why, level = 'block') => {
+              const key = `${where}|${why}`;
+              if (!seen.has(key)) { seen.add(key); findings.push({ where, why, level }); }
+            };
+
+            // Workflows, actions, Dependabot config, CODEOWNERS and top-level YAML can run code or change who must review.
+            // Issue and PR templates and other docs under .github/ are text, so they are reported as a note instead.
+            const AUTOMATION = /^\.github\/(workflows\/|actions\/|dependabot\.ya?ml$|CODEOWNERS$|[^/]+\.ya?ml$)/i;
+            const RISKY_PATHS = [
+              [AUTOMATION, 'changes repository automation (.github/)'],
+              [/(^|\/)\.vscode\//, 'changes editor config, which can run tasks when the folder is opened (.vscode/)'],
+              [/(^|\/)\.devcontainer\//, 'changes dev container config, which can run commands (.devcontainer/)'],
+              [/(^|\/)\.idea\//, 'changes IDE config (.idea/)'],
+              [/(^|\/)\.husky\//, 'changes git hooks (.husky/)'],
+              [/(^|\/)\.git(ignore|attributes|modules)$/, 'changes git config that can hide or redirect files'],
+              [/(^|\/)\.(npmrc|yarnrc|yarnrc\.yml|pnpmrc)$/, 'changes package manager config'],
+              [/(^|\/)build\.rs$/, 'changes a Rust build script, which runs on every build'],
+              [/(^|\/)(Dockerfile|docker-compose[^/]*\.ya?ml)$/, 'changes container build config'],
+            ];
+            const BINARY = /\.(woff2?|ttf|otf|eot|llf|exe|dll|so|dylib|bin|jar|class|zip|tar|gz|tgz|7z|rar|bat|cmd|ps1|vbs|scr|msi|deb|rpm|apk|node|pyc)$/i;
+            const IMAGE = /\.(png|jpe?g|gif|webp|ico|avif|bmp)$/i;
+            // Generated test snapshots: JSON, which no runtime executes. A note, not a block, when too large to diff.
+            const SNAPSHOT_JSON = /(^|\/)test_snapshots\/.*\.json$/i;
+            const CODE = /\.(js|jsx|mjs|cjs|ts|tsx|mts|cts|rs|sh|bash|py|rb|go|java|kt|swift|php|pl|ps1)$/i;
+            const NO_LONG_LINE_CHECK = /\.(md|mdx|svg|lock|snap|json|csv|txt|map|min\.js|min\.css)$|(^|\/)(package-lock\.json|yarn\.lock|pnpm-lock\.yaml|Cargo\.lock)$/i;
+            // Zero-width, bidirectional-override and variation-selector characters can hide code from reviewers.
+            const HIDDEN_RANGES = [[0x200B, 0x200F], [0x202A, 0x202E], [0x2060, 0x2064], [0x2066, 0x2069], [0xFEFF, 0xFEFF], [0xFE00, 0xFE0F], [0xE0100, 0xE01EF]];
+            // One U+FE0F directly after an emoji, and a U+200D joining two emoji, are ordinary emoji encoding.
+                        // Anything else in the ranges below (including runs of variation selectors) is still flagged.
+                        const stripEmojiEncoding = (t) => t
+                          .replace(/(\p{Extended_Pictographic})\uFE0F(?![\uFE00-\uFE0F\u{E0100}-\u{E01EF}])/gu, '$1')
+                          .replace(/(\p{Extended_Pictographic})\u200D(?=\p{Extended_Pictographic})/gu, '$1');
+                        const hasHidden = (text) => { text = stripEmojiEncoding(text); for (const ch of text) { const cp = ch.codePointAt(0); if (HIDDEN_RANGES.some(([a, b]) => cp >= a && cp <= b)) return true; } return false; };
+            const SUSPICIOUS = [
+              [/\beval\s*\(/, 'eval('],
+              [/\bnew\s+Function\s*\(/, 'new Function('],
+              [/child_process/, 'child_process'],
+              [/require\(\s*['"](node:)?vm['"]\s*\)|from\s+['"](node:)?vm['"]/, 'the vm module'],
+              [/(\\x[0-9a-fA-F]{2}){8,}/, 'a long run of \\x escapes'],
+              [/(\\u[0-9a-fA-F]{4}){8,}/, 'a long run of \\u escapes'],
+              [/[A-Za-z0-9+/]{300,}={0,2}/, 'a long base64-like blob'],
+              [/String\.fromCharCode\s*\((\s*\d+\s*,){10,}/, 'String.fromCharCode with many character codes'],
+            ];
+            const LIFECYCLE = /"(preinstall|install|postinstall|prepare|prepublish|prepublishOnly|prepack|postpack)"\s*:/;
+
+            // -- Files --
+            const files = await github.paginate(github.rest.pulls.listFiles, { owner, repo, pull_number: pr.number, per_page: 100 });
+            if (pr.changed_files > files.length) flag('(PR)', `only ${files.length} of ${pr.changed_files} changed files could be inspected`);
+
+            for (const f of files) {
+              const path = f.filename;
+              const paths = [path, f.previous_filename].filter(Boolean);
+              if (f.status === 'removed') {
+                // Deleting editor or git config is harmless, but deleting automation can weaken these checks.
+                if (AUTOMATION.test(path)) flag(path, 'removes repository automation (.github/)');
+                continue;
+              }
+              for (const [re, why] of RISKY_PATHS) if (paths.some(p => re.test(p))) flag(path, why);
+              if (!paths.some(p => AUTOMATION.test(p)) && paths.some(p => /^\.github\//.test(p))) flag(path, 'changes repository templates or docs (.github/)', 'note');
+
+              // Real images, fonts and binaries never have a text diff; one that does is disguised.
+              if ((BINARY.test(path) || IMAGE.test(path)) && f.patch) flag(path, 'is named like a binary, font or image file but contains text, possibly disguised code');
+              if (BINARY.test(path)) flag(path, 'adds or changes a font, binary, archive or script-runner file');
+              else if (!f.patch && f.changes > 0 && !IMAGE.test(path)) {
+                if (SNAPSHOT_JSON.test(path)) flag(path, 'is a generated test snapshot too large for GitHub to show a diff', 'note');
+                else flag(path, 'could not be inspected: binary, or too large for GitHub to show a diff');
+              }
+
+              const added = (f.patch || '').split('\n').filter(l => l.startsWith('+') && !l.startsWith('+++')).map(l => l.slice(1));
+              if (added.some(l => hasHidden(l))) flag(path, 'contains invisible or bidirectional Unicode characters');
+
+              if (/(^|\/)package\.json$/.test(path) && added.some(l => LIFECYCLE.test(l))) flag(path, 'adds or changes an install-time script (preinstall, postinstall, prepare, ...)');
+              if (/(^|\/)(package-lock\.json|yarn\.lock|pnpm-lock\.yaml)$/.test(path)) {
+                // Only 'resolved' lines say where a package comes from; 'funding' and 'url' lines are metadata.
+                            const hosts = added.filter(l => /"resolved"\s*:|^\s*resolved\s|\bresolution:|\btarball:/.test(l))
+                              .map(l => { const m = l.match(/(?:git\+)?https?:\/\/([^/"' ]+)(\/[^/"' #]+)?/); return m ? (m[1] === 'github.com' && m[2] && m[2].slice(1).toLowerCase() === owner.toLowerCase() ? null : m[1]) : null; }).filter(Boolean);
+                const odd = [...new Set(hosts)].filter(h => !/^(registry\.npmjs\.org|registry\.yarnpkg\.com)$/.test(h));
+                if (odd.length) flag(path, `resolves packages from an unusual host: ${odd.join(', ')}`);
+              }
+              if (/(^|\/)Cargo\.(toml|lock)$/.test(path) && added.some(l => /git\s*=|git\+|^\s*build\s*=|\[build-dependencies\]/.test(l))) {
+                flag(path, 'adds a git dependency or a build script');
+              }
+
+              if (CODE.test(path) || ((BINARY.test(path) || IMAGE.test(path)) && f.patch)) {
+                if (!NO_LONG_LINE_CHECK.test(path)) {
+                  const longest = added.reduce((m, l) => Math.max(m, l.length), 0);
+                  if (longest > 500) flag(path, `adds a line of ${longest} characters, which may be minified or obfuscated code`);
+                }
+                for (const [re, what] of SUSPICIOUS) if (added.some(l => re.test(l))) flag(path, `adds code using ${what}`);
+              }
+            }
+
+            // -- Commits --
+            const commits = await github.paginate(github.rest.pulls.listCommits, { owner, repo, pull_number: pr.number, per_page: 100 });
+            if (pr.commits > commits.length) flag('(commits)', `only ${commits.length} of ${pr.commits} commits could be inspected`);
+            const prAuthor = pr.user.login.toLowerCase();
+            const writers = new Map();
+            const hasWriteAccess = async (login) => {
+              if (!writers.has(login)) {
+                let access;
+                try {
+                  const { data } = await github.rest.repos.getCollaboratorPermissionLevel({ owner, repo, username: login });
+                  access = ['admin', 'maintain', 'write'].includes(data.role_name || data.permission) ? 'write' : 'none';
+                } catch (e) { access = 'unknown'; }
+                writers.set(login, access);
+              }
+              return writers.get(login);
+            };
+            for (const c of commits) {
+              const short = c.sha.slice(0, 7);
+              const subject = c.commit.message.split('\n')[0];
+              // GitHub signs the merge commits it creates. An unsigned "Merge pull request" commit is a copy made elsewhere.
+              if (/^Merge pull request #\d+ from /.test(subject)) {
+                const githubMade = c.commit.verification?.verified === true && c.commit.committer?.email === 'noreply@github.com';
+                if (githubMade) flag(`commit ${short}`, `merges a PR inside the contributor's fork ("${subject}")`, 'note');
+                else flag(`commit ${short}`, `looks like a copy of another PR's merge commit, not signed by GitHub ("${subject}")`);
+              }
+              // GitHub's "Update branch" button makes a signed two-parent merge credited to whoever clicked it. A forgery cannot
+                          // carry GitHub's signature, and the files it brings in are checked above like any others.
+                          const isUpdateBranch = c.commit.verification?.verified === true && c.commit.committer?.email === 'noreply@github.com'
+                            && (c.parents || []).length === 2 && /^Merge branch '.+' into .+/.test(subject);
+                          const login = isUpdateBranch ? null : c.author?.login;
+              if (login && login.toLowerCase() !== prAuthor && c.author.type !== 'Bot') {
+                // A commit credited to a maintainer inside someone else's PR is how the earlier forgery looked trustworthy.
+                const access = await hasWriteAccess(login);
+                if (access === 'write') flag(`commit ${short}`, `is credited to @${login}, who has write access, but the PR is by @${pr.user.login}`);
+                else if (access === 'unknown') flag(`commit ${short}`, `is authored by @${login}, not the PR author, and their access could not be checked`);
+                else flag(`commit ${short}`, `is authored by @${login}, not the PR author @${pr.user.login}`, 'note');
+              }
+            }
+
+            // -- Report --
+            const esc = (s) => String(s).replace(/[|`<>]/g, ch => ({ '|': '\\|', '`': "'", '<': '&lt;', '>': '&gt;' }[ch]));
+            const table = (rows) => '| Where | Why |\n|---|---|\n' + rows.map(f => `| ${esc(f.where)} | ${esc(f.why)} |`).join('\n') + '\n\n';
+            const blocking = findings.filter(f => f.level === 'block');
+            const notes = findings.filter(f => f.level === 'note');
+
+            if (blocking.length === 0) {
+              const s = core.summary.addHeading('PR safety check: no risky changes found', 3)
+                .addRaw(`Checked ${files.length} file(s) and ${commits.length} commit(s). Still read the diff before merging.\n\n`);
+              if (notes.length) s.addRaw('Notes (not blocking):\n\n' + table(notes));
+              await s.write();
+              await setStatus('success', notes.length ? `No risky changes found (${notes.length} note(s))` : 'No risky changes found');
+              for (const f of notes) core.notice(`${f.where}: ${f.why}`);
+              return;
+            }
+
+            const s = core.summary.addHeading(`PR safety check: ${blocking.length} risky change(s)`, 3)
+              .addRaw('Review these carefully before merging. If they are legitimate, a maintainer or admin can merge anyway.\n\n')
+              .addRaw(table(blocking));
+            if (notes.length) s.addRaw('Notes (not blocking):\n\n' + table(notes));
+            await s.write();
+            await setStatus('failure', `${blocking.length} risky change(s) found; review before merging`);
+            for (const f of blocking) core.warning(`${f.where}: ${f.why}`);
+            core.setFailed(`${blocking.length} risky change(s) found. See the job summary.`);
