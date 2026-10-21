@@ -687,6 +687,9 @@ impl TipSplitter {
                 locked: false,
             },
         );
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, JAR_TTL_THRESHOLD, JAR_TTL_LEDGERS);
 
         // Issue #91: extend instance TTL on jar creation so the contract stays
         // alive alongside its jars.

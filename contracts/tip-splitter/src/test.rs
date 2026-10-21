@@ -3670,6 +3670,17 @@ fn get_admin_returns_constructor_admin() {
     assert_eq!(client.get_admin(), s.admin);
 }
 
+/// `get_token` returns the token address passed to the constructor (#71).
+#[test]
+fn get_token_returns_constructor_token() {
+    let s = setup();
+    let env = &s.env;
+    let client = TipSplitterClient::new(env, &s.contract);
+
+    assert_eq!(client.get_token(), s.token);
+}
+
+
 #[test]
 fn set_min_tip_amount_sets_and_reads_minimum() {
     let s = setup();
@@ -8392,15 +8403,22 @@ fn touched_jar_survives_a_ledger_advance_that_archives_an_idle_one() {
     let touched = single_recipient_jar(env, &client, &owner, "@touched");
     let idle = single_recipient_jar(env, &client, &owner, "@idle");
 
-    // `create_jar` leaves the entry at the network minimum; a read bumps it.
-    let idle_ttl = jar_ttl(env, &s.contract, &idle);
-    assert!(idle_ttl < JAR_TTL_THRESHOLD);
+    // Both start at JAR_TTL_LEDGERS because create_jar extends the TTL (#67).
+    assert_eq!(jar_ttl(env, &s.contract, &idle), JAR_TTL_LEDGERS);
+    assert_eq!(jar_ttl(env, &s.contract, &touched), JAR_TTL_LEDGERS);
+
+    // Advance to where the TTL falls below threshold
+    keep_instance_alive(env, &s.contract);
+    let start = env.ledger().sequence();
+    let below = JAR_TTL_LEDGERS - JAR_TTL_THRESHOLD + 1;
+    env.ledger().set_sequence_number(start + below);
+
+    // Reading `touched` extends it back to JAR_TTL_LEDGERS
     client.get_jar(&touched);
     assert_eq!(jar_ttl(env, &s.contract, &touched), JAR_TTL_LEDGERS);
 
-    keep_instance_alive(env, &s.contract);
-    let seq = env.ledger().sequence();
-    env.ledger().set_sequence_number(seq + idle_ttl + 1);
+    // Advance past idle's expiration
+    env.ledger().set_sequence_number(start + JAR_TTL_LEDGERS + 1);
 
     assert_eq!(client.get_jar(&touched).owner, owner);
     // The test host escalates any access to an archived entry into a panic
@@ -8412,6 +8430,27 @@ fn touched_jar_survives_a_ledger_advance_that_archives_an_idle_one() {
         archived.is_err(),
         "an untouched jar must be archived once its TTL runs out"
     );
+}
+
+/// A freshly created jar has its storage lifetime extended on creation, so it
+/// remains readable after a ledger advance that would otherwise archive an un-extended entry (#67).
+#[test]
+fn freshly_created_jar_extends_ttl_and_survives_ledger_advance() {
+    let s = setup();
+    let env = &s.env;
+    let client = TipSplitterClient::new(env, &s.contract);
+    let owner = Address::generate(env);
+
+    let jar_id = single_recipient_jar(env, &client, &owner, "@fresh");
+    assert_eq!(jar_ttl(env, &s.contract, &jar_id), JAR_TTL_LEDGERS);
+
+    keep_instance_alive(env, &s.contract);
+    let seq = env.ledger().sequence();
+    // A ledger advance that would archive a default-TTL entry
+    env.ledger().set_sequence_number(seq + 10_000);
+
+    // The jar was extended on creation, so it is still readable
+    assert_eq!(client.get_jar(&jar_id).owner, owner);
 }
 
 /// #72: below `JAR_TTL_THRESHOLD` an access extends the entry back to
@@ -8790,3 +8829,110 @@ fn create_recurring_rejects_invalid_message() {
     let res = client.try_create_recurring(&supporter, &jar_id, &500, &100, &with_nul);
     assert_eq!(res, Err(Ok(Error::InvalidMessage.into())));
 }
+
+/// A tipper holding a non-final share keeps their own share: no self-transfer
+/// is made, the final recipient does not absorb it, and every balance reflects
+/// only what actually moved (#70).
+#[test]
+fn tip_tipper_holding_non_final_share_preserves_all_balances() {
+    let s = setup();
+    let env = &s.env;
+    let client = TipSplitterClient::new(env, &s.contract);
+    let token = token::Client::new(env, &s.token);
+    let token_admin = token::StellarAssetClient::new(env, &s.token);
+
+    let owner = Address::generate(env);
+    let tipper = Address::generate(env);
+    let bob = Address::generate(env);
+    let carol = Address::generate(env);
+
+    token_admin.mint(&tipper, &1_000);
+
+    let jar_id = String::from_str(env, "@self-mid");
+    client.create_jar(
+        &owner,
+        &jar_id,
+        &vec![
+            env,
+            Split {
+                to: bob.clone(),
+                bps: 5_000,
+            },
+            Split {
+                to: tipper.clone(),
+                bps: 3_000,
+            },
+            Split {
+                to: carol.clone(),
+                bps: 2_000,
+            },
+        ],
+    );
+
+    // Tipper tips 1000: bob receives 500, tipper keeps their 300, carol receives 200.
+    // Total transferred is 700.
+    client.tip(&tipper, &jar_id, &1_000, &String::from_str(env, "team tip"));
+
+    assert_eq!(token.balance(&bob), 500);
+    assert_eq!(token.balance(&carol), 200);
+    assert_eq!(
+        token.balance(&tipper),
+        300,
+        "tipper's 300 share stayed in their wallet: only 700 left for bob and carol"
+    );
+    assert_eq!(token.balance(&s.contract), 0);
+}
+
+/// A tipper holding the final share keeps their own share: no self-transfer is
+/// made, the non-final recipients receive their exact splits, and every balance
+/// reflects only what moved (#70).
+#[test]
+fn tip_tipper_holding_final_share_preserves_all_balances() {
+    let s = setup();
+    let env = &s.env;
+    let client = TipSplitterClient::new(env, &s.contract);
+    let token = token::Client::new(env, &s.token);
+    let token_admin = token::StellarAssetClient::new(env, &s.token);
+
+    let owner = Address::generate(env);
+    let alice = Address::generate(env);
+    let bob = Address::generate(env);
+    let tipper = Address::generate(env);
+
+    token_admin.mint(&tipper, &1_000);
+
+    let jar_id = String::from_str(env, "@self-end");
+    client.create_jar(
+        &owner,
+        &jar_id,
+        &vec![
+            env,
+            Split {
+                to: alice.clone(),
+                bps: 6_000,
+            },
+            Split {
+                to: bob.clone(),
+                bps: 2_000,
+            },
+            Split {
+                to: tipper.clone(),
+                bps: 2_000,
+            },
+        ],
+    );
+
+    // Tipper tips 1000: alice receives 600, bob receives 200, tipper keeps their 200.
+    // Total transferred is 800.
+    client.tip(&tipper, &jar_id, &1_000, &String::from_str(env, "ending split"));
+
+    assert_eq!(token.balance(&alice), 600);
+    assert_eq!(token.balance(&bob), 200);
+    assert_eq!(
+        token.balance(&tipper),
+        200,
+        "tipper's 200 final share stayed in their wallet: only 800 left for alice and bob"
+    );
+    assert_eq!(token.balance(&s.contract), 0);
+}
+

@@ -1622,3 +1622,80 @@ that tips a jar from the contract's own balance — with tests that run it
 against the real `TipSplitter` and a test SAC, including the failure mode where
 the fee transfer is not authorized. See its
 [`README.md`](../examples/tip-forwarder/README.md).
+
+## Troubleshooting
+
+Common failures encountered when building, deploying, or invoking the contract that do not map to contract error codes:
+
+### 1. Missing WebAssembly target during build
+
+**Symptom:**
+```text
+error: target 'wasm32-unknown-unknown' not found
+error: the contract build failed. If it is a missing target, run:
+       rustup target add wasm32-unknown-unknown
+```
+or:
+```text
+error[E0463]: can't find crate for 'core'
+```
+
+**Cause:** The Rust toolchain does not have the compilation target for Soroban WASM installed.
+
+**Fix:** Add the target using `rustup`:
+```bash
+rustup target add wasm32-unknown-unknown
+```
+
+### 2. Recipient without a trustline for the token
+
+**Symptom:**
+```text
+HostError: Error(Contract, #1)
+```
+or transaction simulation failure:
+```text
+txFailed: op_not_authorized / op_no_trustline
+```
+
+**Cause:** The Stellar Asset Contract (SAC) requires an existing trustline for custom/non-native assets before an account can receive tokens. If a recipient in a jar split has not established a trustline for the token, direct transfers to that address fail.
+
+**Fix:**
+- The recipient must open a trustline for the token's Stellar Asset Contract before receiving:
+  ```bash
+  stellar contract invoke --id <SAC_CONTRACT_ID> -- trustline --for <RECIPIENT_ADDRESS>
+  ```
+- Alternatively, if using the tip-splitter contract post-#171, undeliverable shares are automatically escrowed into contract storage. The recipient can withdraw their held funds via `withdraw_held(recipient)` once their trustline is established.
+
+### 3. Unfunded source account
+
+**Symptom:**
+```text
+error: transaction simulation failed: HostError: Error(Storage, MissingValue)
+```
+or:
+```text
+txNO_ACCOUNT: The source account does not exist
+```
+
+**Cause:** The invoking account has not been created on the network and holds 0 XLM (below the network reserve).
+
+**Fix:** Fund the account with the minimum reserve:
+- On Testnet, use Friendbot:
+  ```bash
+  curl "https://friendbot.stellar.org?addr=<ACCOUNT_ADDRESS>"
+  ```
+- On Mainnet, send at least 1–2 XLM from an existing wallet or exchange to establish the account.
+
+### 4. Jar slug mismatch or invalid format
+
+**Symptom:**
+```text
+HostError: Error(Contract, #3)   # JarNotFound
+HostError: Error(Contract, #9)   # InvalidJarId
+```
+
+**Cause:** A tip or view was called with a slug that lacks the required leading `@` (producing `InvalidJarId`), uses invalid characters/length, or points to an unregistered jar slug (`JarNotFound`).
+
+**Fix:** Ensure the slug matches `@` followed by 3–32 lowercase alphanumeric characters, dashes, or underscores (`@<slug>`), and verify registration using `get_jar(jar_id)` or `./scripts/jar-info.sh`.
+
