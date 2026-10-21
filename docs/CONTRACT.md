@@ -31,6 +31,18 @@ withdrawal.
   match the on-chain event back to whatever it created off-chain. Never stored
   and never checked by the contract.
 
+## Limits
+
+Quick reference for bounds enforced by the contract:
+
+| Limit | Value | Constant | Error when exceeded |
+|---|---|---|---|
+| Basis point denominator | `10_000` | `BPS_DENOM` | `SplitOutOfRange` (11), `SplitSumNot100Pct` (12) |
+| Maximum recipient count | `20` | `MAX_RECIPIENTS` | `TooManyRecipients` (6) |
+| Maximum message length | `280` bytes | `MAX_MESSAGE_LEN` | `MessageTooLong` (8) |
+| Maximum batch tips | `10` | `MAX_BATCH_TIPS` | `BatchTooLarge` (38) |
+| Maximum jar id length | `33` bytes (`@` + 32) | `MAX_JAR_SLUG_LEN + 1` | `InvalidJarId` (9) |
+
 ## Types
 
 ```rust
