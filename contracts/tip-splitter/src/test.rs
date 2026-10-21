@@ -8830,6 +8830,87 @@ fn create_recurring_rejects_invalid_message() {
     assert_eq!(res, Err(Ok(Error::InvalidMessage.into())));
 }
 
+/// The constructor must reject an admin and token that share the same address,
+/// preventing deployment of a permanently misconfigured contract (#69).
+#[test]
+#[should_panic(expected = "admin and token cannot be the same address")]
+fn constructor_rejects_admin_and_token_with_same_address() {
+    let env = Env::default();
+    let addr = Address::generate(&env);
+    env.register(TipSplitter, (addr.clone(), addr));
+}
+
+/// An amount large enough that `amount * bps` overflows i128 in the minimum-share
+/// guard or distribution loop must fail with `Error::AmountOverflow` rather than
+/// trapping the WASM runtime (#68).
+#[test]
+fn compute_shares_overflow_fails_with_amount_overflow() {
+    let s = setup();
+    let env = &s.env;
+    let client = TipSplitterClient::new(env, &s.contract);
+
+    let owner = Address::generate(env);
+    let alice = Address::generate(env);
+    let jar_id = String::from_str(env, "@overflow");
+    client.create_jar(
+        &owner,
+        &jar_id,
+        &vec![
+            env,
+            Split {
+                to: alice.clone(),
+                bps: 10_000,
+            },
+        ],
+    );
+
+    let res = client.try_preview_split(&jar_id, &i128::MAX);
+    assert_eq!(res, Err(Ok(Error::AmountOverflow.into())));
+}
+
+/// A tipper who is also a recipient holding a non-final share keeps their own
+/// share instead of funding the last recipient (#66).
+/// In a jar with tipper (3000 bps) and another recipient (7000 bps), tipping 100:
+/// only 70 leaves the tipper and the recipient receives 70, leaving 30 with the tipper.
+#[test]
+fn tipper_who_is_non_final_recipient_keeps_own_share() {
+    let s = setup();
+    let env = &s.env;
+    let client = TipSplitterClient::new(env, &s.contract);
+    let token = token::Client::new(env, &s.token);
+    let token_admin = token::StellarAssetClient::new(env, &s.token);
+
+    let owner = Address::generate(env);
+    let tipper = Address::generate(env);
+    let recipient = Address::generate(env);
+
+    token_admin.mint(&tipper, &100);
+
+    let jar_id = String::from_str(env, "@self-nonfinal");
+    client.create_jar(
+        &owner,
+        &jar_id,
+        &vec![
+            env,
+            Split {
+                to: tipper.clone(),
+                bps: 3000,
+            },
+            Split {
+                to: recipient.clone(),
+                bps: 7000,
+            },
+        ],
+    );
+
+    client.tip(&tipper, &jar_id, &100, &String::from_str(env, "keep self share"));
+
+    // Tipper started with 100, kept 30, only 70 left:
+    assert_eq!(token.balance(&tipper), 30);
+    // Recipient received exactly 70:
+    assert_eq!(token.balance(&recipient), 70);
+}
+
 /// A tipper holding a non-final share keeps their own share: no self-transfer
 /// is made, the final recipient does not absorb it, and every balance reflects
 /// only what actually moved (#70).
