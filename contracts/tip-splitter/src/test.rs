@@ -2411,7 +2411,8 @@ fn update_splits_emits_splits_event() {
     ];
     client.update_splits(&jar_id, &new_splits);
 
-    // The splits event must be published with the jar id and new split count.
+    // The splits event must carry the exact updated split vector, matching the
+    // jar immediately after the mutation.
     let expected_topics = vec![
         env,
         symbol_short!("splits").into_val(env),
@@ -2427,7 +2428,9 @@ fn update_splits_emits_splits_event() {
     let (_, _, data) = splits_events.first().unwrap();
     let decoded: SplitsUpdatedEvent =
         TryFromVal::try_from_val(env, data).expect("splits event data shape");
-    assert_eq!(decoded.count, new_splits.len());
+    let jar = client.get_jar(&jar_id);
+    assert_eq!(decoded.count, jar.splits.len() as u32);
+    assert_eq!(decoded.splits, jar.splits);
 }
 
 #[test]
@@ -2803,10 +2806,159 @@ fn transfer_jar_ownership_moves_control_to_new_owner() {
         ],
     );
 
+    env.mock_auths(&[
+        MockAuth {
+            address: &owner,
+            invoke: &MockAuthInvoke {
+                contract: &s.contract,
+                fn_name: "transfer_jar_ownership",
+                args: (jar_id.clone(), new_owner.clone()).into_val(env),
+                sub_invokes: &[],
+            },
+        },
+        MockAuth {
+            address: &new_owner,
+            invoke: &MockAuthInvoke {
+                contract: &s.contract,
+                fn_name: "transfer_jar_ownership",
+                args: (jar_id.clone(), new_owner.clone()).into_val(env),
+                sub_invokes: &[],
+            },
+        },
+    ]);
+
     client.transfer_jar_ownership(&jar_id, &new_owner);
     assert_eq!(client.get_jar(&jar_id).owner, new_owner);
     // Splits must survive the transfer untouched.
     assert_eq!(client.get_jar(&jar_id).splits.get(0).unwrap().to, alice);
+}
+
+#[test]
+fn transfer_jar_ownership_requires_new_owner_auth() {
+    let s = setup();
+    let env = &s.env;
+    let client = TipSplitterClient::new(env, &s.contract);
+
+    let owner = Address::generate(env);
+    let new_owner = Address::generate(env);
+    let alice = Address::generate(env);
+    let jar_id = String::from_str(env, "@handoff_new_auth");
+
+    client.create_jar(
+        &owner,
+        &jar_id,
+        &vec![
+            env,
+            Split {
+                to: alice.clone(),
+                bps: 10000,
+            },
+        ],
+    );
+
+    env.mock_auths(&[MockAuth {
+        address: &owner,
+        invoke: &MockAuthInvoke {
+            contract: &s.contract,
+            fn_name: "transfer_jar_ownership",
+            args: (jar_id.clone(), new_owner.clone()).into_val(env),
+            sub_invokes: &[],
+        },
+    }]);
+
+    let res = client.try_transfer_jar_ownership(&jar_id, &new_owner);
+    assert!(res.is_err(), "the incoming owner must authorize the transfer");
+    assert_eq!(client.get_jar(&jar_id).owner, owner);
+}
+
+#[test]
+fn transfer_jar_ownership_rejects_current_owner() {
+    let s = setup();
+    let env = &s.env;
+    let client = TipSplitterClient::new(env, &s.contract);
+    let owner = Address::generate(env);
+    let alice = Address::generate(env);
+    let jar_id = String::from_str(env, "@self_xfer");
+
+    client.create_jar(
+        &owner,
+        &jar_id,
+        &vec![
+            env,
+            Split {
+                to: alice.clone(),
+                bps: 10000,
+            },
+        ],
+    );
+
+    env.mock_all_auths();
+    let res = client.try_transfer_jar_ownership(&jar_id, &owner);
+    assert!(res.is_err(), "transferring to the current owner is invalid");
+    assert_eq!(client.get_jar(&jar_id).owner, owner);
+}
+
+#[test]
+fn delete_jar_releases_slug_and_requires_owner_auth() {
+    let s = setup();
+    let env = &s.env;
+    let client = TipSplitterClient::new(env, &s.contract);
+
+    let owner = Address::generate(env);
+    let alice = Address::generate(env);
+    let jar_id = String::from_str(env, "@retire");
+    client.create_jar(
+        &owner,
+        &jar_id,
+        &vec![
+            env,
+            Split {
+                to: alice.clone(),
+                bps: 10000,
+            },
+        ],
+    );
+
+    env.mock_auths(&[MockAuth {
+        address: &owner,
+        invoke: &MockAuthInvoke {
+            contract: &s.contract,
+            fn_name: "delete_jar",
+            args: (jar_id.clone(),).into_val(env),
+            sub_invokes: &[],
+        },
+    }]);
+    client.delete_jar(&jar_id);
+
+    assert!(!client.jar_exists(&jar_id));
+    env.mock_auths(&[MockAuth {
+        address: &owner,
+        invoke: &MockAuthInvoke {
+            contract: &s.contract,
+            fn_name: "create_jar",
+            args: (owner.clone(), jar_id.clone(), vec![
+                env,
+                Split {
+                    to: alice.clone(),
+                    bps: 10000,
+                },
+            ])
+                .into_val(env),
+            sub_invokes: &[],
+        },
+    }]);
+    client.create_jar(
+        &owner,
+        &jar_id,
+        &vec![
+            env,
+            Split {
+                to: alice.clone(),
+                bps: 10000,
+            },
+        ],
+    );
+    assert!(client.jar_exists(&jar_id));
 }
 
 /// Creates a single-recipient jar owned by `owner` and transfers it to
@@ -4290,8 +4442,8 @@ fn leave_jar_reassigns_departing_share_to_last_entry() {
 
     client.leave_jar(&jar_id, &bob);
 
-    // a `splits` event was published with the new count — read it before any
-    // further invocation, since the test env only exposes the last call's events
+    // A `splits` event must publish the post-update split vector, which matches
+    // the jar contents read back immediately afterward.
     let expected_topics = vec![
         env,
         symbol_short!("splits").into_val(env),
@@ -4304,10 +4456,11 @@ fn leave_jar_reassigns_departing_share_to_last_entry() {
         .filter(|e| e.0 == s.contract && e.1 == expected_topics)
         .collect();
     assert_eq!(evs.len(), 1);
-    let count: u32 = TryFromVal::try_from_val(env, &evs[0].2).unwrap();
-    assert_eq!(count, 2);
-
+    let decoded: SplitsUpdatedEvent =
+        TryFromVal::try_from_val(env, &evs[0].2).expect("splits event data shape");
     let jar = client.get_jar(&jar_id);
+    assert_eq!(decoded.count, jar.splits.len() as u32);
+    assert_eq!(decoded.splits, jar.splits);
     assert_eq!(jar.splits.len(), 2);
     // middle entry removed; the last remaining entry (carol) absorbs bob's 3000.
     assert_eq!(jar.splits.get(0).unwrap().to, alice);

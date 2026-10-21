@@ -148,7 +148,7 @@ const INTERFACE_VERSION: u32 = 4;
 
 /// One recipient and the share of every tip they receive, in basis points.
 #[contracttype]
-#[derive(Clone)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Split {
     /// Recipient that receives this share of every tip.
     pub to: Address,
@@ -494,6 +494,7 @@ pub struct JarCreatedEvent {
 pub struct SplitsUpdatedEvent {
     pub version: u32,
     pub count: u32,
+    pub splits: Vec<Split>,
 }
 
 /// Data published by `jar_xfer`; fields are named for forward-compatible decoding.
@@ -503,6 +504,14 @@ pub struct JarTransferredEvent {
     pub version: u32,
     pub previous_owner: Address,
     pub new_owner: Address,
+}
+
+/// Data published by `jar_del`; fields are named for forward-compatible decoding.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct JarDeletedEvent {
+    pub version: u32,
+    pub jar_id: String,
 }
 
 /// Data published by `min_tip`; fields are named for forward-compatible decoding.
@@ -762,6 +771,7 @@ impl TipSplitter {
         }
 
         let split_count = splits.len();
+        let new_splits = splits.clone();
         let key = DataKey::Jar(jar_id.clone());
         env.storage().persistent().set(
             &key,
@@ -777,6 +787,7 @@ impl TipSplitter {
             SplitsUpdatedEvent {
                 version: 1,
                 count: split_count,
+                splits: new_splits,
             },
         );
     }
@@ -954,10 +965,11 @@ impl TipSplitter {
             .publish((symbol_short!("splits"), jar_id), split_count);
     }
 
-    /// Transfer control of a jar to a new owner. Only the current owner may do
-    /// this; the new owner does not need to authorize. Splits are unchanged.
-    /// Emits a `jar_xfer` event carrying both the outgoing and the incoming
-    /// owner, so indexers can update who controls the jar.
+    /// Transfer control of a jar to a new owner. Both the current owner and the
+    /// incoming owner must authorize the exact `(jar_id, new_owner)` handoff. A
+    /// transfer to the current owner is rejected as a no-op. Splits are
+    /// unchanged. Emits a `jar_xfer` event carrying both owners, so indexers can
+    /// update who controls the jar.
     pub fn transfer_jar_ownership(env: Env, jar_id: String, new_owner: Address) {
         let key = DataKey::Jar(jar_id.clone());
         let jar: Jar = env
@@ -967,7 +979,6 @@ impl TipSplitter {
             .unwrap_or_else(|| panic_with_error!(&env, Error::JarNotFound));
         // Issue #92: extend both jar and min-tip in lockstep.
         Self::extend_jar_and_min_ttl(&env, &jar_id);
-        jar.owner.require_auth();
         // Issue #94: reject the contract itself or its token as new owner.
         let contract_addr = env.current_contract_address();
         let token_addr: Address = env
@@ -975,9 +986,11 @@ impl TipSplitter {
             .instance()
             .get(&DataKey::Token)
             .unwrap_or_else(|| panic_with_error!(&env, Error::NotInitialized));
-        if new_owner == contract_addr || new_owner == token_addr {
+        if new_owner == contract_addr || new_owner == token_addr || new_owner == jar.owner {
             panic_with_error!(&env, Error::InvalidRecipient);
         }
+        jar.owner.require_auth();
+        new_owner.require_auth_for_args((jar_id.clone(), new_owner.clone()).into_val(&env));
         let prev_owner = jar.owner;
         env.storage().persistent().set(
             &key,
@@ -1000,6 +1013,33 @@ impl TipSplitter {
                 version: 1,
                 previous_owner: prev_owner,
                 new_owner,
+            },
+        );
+    }
+
+    /// Delete a jar and release its slug. Only the current owner may do this,
+    /// and the slug must currently be registered. Removes the jar and its
+    /// per-jar metadata so the slug can be reused by `create_jar`.
+    pub fn delete_jar(env: Env, jar_id: String) {
+        let key = DataKey::Jar(jar_id.clone());
+        let jar: Jar = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .unwrap_or_else(|| panic_with_error!(&env, Error::JarNotFound));
+        // Issue #92: extend both jar and min-tip in lockstep.
+        Self::extend_jar_and_min_ttl(&env, &jar_id);
+        jar.owner.require_auth();
+
+        env.storage().persistent().remove(&key);
+        env.storage().persistent().remove(&DataKey::Stats(jar_id.clone()));
+        env.storage().persistent().remove(&DataKey::MinTip(jar_id.clone()));
+
+        env.events().publish(
+            (symbol_short!("jar_del"),),
+            JarDeletedEvent {
+                version: 1,
+                jar_id,
             },
         );
     }

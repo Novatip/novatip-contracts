@@ -82,7 +82,8 @@ one belongs to a jar, the other to a `(jar, supporter)` pair.
 | `is_splits_locked(jar_id) -> bool` | — | Whether the jar's splits are locked. Panics with `JarNotFound` if the slug is free. |
 | `leave_jar(jar_id, recipient)` | `recipient` | Remove `recipient` from the jar's splits. Their share is added to the last remaining entry so the splits still sum to 10 000. Rejected with `SoleRecipient` (only entry) or `NotRecipient` (not in the jar). Emits a `splits` event. |
 | `set_min_tip_amount(jar_id, min_amount)` | jar `owner` | Set or clear an optional minimum tip amount for a jar. `min_amount` must be strictly positive (`> 0`) or `None` to clear. Emits a `min_tip` event. |
-| `transfer_jar_ownership(jar_id, new_owner)` | current jar `owner` | Hand control of a jar to `new_owner`. Splits are unchanged; the new owner does not need to authorize. Emits a `jar_xfer` event carrying both owners. |
+| `transfer_jar_ownership(jar_id, new_owner)` | current jar `owner` and `new_owner` | Hand control of a jar to `new_owner`. The exact `(jar_id, new_owner)` pair must be signed by both parties; a transfer to the current owner is rejected. Splits are unchanged. Emits a `jar_xfer` event carrying both owners. |
+| `delete_jar(jar_id)` | current jar `owner` | Delete a registered jar and free its slug so it can be recreated. Removes the jar, its stats, and any minimum-tip value for that slug. Emits a `jar_del` event. |
 | `rename_jar(jar_id, new_jar_id)` | jar `owner` | Move a jar, its stats and its minimum to a new slug. The old slug stops resolving immediately; `new_jar_id` must be free and pass the same length checks as `create_jar`. Emits a `jar_rnm` event carrying both ids. |
 | `tip(from, jar_id, amount, message)` | `from` | Move `amount` USDC out of `from` and route it across the jar's recipients. A recipient who cannot receive the token has their share **escrowed in the contract** (see `get_held`/`withdraw_held`) instead of reverting the tip. Emits a `tip` event carrying the per-recipient breakdown. Rejects amounts below the jar's minimum with `BelowMinTipAmount`. |
 | `get_held(recipient) -> i128` | — | How much the contract is holding for `recipient` because a past tip could not deliver their share. `0` when nothing is held. |
@@ -140,7 +141,8 @@ written as raised only when every earlier check has passed.
 | `create_jar(owner, jar_id, splits)` | `owner` (+ registrar co-auth when set) | `InvalidJarId` → `JarExists` → `SplitsEmpty` → `TooManyRecipients` → `SplitOutOfRange` / `DuplicateRecipient` (per entry) → `SplitSumNot100Pct` → Soroban auth error (missing registrar co-signature, #178) | Register a new jar. Fails if the slug is not a canonical `@`-prefixed `[a-z0-9_-]{3,32}` slug, already exists, or splits are invalid. The registrar's co-signature is demanded only after validation passes, so a malformed request never burns one. Emits a `jar_crtd` event. |
 | `update_splits(jar_id, splits)` | jar `owner` | `JarNotFound` → `SplitsEmpty` → `TooManyRecipients` → `SplitOutOfRange` / `DuplicateRecipient` (per entry) → `SplitSumNot100Pct` | Replace a jar's splits. Subject to the same validation as `create_jar`. Emits a `splits` event. |
 | `set_min_tip_amount(jar_id, min_amount)` | jar `owner` | `JarNotFound` → `InvalidMinimumAmount` | Set or clear an optional minimum tip amount for a jar. `min_amount` must be strictly positive (`> 0`) or `None` to clear. Emits a `min_tip` event. |
-| `transfer_jar_ownership(jar_id, new_owner)` | current jar `owner` | `JarNotFound` → `InvalidRecipient` (owner is the contract or its token) | Hand control of a jar to `new_owner`. Splits are unchanged; the new owner does not need to authorize. Emits a `jar_xfer` event carrying both owners. |
+| `transfer_jar_ownership(jar_id, new_owner)` | current jar `owner` and `new_owner` | `JarNotFound` → `InvalidRecipient` (new owner is the current owner, the contract itself, or the token) | Hand control of a jar to `new_owner`. The exact `(jar_id, new_owner)` pair is signed by both owners. Splits are unchanged. Emits a `jar_xfer` event carrying both owners. |
+| `delete_jar(jar_id)` | current jar `owner` | `JarNotFound` | Delete a registered jar and free its slug for reuse. Removes the jar, its stats, and the associated minimum-tip value. Emits a `jar_del` event. |
 | `rename_jar(jar_id, new_jar_id)` | jar `owner` | `InvalidJarId` (new id not a canonical `@`-prefixed `[a-z0-9_-]{3,32}` slug) → `JarNotFound` → `JarIdInUse` | Move a jar, its stats and its minimum to `new_jar_id`. The old id stops resolving once the move is complete. Emits a `jar_rnm` event carrying both ids. |
 | `tip(from, jar_id, amount, message)` | `from` | `ContractPaused` → `NotInitialized` → `AmountZero` (amount = 0) / `AmountNegative` (amount < 0) → `MessageTooLong` → `JarNotFound` → `BelowMinTipAmount` → `InsufficientBalance` → `SplitAmountTooSmall` (a share truncates to zero) / `AmountOverflow` (`amount * bps` overflows `i128`) | Transfer `amount` USDC from `from`, split across the jar's recipients. Emits a `tip` event carrying the per-recipient breakdown. Rejects amounts below the jar's minimum with `BelowMinTipAmount` and amounts that cannot pay every recipient with `SplitAmountTooSmall`; see [the smallest amount a jar accepts](#the-smallest-amount-a-jar-accepts-86). A failing token `transfer` reverts the whole call with the **token contract's own error**, not one of this contract's codes (e.g. an insufficient balance). |
 | `get_jar(jar_id) -> Jar` | — | `JarNotFound` | Read a jar's configuration. Panics with `JarNotFound` if the slug is free. |
@@ -722,7 +724,8 @@ Consequences a client has to design for:
 |----------|-----------|---------------|
 | `create_jar(owner, jar_id, splits)` | `owner` | The contract call only. No token moves. |
 | `update_splits(jar_id, splits)` | the jar's current `owner` | The contract call only. |
-| `transfer_jar_ownership(jar_id, new_owner)` | the jar's current `owner` | The contract call only. `new_owner` signs nothing. |
+| `transfer_jar_ownership(jar_id, new_owner)` | the jar's current `owner` and `new_owner` | The exact `(jar_id, new_owner)` transfer pair, signed by both parties. |
+| `delete_jar(jar_id)` | the jar's current `owner` | The contract call only. |
 | `set_min_tip_amount(jar_id, min_amount)` | the jar's current `owner` | The contract call only. |
 
 Each of these is a single contract-level invocation with no nested token
@@ -907,11 +910,12 @@ log or an indexer's jar list just to validate a name.
 ### `splits` — published on every successful `update_splits`
 
 - **Topics:** `(symbol "splits", jar_id: String)`
-- **Data:** `SplitsUpdatedEvent { count: u32 }`
+- **Data:** `SplitsUpdatedEvent { count: u32, splits: Vec<Split> }`
 
 Lets an indexer that has cached a jar's splits know they went stale, without
-having to re-poll every jar on a schedule. The indexer refetches the jar via
-`get_jar` when it sees this event.
+having to re-poll every jar on a schedule. The event carries the updated
+split vector itself, so a consumer can refresh immediately and avoid the stale
+read window created by a second update racing with a follow-up `get_jar` call.
 
 ### `jar_xfer` — published on every successful `transfer_jar_ownership`
 
@@ -930,13 +934,23 @@ means successive transfers chain: each event's `prev_owner` is the previous
 event's `new_owner`, so an ownership history can be reconstructed from the
 events alone.
 
-`prev_owner` is the address that authorized the call — only the current owner
-may transfer a jar — and is always different from `new_owner` in practice,
-though the contract does not reject a transfer to the existing owner. Splits
-are unchanged by a transfer, so no `splits` event accompanies this one.
+`prev_owner` is the address that previously controlled the jar, and the
+contract now requires both sides of the handoff to authorize the exact
+`(jar_id, new_owner)` pair. A transfer to the current owner is rejected with
+`InvalidRecipient`, so the event log never records a no-op handoff. Splits are
+unchanged by a transfer, so no `splits` event accompanies this one.
 
 > **Consumer impact.** Event data is a named map. Decoders should read fields
 > by name and ignore unknown fields added in future versions.
+
+### `jar_del` — published on every successful `delete_jar`
+
+- **Topics:** `(symbol "jar_del")`
+- **Data:** `JarDeletedEvent { jar_id: String }`
+
+Lets an indexer drop a jar from its cached list as soon as the slug is retired,
+without polling `jar_exists` or re-reading the jar. A deleted slug is free for
+`create_jar` to reuse immediately after the write settles.
 
 ### `min_tip` — published on every successful `set_min_tip_amount`
 
