@@ -34,6 +34,8 @@ All notable changes to `novatip-contracts` are documented here.
 - `tip` withholds a recipient's share when that recipient is also the tipper
 
 ### Fixed
+- The E2E job can run: the local Stellar network is started by a step with `--local` (a `services:` container cannot pass arguments to an image entrypoint, so quickstart defaulted to a public network and never passed its health check), the token is now deployed with `stellar contract asset deploy` because no bundled `stellar_asset.wasm` ships with the CLI any more, the CLI version is read from `scripts/lib/cli.sh` instead of pinned below the scripts' own floor, recipients are funded and given trustlines so their shares are paid rather than held, jar ids use the canonical `@`-prefixed form, and CLI output is read with `-q` so the assertions parse JSON instead of progress lines
+- `scripts/tip.sh` calls `tip` with its `from` and `message` arguments, which the contract has always required; the script was written against an older signature and every invocation failed with `Missing required argument 'from'`
 - Workspace wasm builds and `cargo deny check` work again: `examples/tip-forwarder` declares `no_std` outside tests (the wasm builds failed with `E0152: duplicate lang item panic_impl`), both crates declare the workspace MIT license, and the path dependency carries a version instead of a wildcard
 - `preview_split` checks the amount's sign before the jar's minimum, so a zero or negative amount reports `AmountZero`/`AmountNegative` exactly as `tip` does (#97)
 - `tip` and `create_recurring` reject messages that are not valid UTF-8 or that contain control characters other than newline, before any transfer, with the appended error 36 `InvalidMessage` (#96)

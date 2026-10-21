@@ -9,7 +9,8 @@ set -euo pipefail
 # Required env (see .env.example):
 #   NETWORK, SOURCE, JAR_ID, AMOUNT
 #   CONTRACT_ID  (optional; defaults to .contract-id.<NETWORK>)
-#   RECIPIENT    (optional; defaults to jar owner for single-recipient jars)
+#   FROM         (optional; the tipper, defaults to SOURCE)
+#   MESSAGE      (optional; non-empty free text published in the tip event)
 #
 # Usage:  ./scripts/tip.sh
 #         JAR_ID=@bob AMOUNT=100 ./scripts/tip.sh
@@ -19,6 +20,13 @@ set -euo pipefail
 require_env NETWORK SOURCE JAR_ID AMOUNT
 require_contract_id
 
+# `tip` debits an account that authorises the call itself, and the CLI signs
+# only for --source, so the tipper defaults to the submitting identity.
+FROM="${FROM:-${SOURCE}}"
+# The contract takes the message as a plain String and the CLI rejects an empty
+# value, so the wrapper supplies text rather than failing on a missing flag.
+MESSAGE="${MESSAGE:-tipped via scripts/tip.sh}"
+
 echo "==> Sending tip of ${AMOUNT} to jar ${JAR_ID} on ${CONTRACT_ID}"
 stellar contract invoke \
   --id "${CONTRACT_ID}" \
@@ -26,7 +34,9 @@ stellar contract invoke \
   --network "${NETWORK}" \
   -- \
   tip \
+  --from "${FROM}" \
   --jar_id "${JAR_ID}" \
-  --amount "${AMOUNT}"
+  --amount "${AMOUNT}" \
+  --message "${MESSAGE}"
 
 echo "==> Tip sent."

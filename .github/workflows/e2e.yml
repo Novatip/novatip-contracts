@@ -3,32 +3,33 @@ name: E2E Local Network
 # Runs the deploy, create-jar and tip flow against a local Stellar network
 # using the stellar/quickstart image (#126). Self-contained — no secrets, no
 # testnet dependency — so it can run on pull requests from forks.
+#
+# The network is started by a step, not by `jobs.e2e.services`, because the
+# image has to be told which network to run: with no argument it defaults to a
+# public one and spends the whole job downloading history buckets, so its health
+# check never passes and the runner fails the job with "Failed to initialize
+# container". `services:` cannot pass arguments to an image entrypoint — the
+# runner's own `docker create` line ends at the image name — so `--local` can
+# only be given by a step.
 
 on:
   pull_request:
     paths:
       - 'scripts/**'
       - 'contracts/**'
+      - 'examples/**'
       - '.github/workflows/e2e.yml'
 
 env:
   CARGO_TERM_COLOR: always
+  # One definition of the jar that the tip and both assertions read, so the
+  # create / tip / assert steps cannot drift apart.
+  JAR_ID: '@testjar'
 
 jobs:
   e2e:
     runs-on: ubuntu-latest
     timeout-minutes: 15
-
-    services:
-      stellar:
-        image: stellar/quickstart:latest
-        ports:
-          - 8000:8000
-        options: >-
-          --health-cmd "curl -sf http://localhost:8000/health || exit 1"
-          --health-interval 5s
-          --health-timeout 3s
-          --health-retries 20
 
     steps:
       - uses: actions/checkout@v4
@@ -42,30 +43,74 @@ jobs:
       - name: Install Stellar CLI
         run: |
           set -euo pipefail
+          # Read the floor the scripts enforce themselves rather than repeating a
+          # number here: scripts/deploy.sh refuses an older CLI outright, so a pin
+          # that drifts below it makes this job unrunnable.
+          VERSION=$(sed -n 's/^MIN_STELLAR_CLI_VERSION="\([^"]*\)".*/\1/p' scripts/lib/cli.sh)
+          test -n "${VERSION}" || { echo "error: could not read MIN_STELLAR_CLI_VERSION"; exit 1; }
           curl -sSfL -o stellar-cli.tar.gz \
-            "https://github.com/stellar/stellar-cli/releases/download/v22.0.0/stellar-cli-22.0.0-x86_64-unknown-linux-gnu.tar.gz"
+            "https://github.com/stellar/stellar-cli/releases/download/v${VERSION}/stellar-cli-${VERSION}-x86_64-unknown-linux-gnu.tar.gz"
           tar xzf stellar-cli.tar.gz
           install stellar /usr/local/bin/stellar
-          stellar --version
+          stellar version
+
+      - name: Start the local Stellar network
+        run: |
+          set -euo pipefail
+          docker run -d --name stellar -p 8000:8000 stellar/quickstart:latest --local
+          # Two conditions that /health alone misses. The RPC has to have ingested
+          # a ledger: in local mode quickstart answers /health while it is still
+          # applying the Soroban protocol upgrades, and calls made in that window
+          # fail with `DB is empty`. And friendbot has to be serving, because
+          # `stellar keys generate --fund` against a friendbot that is not up yet
+          # reports a funded account that never appears on chain. A parameterless
+          # friendbot request answers 400 once the process is running.
+          for _ in $(seq 1 60); do
+            LEDGER=$(curl -sf -X POST -H 'Content-Type: application/json' \
+              -d '{"jsonrpc":"2.0","id":1,"method":"getLatestLedger","params":{}}' \
+              http://localhost:8000/soroban/rpc || true)
+            FB=$(curl -s -o /dev/null -w '%{http_code}' http://localhost:8000/friendbot || true)
+            if printf '%s' "${LEDGER}" | grep -q '"sequence"' && [ "${FB}" = "400" ]; then
+              echo "local network is serving ledgers and friendbot"
+              exit 0
+            fi
+            sleep 3
+          done
+          echo "error: the local network did not become ready" >&2
+          docker logs --tail 60 stellar >&2
+          exit 1
 
       - name: Setup local identities
         run: |
           set -euo pipefail
+          # All four are funded: a recipient with no on-chain account can hold no
+          # trustline, and the contract then holds its share instead of paying it,
+          # which is exactly what the balance assertions below reject.
           stellar keys generate deployer --network local --fund
           stellar keys generate creator --network local --fund
-          stellar keys generate recipient1 --network local
-          stellar keys generate recipient2 --network local
+          stellar keys generate recipient1 --network local --fund
+          stellar keys generate recipient2 --network local --fund
 
       - name: Deploy a test token (stand-in for USDC)
         run: |
           set -euo pipefail
-          TOKEN_ID=$(stellar contract deploy \
-            --wasm "$(find ~/.local -name 'stellar_asset.wasm' | head -1)" \
+          # `stellar contract asset deploy` wraps a classic asset in the network's
+          # built-in Stellar Asset Contract. There is no bundled stellar_asset.wasm
+          # left to find and deploy.
+          ISSUER=$(stellar keys address deployer)
+          TOKEN_ID=$(stellar contract asset deploy \
+            --asset "TEST:${ISSUER}" \
             --source deployer \
-            --network local \
-            -- \
-            --admin deployer)
+            --network local | tail -1)
           echo "TOKEN_ID=${TOKEN_ID}" >> "$GITHUB_ENV"
+
+      - name: Open recipient trustlines
+        run: |
+          set -euo pipefail
+          ISSUER=$(stellar keys address deployer)
+          for NAME in recipient1 recipient2; do
+            stellar tx new change-trust --source "${NAME}" --line "TEST:${ISSUER}" --network local
+          done
 
       - name: Deploy tip_splitter via deploy.sh
         run: |
@@ -80,7 +125,7 @@ jobs:
           export NETWORK=local
           export SOURCE=creator
           export OWNER=$(stellar keys address creator)
-          export SLUG=testjar
+          export SLUG="${JAR_ID}"
           export SPLITS='[{"to":"'$(stellar keys address recipient1)'","bps":6000},{"to":"'$(stellar keys address recipient2)'","bps":4000}]'
           ./scripts/create-jar.sh
 
@@ -88,17 +133,20 @@ jobs:
         run: |
           export NETWORK=local
           export SOURCE=deployer
-          export JAR_ID=testjar
           export AMOUNT=10000000
+          export MESSAGE='e2e local network'
           ./scripts/tip.sh
 
       - name: Assert recipient balances
         run: |
           set -euo pipefail
-          BAL1=$(stellar contract invoke --id "${TOKEN_ID}" --source deployer --network local -- \
-            balance --id "$(stellar keys address recipient1)")
-          BAL2=$(stellar contract invoke --id "${TOKEN_ID}" --source deployer --network local -- \
-            balance --id "$(stellar keys address recipient2)")
+          # -q because the CLI's progress lines share stdout with the value, and
+          # jq because an i128 comes back as a JSON string: the raw output is
+          # "6000000", quotes included.
+          BAL1=$(stellar contract invoke -q --id "${TOKEN_ID}" --source deployer --network local -- \
+            balance --id "$(stellar keys address recipient1)" | jq -r .)
+          BAL2=$(stellar contract invoke -q --id "${TOKEN_ID}" --source deployer --network local -- \
+            balance --id "$(stellar keys address recipient2)" | jq -r .)
           echo "recipient1 balance: ${BAL1}"
           echo "recipient2 balance: ${BAL2}"
           # 60/40 split of 10000000 = 6000000 / 4000000
@@ -108,7 +156,14 @@ jobs:
       - name: Assert jar state via get_jar
         run: |
           set -euo pipefail
-          JAR=$(stellar contract invoke --id "$(cat .contract-id.local)" --source deployer --network local -- \
-            get_jar --jar_id testjar)
+          JAR=$(stellar contract invoke -q --id "$(cat .contract-id.local)" --source deployer --network local -- \
+            get_jar --jar_id "${JAR_ID}")
           echo "jar: ${JAR}"
           echo "${JAR}" | jq -e '.splits | length == 2' >/dev/null || { echo "FAIL: jar should have 2 splits"; exit 1; }
+
+      # Last, so failure() has something to have seen: the network's own log is
+      # the first thing you want when a transaction is rejected, and it is gone
+      # once the job ends.
+      - name: Show container logs if the job failed
+        if: failure()
+        run: docker logs --tail 120 stellar || true
