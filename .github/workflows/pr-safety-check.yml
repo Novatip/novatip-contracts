@@ -47,11 +47,16 @@ jobs:
               if (!seen.has(key)) { seen.add(key); findings.push({ where, why, level }); }
             };
 
-            // Workflows, actions, Dependabot config, CODEOWNERS and top-level YAML can run code or change who must review.
-            // Issue and PR templates and other docs under .github/ are text, so they are reported as a note instead.
+            // Workflows, actions, Dependabot, CODEOWNERS and top-level YAML in .github/ can change what runs; templates and docs cannot.
             const AUTOMATION = /^\.github\/(workflows\/|actions\/|dependabot\.ya?ml$|CODEOWNERS$|[^/]+\.ya?ml$)/i;
+            const SNAPSHOT_JSON = /(^|\/)test_snapshots\/.*\.json$/i;
+            // One U+FE0F directly after an emoji, and a U+200D joining two emoji, are ordinary emoji encoding. Anything else is still flagged.
+            const stripEmoji = (t) => t
+              .replace(/(\p{Extended_Pictographic})\uFE0F(?![\uFE00-\uFE0F\u{E0100}-\u{E01EF}])/gu, '$1')
+              .replace(/(\p{Extended_Pictographic})\u200D(?=\p{Extended_Pictographic})/gu, '$1');
             const RISKY_PATHS = [
               [AUTOMATION, 'changes repository automation (.github/)'],
+            [/^\.github\/(?!(workflows|actions)\/|dependabot\.ya?ml$|CODEOWNERS$|[^/]+\.ya?ml$)/i, 'changes repository templates or docs (.github/)', 'note'],
               [/(^|\/)\.vscode\//, 'changes editor config, which can run tasks when the folder is opened (.vscode/)'],
               [/(^|\/)\.devcontainer\//, 'changes dev container config, which can run commands (.devcontainer/)'],
               [/(^|\/)\.idea\//, 'changes IDE config (.idea/)'],
@@ -60,21 +65,34 @@ jobs:
               [/(^|\/)\.(npmrc|yarnrc|yarnrc\.yml|pnpmrc)$/, 'changes package manager config'],
               [/(^|\/)build\.rs$/, 'changes a Rust build script, which runs on every build'],
               [/(^|\/)(Dockerfile|docker-compose[^/]*\.ya?ml)$/, 'changes container build config'],
+              [/(^|\/)\.claude\//, 'changes Claude Code settings or hooks, which can run commands'],
+              [/(^|\/)\.cursor\//, 'changes Cursor settings or rules'],
+              [/(^|\/)\.(cursorrules|windsurfrules|clinerules|roorules|aider[^/]*)$/, 'changes AI coding tool instructions'],
+              [/(^|\/)\.(windsurf|continue|cline|roo|aider)[^/]*\//, 'changes AI coding tool configuration'],
+              [/(^|\/)\.mcp\.json$/, 'changes MCP server configuration, which can start programs'],
+              [/(^|\/)(AGENTS|CLAUDE|GEMINI)\.md$/i, 'changes instructions that AI coding agents follow'],
+              [/(^|\/)\.github\/copilot-instructions\.md$/, 'changes instructions that AI coding agents follow'],
+              [/\.code-workspace$/, 'changes a VS Code workspace file, which can define tasks and settings'],
+              [/(^|\/)\.cargo\//, 'changes Cargo config, which can set a custom runner, linker or build flags'],
+              [/(^|\/)rust-toolchain(\.toml)?$/, 'changes the pinned Rust toolchain'],
+              [/(^|\/)(eslint|vite|vitest|next|postcss|tailwind|playwright|jest|babel|webpack|rollup|esbuild|prisma|commitlint|lint-staged|prettier|stylelint|svelte|nuxt|astro|tsup|turbo|cypress|metro|rspack|rsbuild|remix|gatsby)\.config\.(js|cjs|mjs|ts|mts|cts)$/, 'changes a config file that is executed as code', 'note'],
+              [/(^|\/)\.(eslintrc|prettierrc|babelrc|stylelintrc|lintstagedrc|commitlintrc|mocharc)\.(js|cjs|mjs|ts)$/, 'changes a config file that is executed as code', 'note'],
+              [/(^|\/)(lefthook|\.lefthook)\.ya?ml$/, 'changes git hook configuration'],
+              [/(^|\/)(Makefile|makefile|GNUmakefile|justfile|Justfile|Taskfile\.ya?ml)$/, 'changes a task runner file', 'note'],
+              [/(^|\/)(noxfile\.py|tox\.ini|setup\.py|setup\.cfg|conftest\.py)$/, 'changes a Python build or test hook'],
+              [/(^|\/)scripts\//, 'changes a script under scripts/', 'note'],
+              [/(^|\/)dist\/setup\.js$/, 'adds a file name used by a known malware campaign (dist/setup.js)'],
+              [/(^|\/)branch_structure\.json$/, 'adds a file name used by a known malware campaign (branch_structure.json)'],
+              [/(^|\/)temp_[a-z_]*push[a-z_]*\.(bat|cmd|sh|ps1)$/i, 'adds a file name used by a known malware campaign (temp push script)'],
+              [/(^|\/)\.env(\.(?!example$|sample$|template$).+)?$/, 'adds an environment file, which may hold secrets'],
             ];
             const BINARY = /\.(woff2?|ttf|otf|eot|llf|exe|dll|so|dylib|bin|jar|class|zip|tar|gz|tgz|7z|rar|bat|cmd|ps1|vbs|scr|msi|deb|rpm|apk|node|pyc)$/i;
             const IMAGE = /\.(png|jpe?g|gif|webp|ico|avif|bmp)$/i;
-            // Generated test snapshots: JSON, which no runtime executes. A note, not a block, when too large to diff.
-            const SNAPSHOT_JSON = /(^|\/)test_snapshots\/.*\.json$/i;
             const CODE = /\.(js|jsx|mjs|cjs|ts|tsx|mts|cts|rs|sh|bash|py|rb|go|java|kt|swift|php|pl|ps1)$/i;
             const NO_LONG_LINE_CHECK = /\.(md|mdx|svg|lock|snap|json|csv|txt|map|min\.js|min\.css)$|(^|\/)(package-lock\.json|yarn\.lock|pnpm-lock\.yaml|Cargo\.lock)$/i;
             // Zero-width, bidirectional-override and variation-selector characters can hide code from reviewers.
-            const HIDDEN_RANGES = [[0x200B, 0x200F], [0x202A, 0x202E], [0x2060, 0x2064], [0x2066, 0x2069], [0xFEFF, 0xFEFF], [0xFE00, 0xFE0F], [0xE0100, 0xE01EF]];
-            // One U+FE0F directly after an emoji, and a U+200D joining two emoji, are ordinary emoji encoding.
-                        // Anything else in the ranges below (including runs of variation selectors) is still flagged.
-                        const stripEmojiEncoding = (t) => t
-                          .replace(/(\p{Extended_Pictographic})\uFE0F(?![\uFE00-\uFE0F\u{E0100}-\u{E01EF}])/gu, '$1')
-                          .replace(/(\p{Extended_Pictographic})\u200D(?=\p{Extended_Pictographic})/gu, '$1');
-                        const hasHidden = (text) => { text = stripEmojiEncoding(text); for (const ch of text) { const cp = ch.codePointAt(0); if (HIDDEN_RANGES.some(([a, b]) => cp >= a && cp <= b)) return true; } return false; };
+            const HIDDEN = /[\u200B-\u200F\u202A-\u202E\u2060-\u2064\u2066-\u2069\uFEFF\uFE00-\uFE0F]|\uDB40[\uDC00-\uDC7F\uDD00-\uDDEF]/;
+            const HIDDEN_PROSE = /[\u200B\u202A-\u202E\u2060-\u2064\u2066-\u2069]|\uDB40[\uDC00-\uDC7F]/;
             const SUSPICIOUS = [
               [/\beval\s*\(/, 'eval('],
               [/\bnew\s+Function\s*\(/, 'new Function('],
@@ -84,12 +102,40 @@ jobs:
               [/(\\u[0-9a-fA-F]{4}){8,}/, 'a long run of \\u escapes'],
               [/[A-Za-z0-9+/]{300,}={0,2}/, 'a long base64-like blob'],
               [/String\.fromCharCode\s*\((\s*\d+\s*,){10,}/, 'String.fromCharCode with many character codes'],
+              [/(curl|wget)[^\n|]*\|\s*(ba|z)?sh\b/, 'pipes a download into a shell'],
+              [/base64\s+(-d|--decode)\b/, 'decodes base64 when it runs'],
+              [/\/dev\/tcp\//, 'opens a raw network socket'],
+              [/\b(nc|ncat|netcat)\s+-/, 'uses netcat'],
+              [/Invoke-Expression|powershell(\.exe)?\s+-(enc|e)\b/i, 'runs encoded PowerShell'],
+              [/(\.ssh\b|\.aws\b|\.npmrc|\.git-credentials|\.gnupg|id_rsa|id_ed25519|\.config\/gh\b|Login Data|wallet\.dat)/i, 'references credential or browser profile locations'],
             ];
             const LIFECYCLE = /"(preinstall|install|postinstall|prepare|prepublish|prepublishOnly|prepack|postpack)"\s*:/;
+            const NO_WS_CHECK = /\.(md|mdx|txt|csv|snap|svg|lock)$|(^|\/)(package-lock\.json|yarn\.lock|pnpm-lock\.yaml|Cargo\.lock)$/i;
+            const CONFIG_CODE = /(^|\/)((eslint|vite|vitest|next|postcss|tailwind|playwright|jest|babel|webpack|rollup|esbuild|prisma|commitlint|lint-staged|prettier|stylelint|svelte|nuxt|astro|tsup|turbo|cypress|metro|rspack|rsbuild|remix|gatsby)\.config|\.(eslintrc|prettierrc|babelrc|stylelintrc|lintstagedrc|commitlintrc|mocharc))\.(js|cjs|mjs|ts|mts|cts)$/;
+            const CONFIG_RISK = /\bcreateRequire\b|child_process|\bfetch\s*\(|(require\(\s*|from\s+)['"](node:)?(https?|net|tls|dgram|dns|vm|worker_threads)['"]/;
+            const hidesCode = (l) => { const runs = l.match(/[ \t]{50,}(?=\S)/g); return !!runs && (Math.max(...runs.map(r => r.length)) >= 100 || l.length > 300); };
+            const SCRIPT_LINE = /^\s*"([^"]+)"\s*:\s*"((?:[^"\\]|\\.)*)"\s*,?\s*$/;
+            const SHELL_TRICKS = /\b(curl|wget|eval|base64|powershell|pwsh|mshta|certutil)\b|\b(bash|sh|zsh)\s+-c\b|\bcmd\s+\/c\b/i;
+            const DEP_LINE = /^\s*"(@?[a-z0-9][\w.~-]*(?:\/[\w.~-]+)?)"\s*:\s*"[~^]?\d[^"]*"\s*,?\s*$/;
+            const AGENT_INJECTION = /ignore (all |any |the )?(previous|prior|above|earlier) (instructions|prompts)|disregard (all |any |the )?(previous|prior|above)|do not (tell|inform|mention)[^.]{0,30}(the )?(user|maintainer|reviewer)|(run|execute) the following (command|script)/i;
 
             // -- Files --
             const files = await github.paginate(github.rest.pulls.listFiles, { owner, repo, pull_number: pr.number, per_page: 100 });
             if (pr.changed_files > files.length) flag('(PR)', `only ${files.length} of ${pr.changed_files} changed files could be inspected`);
+
+            const addedFiles = new Set(files.filter(x => x.status === 'added').map(x => x.filename));
+            const readTree = async (sha) => {
+              try {
+                const { data } = await github.rest.git.getTree({ owner, repo, tree_sha: sha, recursive: 'true' });
+                if (data.truncated) flag('(PR)', 'file modes could not be fully checked: the repository tree is too large');
+                return new Map(data.tree.map(t => [t.path, t.mode]));
+              } catch (e) {
+                flag('(PR)', 'file modes (symlinks, submodules, executable bits) could not be checked');
+                return new Map();
+              }
+            };
+            const headModes = await readTree(pr.head.sha);
+            const baseModes = await readTree(pr.base.sha);
 
             for (const f of files) {
               const path = f.filename;
@@ -99,33 +145,68 @@ jobs:
                 if (AUTOMATION.test(path)) flag(path, 'removes repository automation (.github/)');
                 continue;
               }
-              for (const [re, why] of RISKY_PATHS) if (paths.some(p => re.test(p))) flag(path, why);
-              if (!paths.some(p => AUTOMATION.test(p)) && paths.some(p => /^\.github\//.test(p))) flag(path, 'changes repository templates or docs (.github/)', 'note');
-
+              for (const [re, why, level] of RISKY_PATHS) if (paths.some(p => re.test(p))) flag(path, why, level);
+              if (f.status === 'added' && /^[^\/]+\.(js|cjs|mjs)$/.test(path) && !/\.config\.(js|cjs|mjs)$/.test(path)) flag(path, 'adds a new JavaScript file at the repository root');
+              const mode = headModes.get(path);
+              if (mode === '120000') flag(path, 'is a symbolic link, which can point outside the repository');
+              if (mode === '160000') flag(path, 'is a git submodule, which pulls in code from another repository');
+              if (mode === '100755' && baseModes.get(path) !== '100755') {
+                if (/^scripts\/.*\.(sh|bash)$/.test(path)) flag(path, 'is a newly executable shell script', 'note');
+                else flag(path, 'is made executable');
+              }
               // Real images, fonts and binaries never have a text diff; one that does is disguised.
               if ((BINARY.test(path) || IMAGE.test(path)) && f.patch) flag(path, 'is named like a binary, font or image file but contains text, possibly disguised code');
               if (BINARY.test(path)) flag(path, 'adds or changes a font, binary, archive or script-runner file');
-              else if (!f.patch && f.changes > 0 && !IMAGE.test(path)) {
-                if (SNAPSHOT_JSON.test(path)) flag(path, 'is a generated test snapshot too large for GitHub to show a diff', 'note');
-                else flag(path, 'could not be inspected: binary, or too large for GitHub to show a diff');
-              }
+              else if (!f.patch && f.changes > 0 && SNAPSHOT_JSON.test(path)) flag(path, 'is a generated test snapshot too large for GitHub to show a diff', 'note');
+                  else if (!f.patch && f.changes > 0 && !IMAGE.test(path)) flag(path, 'could not be inspected: binary, or too large for GitHub to show a diff');
 
               const added = (f.patch || '').split('\n').filter(l => l.startsWith('+') && !l.startsWith('+++')).map(l => l.slice(1));
-              if (added.some(l => hasHidden(l))) flag(path, 'contains invisible or bidirectional Unicode characters');
+              if (added.some(l => (/\.(md|mdx|txt|rst)$/i.test(path) ? HIDDEN_PROSE : HIDDEN).test(stripEmoji(l)))) flag(path, 'contains invisible or bidirectional Unicode characters');
+              if (CONFIG_CODE.test(path) && added.some(l => CONFIG_RISK.test(l))) flag(path, 'a config file now loads modules dynamically or uses process or network APIs');
+              if (!NO_WS_CHECK.test(path) && added.some(l => hidesCode(l))) flag(path, 'adds a line with a long run of spaces or tabs before more text, which can push code off-screen');
+              if (/\.(md|mdx|txt)$/i.test(path) && added.some(l => AGENT_INJECTION.test(l))) flag(path, 'contains text addressed to an AI agent');
 
-              if (/(^|\/)package\.json$/.test(path) && added.some(l => LIFECYCLE.test(l))) flag(path, 'adds or changes an install-time script (preinstall, postinstall, prepare, ...)');
+              if (/(^|\/)package\.json$/.test(path)) {
+                if (added.some(l => LIFECYCLE.test(l))) flag(path, 'adds or changes an install-time script (preinstall, postinstall, prepare, ...)');
+                const dir = path.includes('/') ? path.slice(0, path.lastIndexOf('/') + 1) : '';
+                let newDeps = 0;
+                for (const l of added) {
+                  const dep = l.match(DEP_LINE);
+                  if (dep) {
+                    if (dep[1] !== 'version' && newDeps < 10) { newDeps++; flag(path, `adds or updates dependency ${dep[1]}; check it is the package you expect`, 'note'); }
+                    continue;
+                  }
+                  const m = l.match(SCRIPT_LINE);
+                  if (m) {
+                    const [, key, cmd] = m;
+                    if (SHELL_TRICKS.test(cmd)) flag(path, `"${key}" runs a download, shell or encoding command`);
+                    const node = cmd.match(/\bnode\s+(?:\.\/)?([^\s&;|"']+\.(?:c|m)?js)\b/);
+                    if (node) {
+                      if (addedFiles.has(dir + node[1])) flag(path, `"${key}" runs a file this PR adds (${node[1]})`);
+                      else if (/^\s*node\s+\S+\.(c|m)?js\s*(&&|;|\|\|)/.test(cmd)) flag(path, `"${key}" runs a local file before the real command`);
+                    }
+                    if (/^(git\+|git:|github:|file:|link:|portal:)/.test(cmd) || /^https?:\/\/\S+\.(tgz|tar\.gz|zip)$/.test(cmd)) flag(path, `dependency "${key}" comes from a git, file or tarball source`);
+                  }
+                }
+                if (added.some(l => /^\s*"(overrides|resolutions|pnpm)"\s*:/.test(l))) flag(path, 'adds dependency overrides or resolutions');
+              }
               if (/(^|\/)(package-lock\.json|yarn\.lock|pnpm-lock\.yaml)$/.test(path)) {
                 // Only 'resolved' lines say where a package comes from; 'funding' and 'url' lines are metadata.
-                            const hosts = added.filter(l => /"resolved"\s*:|^\s*resolved\s|\bresolution:|\btarball:/.test(l))
-                              .map(l => { const m = l.match(/(?:git\+)?https?:\/\/([^/"' ]+)(\/[^/"' #]+)?/); return m ? (m[1] === 'github.com' && m[2] && m[2].slice(1).toLowerCase() === owner.toLowerCase() ? null : m[1]) : null; }).filter(Boolean);
+                  const hosts = added.filter(l => /"resolved"\s*:|^\s*resolved\s|\bresolution:|\btarball:/.test(l))
+                    .map(l => { const m = l.match(/(?:git\+)?https?:\/\/([^/"' #]+)(\/[^/"' #]+)?/); return m ? (m[1] === 'github.com' && m[2] && m[2].slice(1).toLowerCase() === owner.toLowerCase() ? null : m[1]) : null; }).filter(Boolean);
                 const odd = [...new Set(hosts)].filter(h => !/^(registry\.npmjs\.org|registry\.yarnpkg\.com)$/.test(h));
                 if (odd.length) flag(path, `resolves packages from an unusual host: ${odd.join(', ')}`);
               }
               if (/(^|\/)Cargo\.(toml|lock)$/.test(path) && added.some(l => /git\s*=|git\+|^\s*build\s*=|\[build-dependencies\]/.test(l))) {
                 flag(path, 'adds a git dependency or a build script');
               }
+              if (/(^|\/)Cargo\.toml$/.test(path) && added.some(l => /^\s*\[(patch|replace)\b|proc-macro\s*=\s*true/.test(l))) flag(path, 'adds a [patch] or [replace] section or a proc-macro crate');
+              if (/(^|\/)Cargo\.lock$/.test(path)) {
+                const src = added.map(l => (l.match(/^source = "(.+)"$/) || [])[1]).find(x => x && !/^(registry\+https:\/\/github\.com\/rust-lang\/crates\.io-index|sparse\+https:\/\/index\.crates\.io\/)/.test(x));
+                if (src) flag(path, `uses a package source other than crates.io (${src.slice(0, 60)})`);
+              }
 
-              if (CODE.test(path) || ((BINARY.test(path) || IMAGE.test(path)) && f.patch)) {
+              if (CODE.test(path) || /(^|\/)(Makefile|makefile|GNUmakefile|justfile|Justfile|Taskfile\.ya?ml)$/.test(path) || ((BINARY.test(path) || IMAGE.test(path)) && f.patch)) {
                 if (!NO_LONG_LINE_CHECK.test(path)) {
                   const longest = added.reduce((m, l) => Math.max(m, l.length), 0);
                   if (longest > 500) flag(path, `adds a line of ${longest} characters, which may be minified or obfuscated code`);
@@ -159,19 +240,24 @@ jobs:
                 if (githubMade) flag(`commit ${short}`, `merges a PR inside the contributor's fork ("${subject}")`, 'note');
                 else flag(`commit ${short}`, `looks like a copy of another PR's merge commit, not signed by GitHub ("${subject}")`);
               }
-              // GitHub's "Update branch" button makes a signed two-parent merge credited to whoever clicked it. A forgery cannot
-                          // carry GitHub's signature, and the files it brings in are checked above like any others.
-                          const isUpdateBranch = c.commit.verification?.verified === true && c.commit.committer?.email === 'noreply@github.com'
-                            && (c.parents || []).length === 2 && /^Merge branch '.+' into .+/.test(subject);
-                          const login = isUpdateBranch ? null : c.author?.login;
+              const login = c.author?.login;
               if (login && login.toLowerCase() !== prAuthor && c.author.type !== 'Bot') {
                 // A commit credited to a maintainer inside someone else's PR is how the earlier forgery looked trustworthy.
                 const access = await hasWriteAccess(login);
-                if (access === 'write') flag(`commit ${short}`, `is credited to @${login}, who has write access, but the PR is by @${pr.user.login}`);
+                const githubSigned = c.commit.verification?.verified === true && c.commit.committer?.email === 'noreply@github.com';
+                if (access === 'write') flag(`commit ${short}`, `is credited to @${login}, who has write access, but the PR is by @${pr.user.login}${githubSigned ? ' (signed by GitHub)' : ' and is not signed by GitHub'}`, githubSigned ? 'note' : 'block');
                 else if (access === 'unknown') flag(`commit ${short}`, `is authored by @${login}, not the PR author, and their access could not be checked`);
                 else flag(`commit ${short}`, `is authored by @${login}, not the PR author @${pr.user.login}`, 'note');
               }
             }
+
+            // -- Text written by the contributor --
+            const texts = [['PR title', pr.title || ''], ['PR description', pr.body || ''], ...commits.map(c => [`commit ${c.sha.slice(0, 7)} message`, c.commit.message])];
+            for (const [where, text] of texts) {
+              if (HIDDEN_PROSE.test(text)) flag(where, 'contains invisible or bidirectional Unicode characters');
+              if (AGENT_INJECTION.test(text)) flag(where, 'contains text addressed to an AI agent or reviewer');
+            }
+            if (/<!--[\s\S]{300,}?-->/.test(pr.body || '')) flag('PR description', 'has a long hidden HTML comment', 'note');
 
             // -- Report --
             const esc = (s) => String(s).replace(/[|`<>]/g, ch => ({ '|': '\\|', '`': "'", '<': '&lt;', '>': '&gt;' }[ch]));
@@ -190,7 +276,7 @@ jobs:
             }
 
             const s = core.summary.addHeading(`PR safety check: ${blocking.length} risky change(s)`, 3)
-              .addRaw('Review these carefully before merging. If they are legitimate, a maintainer or admin can merge anyway.\n\n')
+              .addRaw('Review these carefully before merging. If they are legitimate, an admin can merge anyway.\n\n')
               .addRaw(table(blocking));
             if (notes.length) s.addRaw('Notes (not blocking):\n\n' + table(notes));
             await s.write();
