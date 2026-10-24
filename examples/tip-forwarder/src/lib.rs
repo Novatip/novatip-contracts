@@ -62,6 +62,8 @@ pub struct Jar {
     /// Lock flag added by #173; the XDR is a name-keyed map, so the mirror
     /// must carry every field the real `Jar` stores.
     pub locked: bool,
+    /// Pause flag added by #45; carried for the same reason as `locked`.
+    pub paused: bool,
 }
 
 #[contracttype]
