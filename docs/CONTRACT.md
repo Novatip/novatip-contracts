@@ -47,7 +47,7 @@ Quick reference for bounds enforced by the contract:
 
 ```rust
 struct Split    { to: Address, bps: u32 }
-struct Jar      { owner: Address, splits: Vec<Split>, locked: bool }
+struct Jar      { owner: Address, splits: Vec<Split>, locked: bool, paused: bool }
 struct Limits   { bps_denom: u32, max_recipients: u32, max_message_len: u32, max_batch_tips: u32 }
 struct Recurring {
     supporter: Address, jar_id: String, amount: i128,
@@ -80,6 +80,8 @@ one belongs to a jar, the other to a `(jar, supporter)` pair.
 | `lock_splits(jar_id)` | jar `owner` | Lock a jar so `update_splits` needs each reduced/removed recipient's consent. Emits a `lock` event with data `true`. |
 | `unlock_splits(jar_id)` | jar `owner` **and every current recipient** | Remove the lock. Consent mirrors a reduction: all recipients must sign, or the owner could disarm the lock and then cut shares. Emits a `lock` event with data `false`. |
 | `is_splits_locked(jar_id) -> bool` | — | Whether the jar's splits are locked. Panics with `JarNotFound` if the slug is free. |
+| `set_jar_paused(jar_id, paused)` | jar `owner` | Pause (`true`) or resume (`false`) tipping for one jar (#45). While paused, every tip entry point rejects the jar with `JarPaused`; reads stay available. The flag survives `transfer_jar_ownership`. Emits a `jar_pause` event carrying the new value. See [pausing a jar](#pausing-a-jar-45). |
+| `is_jar_paused(jar_id) -> bool` | — | Whether tipping is currently paused for the jar. Panics with `JarNotFound` if the slug is free. |
 | `leave_jar(jar_id, recipient)` | `recipient` | Remove `recipient` from the jar's splits. Their share is added to the last remaining entry so the splits still sum to 10 000. Rejected with `SoleRecipient` (only entry) or `NotRecipient` (not in the jar). Emits a `splits` event. |
 | `set_min_tip_amount(jar_id, min_amount)` | jar `owner` | Set or clear an optional minimum tip amount for a jar. `min_amount` must be strictly positive (`> 0`) or `None` to clear. Emits a `min_tip` event. |
 | `transfer_jar_ownership(jar_id, new_owner)` | current jar `owner` and `new_owner` | Hand control of a jar to `new_owner`. The exact `(jar_id, new_owner)` pair must be signed by both parties; a transfer to the current owner is rejected. Splits are unchanged. Emits a `jar_xfer` event carrying both owners. |
@@ -144,14 +146,14 @@ written as raised only when every earlier check has passed.
 | `transfer_jar_ownership(jar_id, new_owner)` | current jar `owner` and `new_owner` | `JarNotFound` → `InvalidRecipient` (new owner is the current owner, the contract itself, or the token) | Hand control of a jar to `new_owner`. The exact `(jar_id, new_owner)` pair is signed by both owners. Splits are unchanged. Emits a `jar_xfer` event carrying both owners. |
 | `delete_jar(jar_id)` | current jar `owner` | `JarNotFound` | Delete a registered jar and free its slug for reuse. Removes the jar, its stats, and the associated minimum-tip value. Emits a `jar_del` event. |
 | `rename_jar(jar_id, new_jar_id)` | jar `owner` | `InvalidJarId` (new id not a canonical `@`-prefixed `[a-z0-9_-]{3,32}` slug) → `JarNotFound` → `JarIdInUse` | Move a jar, its stats and its minimum to `new_jar_id`. The old id stops resolving once the move is complete. Emits a `jar_rnm` event carrying both ids. |
-| `tip(from, jar_id, amount, message)` | `from` | `ContractPaused` → `NotInitialized` → `AmountZero` (amount = 0) / `AmountNegative` (amount < 0) → `MessageTooLong` → `JarNotFound` → `BelowMinTipAmount` → `InsufficientBalance` → `SplitAmountTooSmall` (a share truncates to zero) / `AmountOverflow` (`amount * bps` overflows `i128`) | Transfer `amount` USDC from `from`, split across the jar's recipients. Emits a `tip` event carrying the per-recipient breakdown. Rejects amounts below the jar's minimum with `BelowMinTipAmount` and amounts that cannot pay every recipient with `SplitAmountTooSmall`; see [the smallest amount a jar accepts](#the-smallest-amount-a-jar-accepts-86). A failing token `transfer` reverts the whole call with the **token contract's own error**, not one of this contract's codes (e.g. an insufficient balance). |
+| `tip(from, jar_id, amount, message)` | `from` | `ContractPaused` → `NotInitialized` → `AmountZero` (amount = 0) / `AmountNegative` (amount < 0) → `MessageTooLong` → `JarNotFound` → `JarPaused` → `BelowMinTipAmount` → `InsufficientBalance` → `SplitAmountTooSmall` (a share truncates to zero) / `AmountOverflow` (`amount * bps` overflows `i128`) | Transfer `amount` USDC from `from`, split across the jar's recipients. Emits a `tip` event carrying the per-recipient breakdown. Rejects amounts below the jar's minimum with `BelowMinTipAmount` and amounts that cannot pay every recipient with `SplitAmountTooSmall`; see [the smallest amount a jar accepts](#the-smallest-amount-a-jar-accepts-86). A failing token `transfer` reverts the whole call with the **token contract's own error**, not one of this contract's codes (e.g. an insufficient balance). |
 | `get_jar(jar_id) -> Jar` | — | `JarNotFound` | Read a jar's configuration. Panics with `JarNotFound` if the slug is free. |
 | `get_jar_owner(jar_id) -> Address` | — | `JarNotFound` | Read just a jar's owner. Panics with `JarNotFound` if the slug is free. |
 | `get_split_count(jar_id) -> u32` | — | `JarNotFound` | How many recipients a jar pays. Panics with `JarNotFound` if the slug is free. |
 | `preview_split(jar_id, amount) -> Vec<i128>` | — | `AmountZero` / `AmountNegative` → `JarNotFound` → `BelowMinTipAmount` → `SplitAmountTooSmall` / `AmountOverflow` | What each recipient would receive from a tip of `amount`, in split order. Rejects amounts below the jar's minimum with `BelowMinTipAmount` as well as the amounts `tip` rejects, in the same order; panics with `JarNotFound` if the slug is free. |
 | `preview_tip(jar_id, from, amount) -> Vec<i128>` | — | `AmountZero` (amount = 0) / `AmountNegative` (amount < 0) → `JarNotFound` → `BelowMinTipAmount` → `SplitAmountTooSmall` / `AmountOverflow` | The sender-aware preview (#177): exactly the amounts `tip` will transfer for `from`, helper-shared with the payout. |
 | `preview_tip(jar_id, from, amount) -> Vec<i128>` | — | `InvalidAmount` (amount ≤ 0) → `JarNotFound` → `BelowMinTipAmount` → `InvalidAmount` (a share truncates to zero, or `amount * bps` overflows) | The sender-aware preview (#177): exactly the amounts `tip` will transfer for `from`, helper-shared with the payout. |
-| `tip_many(from, tips) -> Vec<u64>` | `from` | Soroban auth error (missing `from` signature) → `ContractPaused` → `BatchEmpty` → `BatchTooLarge` → `NotInitialized`, then per entry the same sequence as `tip`: `AmountZero` / `AmountNegative` → `MessageTooLong` → `JarNotFound` → `BelowMinTipAmount` → `SplitAmountTooSmall` / `AmountOverflow` → `InsufficientBalance` → the token contract's own error | Tip several jars in one transaction (#84). The batch-size and pause checks run first, before any jar is looked up; each entry is then settled exactly as `tip` would settle it, and a failure in any entry reverts the whole call. |
+| `tip_many(from, tips) -> Vec<u64>` | `from` | Soroban auth error (missing `from` signature) → `ContractPaused` → `BatchEmpty` → `BatchTooLarge` → `NotInitialized`, then per entry the same sequence as `tip`: `AmountZero` / `AmountNegative` → `MessageTooLong` → `JarNotFound` → `BelowMinTipAmount` → `SplitAmountTooSmall` / `AmountOverflow` → `InsufficientBalance` → the token contract's own error | Tip several jars in one transaction (#84). The batch-size and pause checks run first, before any jar is looked up; each entry is then settled exactly as `tip` would settle it (including the per-jar `JarPaused` check), and a failure in any entry reverts the whole call. |
 | `collect_recurring(id)` | — | `RecurringNotFound` → `NotDue` → `JarNotFound` → `NotInitialized` → `InsufficientAllowance` → `InsufficientBalance` | Collect one due period of a recurring schedule through the supporter's token allowance (#175). Publishes the same `tip` event and fires the post-tip hook. |
 | `jar_exists(jar_id) -> bool` | — | — | Whether the slug is already registered. Reads one key and returns a plain `bool`; never panics on a free slug. |
 | `is_recipient(jar_id, address) -> bool` | — | `JarNotFound` | Whether `address` appears in the jar's splits. Panics with `JarNotFound` if the slug is free. |
@@ -727,6 +729,7 @@ Consequences a client has to design for:
 | `transfer_jar_ownership(jar_id, new_owner)` | the jar's current `owner` and `new_owner` | The exact `(jar_id, new_owner)` transfer pair, signed by both parties. |
 | `delete_jar(jar_id)` | the jar's current `owner` | The contract call only. |
 | `set_min_tip_amount(jar_id, min_amount)` | the jar's current `owner` | The contract call only. |
+| `set_jar_paused(jar_id, paused)` | the jar's current `owner` | The contract call only. No token moves. |
 
 Each of these is a single contract-level invocation with no nested token
 transfers, so the signer approves one action, and the amount is not part of what
@@ -765,9 +768,9 @@ The powers are configuration, not custody. The admin **cannot**:
 - move a jar's funds. Nothing can: tips go straight from the tipper to the
   recipients in the same invocation. There is no sweep, no withdraw-all, and
   `withdraw_held` pays only the address it names.
-- edit a jar it does not own. Splits, minimum, ownership and lock state are
-  gated on the jar's owner — plus each affected recipient for a reduction on a
-  locked jar — regardless of who holds the admin key.
+- edit a jar it does not own. Splits, minimum, ownership, lock and pause state
+  are gated on the jar's owner — plus each affected recipient for a reduction on
+  a locked jar — regardless of who holds the admin key.
 - repoint the settlement token. `DataKey::Token` is written exactly once, in
   `__constructor`, and there is no setter, so `get_token()` is immutable after
   deploy. The admin may add other assets to the allowlist, but `tip` always
@@ -841,6 +844,7 @@ exactly the way issue #87 found it had.
 | 36 | `InvalidMessage` | The tip message is not valid UTF-8, or contains a control character other than newline. Raised before any transfer, and by `create_recurring` for the message it stores. |
 | 37 | `BatchEmpty` | `tip_many` was given a batch with no entries. Raised before any jar is looked up, so an empty batch never moves funds. |
 | 38 | `BatchTooLarge` | `tip_many` was given more entries than `MAX_BATCH_TIPS` (10). Raised before any jar is looked up. |
+| 39 | `JarPaused` | A tip was attempted to a jar its owner has paused with `set_jar_paused` (#45). Raised after `JarNotFound` and before any transfer, so a rejected tip moves no funds; reads stay available while the jar is paused. |
 
 Error codes are part of the public interface: `@novatip/sdk` and the frontend
 both map these numbers to user-facing messages. New variants are **appended**
@@ -1028,6 +1032,15 @@ whether an address is a recipient *now*, use
 Lets an indexer cache whether a jar protects its collaborators against a
 unilateral owner edit (#173).
 
+### `jar_pause` — published on every `set_jar_paused`
+
+- **Topics:** `(symbol "jar_pause", jar_id: String)`
+- **Data:** `paused: bool` (`true` when paused, `false` when resumed)
+
+Lets an indexer cache whether a jar is currently refusing tips (#45), so a tip
+page can show a "paused" badge without a separate read. Emitted even when the
+flag is set to the value it already held, so the intent is always recorded.
+
 ### `withdraw` — published on every successful `withdraw_held`
 
 - **Topics:** `(symbol "withdraw", recipient: Address)`
@@ -1089,6 +1102,25 @@ recipient-self-removal (#172) and hold/escrow (#171) paths: `leave_jar` is
 authorized by the departing recipient (who is consenting to their own removal),
 so it is compatible with a lock; held balances are keyed by recipient and are
 unaffected by locks or split edits.
+
+## Pausing a jar (#45)
+
+`set_jar_paused(jar_id, true)` lets a creator stop tips arriving to one jar
+without giving up the slug — useful mid-way through changing collaborators or
+while a split is in dispute. Every tip entry point (`tip`, `tip_with_ref`,
+`tip_in_token`, and each entry of `tip_many`) then rejects that jar with
+`JarPaused`, checked after the jar is looked up and before any funds move.
+`set_jar_paused(jar_id, false)` reopens it, and `is_jar_paused(jar_id)` reads
+the flag (which also rides on the `Jar` that `get_jar` returns).
+
+The pause only closes the tip paths. Every read stays available throughout, so a
+tip page can still resolve the jar, show its splits, and preview a tip while
+explaining why it is temporarily closed. Like the split lock, the flag is a
+property of the jar rather than the owner, so it **survives
+`transfer_jar_ownership`**: a handover does not silently reopen a jar the
+previous owner closed. It is independent of the contract-wide
+[`pause`](#admin-only-functions): either being set is enough to refuse a tip,
+and the per-jar switch is owner-gated while the contract-wide one is admin-gated.
 `token` is the address the tip was paid in — `get_token()` for a `tip` call,
 the caller's argument for a `tip_in_token` call. It has to be in the event: the
 other four elements carry a number and nothing else says which asset the number

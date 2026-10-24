@@ -4758,6 +4758,177 @@ fn lock_survives_ownership_transfer() {
     assert_eq!(client.get_jar_owner(&jar_id), new_owner);
 }
 
+// ---------------------------------------------------------------------------
+// #45 — per-jar pause switch
+// ---------------------------------------------------------------------------
+
+/// A paused jar rejects tips with `JarPaused`; unpausing restores them. Reads
+/// stay available throughout, which is the whole point of a temporary pause.
+#[test]
+fn paused_jar_rejects_tips_until_unpaused() {
+    let s = setup();
+    let env = &s.env;
+    let client = TipSplitterClient::new(env, &s.contract);
+    let token = token::Client::new(env, &s.token);
+    let token_admin = token::StellarAssetClient::new(env, &s.token);
+
+    let owner = Address::generate(env);
+    let alice = Address::generate(env);
+    let tipper = Address::generate(env);
+    token_admin.mint(&tipper, &1_000);
+
+    let jar_id = String::from_str(env, "@paused");
+    client.create_jar(
+        &owner,
+        &jar_id,
+        &vec![
+            env,
+            Split {
+                to: alice.clone(),
+                bps: 10000,
+            },
+        ],
+    );
+
+    // A fresh jar is open, and a tip settles normally.
+    assert!(!client.is_jar_paused(&jar_id));
+    client.tip(&tipper, &jar_id, &100, &String::from_str(env, "before"));
+    assert_eq!(token.balance(&alice), 100);
+
+    // Pausing closes the jar: `tip`, `tip_in_token` and `tip_many` all reject
+    // with `JarPaused`, and no funds move.
+    client.set_jar_paused(&jar_id, &true);
+    assert!(client.is_jar_paused(&jar_id));
+
+    let res = client.try_tip(&tipper, &jar_id, &100, &String::from_str(env, "paused"));
+    assert_eq!(res, Err(Ok(Error::JarPaused.into())));
+    let res_token = client.try_tip_in_token(
+        &tipper,
+        &jar_id,
+        &s.token,
+        &100,
+        &String::from_str(env, "paused"),
+    );
+    assert_eq!(res_token, Err(Ok(Error::JarPaused.into())));
+    let batch = vec![
+        env,
+        TipRequest {
+            jar_id: jar_id.clone(),
+            amount: 100,
+            message: String::from_str(env, "paused"),
+        },
+    ];
+    assert_eq!(
+        client.try_tip_many(&tipper, &batch),
+        Err(Ok(Error::JarPaused.into()))
+    );
+    // Balances are untouched by every rejected attempt.
+    assert_eq!(token.balance(&alice), 100);
+    assert_eq!(token.balance(&tipper), 900);
+
+    // Reads stay available while paused.
+    assert_eq!(client.get_jar(&jar_id).splits.get(0).unwrap().to, alice);
+    assert_eq!(
+        client.preview_split(&jar_id, &100).get(0).unwrap(),
+        100_i128
+    );
+
+    // Unpausing reopens the jar and the next tip settles normally.
+    client.set_jar_paused(&jar_id, &false);
+    assert!(!client.is_jar_paused(&jar_id));
+    client.tip(&tipper, &jar_id, &100, &String::from_str(env, "after"));
+    assert_eq!(token.balance(&alice), 200);
+}
+
+/// Only the jar owner may toggle the pause flag.
+#[test]
+fn set_jar_paused_is_owner_only() {
+    let s = setup();
+    let env = &s.env;
+    let client = TipSplitterClient::new(env, &s.contract);
+
+    let owner = Address::generate(env);
+    let alice = Address::generate(env);
+    let stranger = Address::generate(env);
+    let jar_id = String::from_str(env, "@ownpause");
+    client.create_jar(
+        &owner,
+        &jar_id,
+        &vec![
+            env,
+            Split {
+                to: alice.clone(),
+                bps: 10000,
+            },
+        ],
+    );
+
+    // A caller who is not the owner cannot pause the jar: the owner's auth is
+    // required but only the stranger's is mocked, so the call is rejected and
+    // the flag stays clear.
+    env.mock_auths(&[MockAuth {
+        address: &stranger,
+        invoke: &MockAuthInvoke {
+            contract: &s.contract,
+            fn_name: "set_jar_paused",
+            args: (jar_id.clone(), true).into_val(env),
+            sub_invokes: &[],
+        },
+    }]);
+    assert!(client.try_set_jar_paused(&jar_id, &true).is_err());
+    assert!(!client.is_jar_paused(&jar_id));
+}
+
+/// `set_jar_paused` emits a `jar_pause` event, and the flag is a property of
+/// the jar: it survives `transfer_jar_ownership` and shows up in `get_jar`.
+#[test]
+fn jar_pause_emits_event_and_survives_ownership_transfer() {
+    let s = setup();
+    let env = &s.env;
+    let client = TipSplitterClient::new(env, &s.contract);
+
+    let owner = Address::generate(env);
+    let new_owner = Address::generate(env);
+    let alice = Address::generate(env);
+    let jar_id = String::from_str(env, "@keeppause");
+    client.create_jar(
+        &owner,
+        &jar_id,
+        &vec![
+            env,
+            Split {
+                to: alice.clone(),
+                bps: 10000,
+            },
+        ],
+    );
+
+    client.set_jar_paused(&jar_id, &true);
+
+    // Read the `jar_pause` event immediately: the test env only keeps the last
+    // invocation's events.
+    let expected_topics = vec![
+        env,
+        symbol_short!("jar_pause").into_val(env),
+        jar_id.clone().into_val(env),
+    ];
+    let evs: std::vec::Vec<_> = env
+        .events()
+        .all()
+        .iter()
+        .filter(|e| e.0 == s.contract && e.1 == expected_topics)
+        .collect();
+    assert_eq!(evs.len(), 1);
+    let paused: bool = TryFromVal::try_from_val(env, &evs[0].2).unwrap();
+    assert!(paused);
+
+    // The flag is visible in the full jar read and survives the handover.
+    assert!(client.get_jar(&jar_id).paused);
+    client.transfer_jar_ownership(&jar_id, &new_owner);
+    assert!(client.is_jar_paused(&jar_id));
+    assert_eq!(client.get_jar_owner(&jar_id), new_owner);
+}
+
 #[test]
 fn recurring_tip_create_read_cancel_roundtrip() {
     let s = setup();
@@ -5338,7 +5509,7 @@ fn version_matches_the_interface_constant() {
     assert_eq!(client.version(), INTERFACE_VERSION);
     assert_eq!(
         client.version(),
-        4,
+        5,
         "the published version is part of the public interface; bump \
          INTERFACE_VERSION when the shape changes, do not edit this test \
          to match a silent change"
@@ -7403,6 +7574,9 @@ fn error_codes_are_pinned_to_the_public_interface() {
         (Error::JarIdInUse, 34),
         (Error::FeeTooHigh, 35),
         (Error::InvalidMessage, 36),
+        (Error::BatchEmpty, 37),
+        (Error::BatchTooLarge, 38),
+        (Error::JarPaused, 39),
     ];
 
     for (variant, expected) in codes {

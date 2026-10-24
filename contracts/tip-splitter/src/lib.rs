@@ -144,7 +144,7 @@ const INSTANCE_TTL_THRESHOLD: u32 = JAR_TTL_THRESHOLD;
 ///
 /// This is a per-contract number for client feature detection. It complements
 /// the per-event schema version proposed in #83 rather than replacing it.
-const INTERFACE_VERSION: u32 = 4;
+const INTERFACE_VERSION: u32 = 5;
 
 /// One recipient and the share of every tip they receive, in basis points.
 #[contracttype]
@@ -194,6 +194,10 @@ pub struct Jar {
     /// `lock_splits`, cleared by `unlock_splits`; survives
     /// `transfer_jar_ownership`.
     pub locked: bool,
+    /// When `true`, every tip to this jar is rejected with `JarPaused` (see
+    /// #45). Toggled by the owner through `set_jar_paused`; reads stay
+    /// available throughout, and the flag survives `transfer_jar_ownership`.
+    pub paused: bool,
 }
 
 /// Versioned storage envelope. New fields must be added as a new variant so
@@ -457,6 +461,10 @@ pub enum Error {
     BatchEmpty = 37,
     /// `tip_many` was given more entries than `MAX_BATCH_TIPS`.
     BatchTooLarge = 38,
+    /// A tip was attempted to a jar its owner has paused (#45). Checked before
+    /// any transfer, so a rejected tip moves no funds; every read stays
+    /// available while the jar is paused.
+    JarPaused = 39,
 }
 
 /// The interface a post-tip hook contract must implement (#176).
@@ -703,6 +711,7 @@ impl TipSplitter {
                 owner: owner.clone(),
                 splits,
                 locked: false,
+                paused: false,
             },
         );
         env.storage()
@@ -779,6 +788,7 @@ impl TipSplitter {
                 owner: jar.owner,
                 splits,
                 locked: jar.locked,
+                paused: jar.paused,
             },
         );
 
@@ -821,6 +831,7 @@ impl TipSplitter {
                 owner: jar.owner,
                 splits: jar.splits,
                 locked: true,
+                paused: jar.paused,
             },
         );
 
@@ -861,6 +872,7 @@ impl TipSplitter {
                 owner: jar.owner,
                 splits,
                 locked: false,
+                paused: jar.paused,
             },
         );
 
@@ -882,6 +894,61 @@ impl TipSplitter {
             .persistent()
             .extend_ttl(&key, JAR_TTL_THRESHOLD, JAR_TTL_LEDGERS);
         jar.locked
+    }
+
+    /// Pause or resume tipping for a single jar (#45). Owner-only.
+    ///
+    /// A creator mid-way through changing collaborators, or disputing how a jar
+    /// is split, can stop tips arriving while they sort it out without
+    /// abandoning the slug. While `paused` is `true`, every tip entry point
+    /// (`tip`, `tip_with_ref`, `tip_in_token`, `tip_many`) rejects this jar with
+    /// `JarPaused`; every read stays available. Passing `false` reopens it.
+    ///
+    /// The flag is a property of the jar, so it survives
+    /// `transfer_jar_ownership` — a handover does not silently reopen a jar its
+    /// previous owner closed. Setting the flag to the value it already holds is
+    /// a no-op on state but still emits a `jar_pause` event, so an indexer stays
+    /// in sync with the intent.
+    pub fn set_jar_paused(env: Env, jar_id: String, paused: bool) {
+        let key = DataKey::Jar(jar_id.clone());
+        let jar: Jar = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .unwrap_or_else(|| panic_with_error!(&env, Error::JarNotFound));
+        // Issue #92: extend both jar and min-tip in lockstep.
+        Self::extend_jar_and_min_ttl(&env, &jar_id);
+        jar.owner.require_auth();
+
+        env.storage().persistent().set(
+            &key,
+            &Jar {
+                owner: jar.owner,
+                splits: jar.splits,
+                locked: jar.locked,
+                paused,
+            },
+        );
+
+        env.events()
+            .publish((symbol_short!("jar_pause"), jar_id), paused);
+    }
+
+    /// Whether tipping is currently paused for a jar (#45).
+    ///
+    /// Panics with `JarNotFound` if the slug is not registered, matching
+    /// `get_jar`.
+    pub fn is_jar_paused(env: Env, jar_id: String) -> bool {
+        let key = DataKey::Jar(jar_id);
+        let jar: Jar = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .unwrap_or_else(|| panic_with_error!(&env, Error::JarNotFound));
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, JAR_TTL_THRESHOLD, JAR_TTL_LEDGERS);
+        jar.paused
     }
 
     /// Let a recipient remove themselves from a jar (#172), authorized by that
@@ -958,6 +1025,7 @@ impl TipSplitter {
                 owner: jar.owner,
                 splits: remaining,
                 locked: jar.locked,
+                paused: jar.paused,
             },
         );
 
@@ -1000,6 +1068,9 @@ impl TipSplitter {
                 // The lock is a promise to the collaborators, not a privilege
                 // of the owner, so it survives the transfer (#173).
                 locked: jar.locked,
+                // Likewise the pause is a property of the jar, so a handover
+                // does not silently reopen a jar the previous owner closed (#45).
+                paused: jar.paused,
             },
         );
 
@@ -1453,6 +1524,12 @@ impl TipSplitter {
             .persistent()
             .get(&jar_key)
             .unwrap_or_else(|| panic_with_error!(env, Error::JarNotFound));
+
+        // Reject tips to a jar its owner has paused (#45), before any funds
+        // move. Reads are unaffected; only the tip entry points consult this.
+        if jar.paused {
+            panic_with_error!(env, Error::JarPaused);
+        }
 
         // Enforce optional per-jar minimum tip amount if configured
         let min_key = DataKey::MinTip(jar_id.clone());
