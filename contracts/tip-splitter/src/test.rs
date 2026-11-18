@@ -4371,6 +4371,22 @@ fn tip_holds_share_of_deauthorised_recipient_and_withdraw_pays_it() {
     // Bob recovers; he withdraws his held share.
     token.unblock();
     client.withdraw_held(&bob);
+    let expected_topics = vec![
+        env,
+        symbol_short!("withdraw").into_val(env),
+        bob.clone().into_val(env),
+    ];
+    let evs: std::vec::Vec<_> = env
+        .events()
+        .all()
+        .iter()
+        .filter(|e| e.0 == s.contract && e.1 == expected_topics)
+        .collect();
+    assert_eq!(evs.len(), 1);
+    let decoded: HeldWithdrawnEvent =
+        TryFromVal::try_from_val(env, &evs[0].2).expect("withdraw event data shape");
+    assert_eq!(decoded.version, 1);
+    assert_eq!(decoded.amount, 30);
     assert_eq!(token.balance(&bob), 30);
     assert_eq!(token.balance(&s.contract), 0);
     assert_eq!(client.get_held(&bob), 0);
@@ -4575,8 +4591,10 @@ fn lock_splits_sets_flag_and_publishes_event() {
         .filter(|e| e.0 == s.contract && e.1 == expected_topics)
         .collect();
     assert_eq!(evs.len(), 1);
-    let locked: bool = TryFromVal::try_from_val(env, &evs[0].2).unwrap();
-    assert!(locked);
+    let decoded: JarLockEvent =
+        TryFromVal::try_from_val(env, &evs[0].2).expect("lock event data shape");
+    assert_eq!(decoded.version, 1);
+    assert!(decoded.locked);
 
     assert!(client.is_splits_locked(&jar_id));
 }
@@ -4925,14 +4943,93 @@ fn jar_pause_emits_event_and_survives_ownership_transfer() {
         .filter(|e| e.0 == s.contract && e.1 == expected_topics)
         .collect();
     assert_eq!(evs.len(), 1);
-    let paused: bool = TryFromVal::try_from_val(env, &evs[0].2).unwrap();
-    assert!(paused);
+    let decoded: JarPausedEvent =
+        TryFromVal::try_from_val(env, &evs[0].2).expect("jar_pause event data shape");
+    assert_eq!(decoded.version, 1);
+    assert!(decoded.paused);
 
     // The flag is visible in the full jar read and survives the handover.
     assert!(client.get_jar(&jar_id).paused);
     client.transfer_jar_ownership(&jar_id, &new_owner);
     assert!(client.is_jar_paused(&jar_id));
     assert_eq!(client.get_jar_owner(&jar_id), new_owner);
+}
+
+/// `adm_xfer`, `jar_rnm` and `jar_del` publish named, versioned structs, and
+/// both jar-id events carry the relevant jar id as a topic.
+#[test]
+fn admin_transfer_and_jar_rename_delete_events_are_versioned() {
+    let s = setup();
+    let env = &s.env;
+    let client = TipSplitterClient::new(env, &s.contract);
+
+    let owner = Address::generate(env);
+    let new_admin = Address::generate(env);
+    let jar_id = String::from_str(env, "@before");
+    let new_jar_id = String::from_str(env, "@after");
+    client.create_jar(
+        &owner,
+        &jar_id,
+        &vec![
+            env,
+            Split {
+                to: Address::generate(env),
+                bps: 10000,
+            },
+        ],
+    );
+
+    client.rename_jar(&jar_id, &new_jar_id);
+    let rename_topics = vec![
+        env,
+        symbol_short!("jar_rnm").into_val(env),
+        jar_id.clone().into_val(env),
+    ];
+    let rename_events: std::vec::Vec<_> = env
+        .events()
+        .all()
+        .iter()
+        .filter(|e| e.0 == s.contract && e.1 == rename_topics)
+        .collect();
+    assert_eq!(rename_events.len(), 1);
+    let renamed: JarRenamedEvent =
+        TryFromVal::try_from_val(env, &rename_events[0].2).expect("jar_rnm event data shape");
+    assert_eq!(renamed.version, 1);
+    assert_eq!(renamed.jar_id, jar_id);
+    assert_eq!(renamed.new_jar_id, new_jar_id);
+
+    client.delete_jar(&new_jar_id);
+    let delete_topics = vec![
+        env,
+        symbol_short!("jar_del").into_val(env),
+        new_jar_id.clone().into_val(env),
+    ];
+    let delete_events: std::vec::Vec<_> = env
+        .events()
+        .all()
+        .iter()
+        .filter(|e| e.0 == s.contract && e.1 == delete_topics)
+        .collect();
+    assert_eq!(delete_events.len(), 1);
+    let deleted: JarDeletedEvent =
+        TryFromVal::try_from_val(env, &delete_events[0].2).expect("jar_del event data shape");
+    assert_eq!(deleted.version, 1);
+    assert_eq!(deleted.jar_id, new_jar_id);
+
+    client.transfer_admin(&new_admin);
+    let admin_topics = vec![env, symbol_short!("adm_xfer").into_val(env)];
+    let admin_events: std::vec::Vec<_> = env
+        .events()
+        .all()
+        .iter()
+        .filter(|e| e.0 == s.contract && e.1 == admin_topics)
+        .collect();
+    assert_eq!(admin_events.len(), 1);
+    let transferred: AdminTransferredEvent =
+        TryFromVal::try_from_val(env, &admin_events[0].2).expect("adm_xfer event data shape");
+    assert_eq!(transferred.version, 1);
+    assert_eq!(transferred.previous_admin, s.admin);
+    assert_eq!(transferred.new_admin, new_admin);
 }
 
 #[test]
@@ -5515,7 +5612,7 @@ fn version_matches_the_interface_constant() {
     assert_eq!(client.version(), INTERFACE_VERSION);
     assert_eq!(
         client.version(),
-        6,
+        7,
         "the published version is part of the public interface; bump \
          INTERFACE_VERSION when the shape changes, do not edit this test \
          to match a silent change"
