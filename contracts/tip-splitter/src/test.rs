@@ -5474,9 +5474,9 @@ fn tip_writes_the_two_totals_entries() {
     let first = env.cost_estimate().resources();
 
     // Measured against the same tip with `bump_totals` disabled: 4 write
-    // entries / 884 bytes / 3 rent bumps (the transfer's own three, the
-    // contract-instance write that carries the tip sequence counter, and the
-    // jar TTL bump). The two counters add exactly two writes, 404 bytes, and
+    // entries / 884 bytes / 2 rent bumps. `create_jar` already extends the
+    // jar's TTL, so the tip's own jar extension is a no-op on a fresh jar and
+    // does not count. The two counters add exactly two writes, 404 bytes, and
     // two rent bumps — see `docs/CONTRACT.md`.
     assert_eq!(
         first.write_entries, 6,
@@ -5487,7 +5487,7 @@ fn tip_writes_the_two_totals_entries() {
         "the totals cost 404 more bytes per tip"
     );
     assert_eq!(
-        first.persistent_entry_rent_bumps, 5,
+        first.persistent_entry_rent_bumps, 4,
         "both totals get the jar's TTL treatment, so each is bumped"
     );
 
@@ -5515,7 +5515,7 @@ fn version_matches_the_interface_constant() {
     assert_eq!(client.version(), INTERFACE_VERSION);
     assert_eq!(
         client.version(),
-        5,
+        6,
         "the published version is part of the public interface; bump \
          INTERFACE_VERSION when the shape changes, do not edit this test \
          to match a silent change"

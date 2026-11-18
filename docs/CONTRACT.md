@@ -1189,12 +1189,14 @@ with the counters disabled:
 |---|---|---|---|
 | Ledger writes | 4 | 6 | **+2 entries** |
 | Bytes written | 884 | 1288 | **+404 bytes** |
-| Persistent rent bumps | 3 | 5 | **+2** |
+| Persistent rent bumps | 2 | 4 | **+2** |
 
 The write columns were re-measured against the merged payout path — the
 "without totals" baseline is now 4 entries, not 3, because the tip sequence
 counter writes the contract instance each tip and the escrow fallback (#171)
-enlarged the per-tip footprint. The **differential the #167 PR documented still
+enlarged the per-tip footprint. The rent-bump columns are one lower than
+before because `create_jar` now extends the jar's TTL, so a tip to a fresh jar
+no longer bumps it. The **differential the #167 PR documented still
 holds exactly: two writes, 404 bytes, two rent bumps per tip**. The modelled
 CPU delta predates those merges and was not re-measured here.
 
@@ -1458,7 +1460,10 @@ changes. Do not bump it for an internal refactor, a new storage key, or a doc
 edit — none of those are visible to a consumer, and a version that changes when
 nothing observable did is a version consumers stop trusting.
 
-This build ships `version() == 3`. Version 3 adds `set_fee_bps` /
+This build ships `version() == 6`. Version 6 changes the `leave_jar` `splits`
+event from a bare count to the same `SplitsUpdatedEvent` that `update_splits`
+publishes. Version 5 adds `set_jar_paused` / `is_jar_paused`, `delete_jar` and
+the `JarPaused` error (39). Version 4 adds `tip_many` (#84). Version 3 adds `set_fee_bps` /
 `get_fee_bps`, the `fee_set` event, the `FeeTooHigh` error (35), and the `fee`
 field in the `tip` event (#79); it also changes what a tipper who is a
 recipient pays (#78), which `preview_tip` already reports.
