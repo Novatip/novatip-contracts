@@ -26,6 +26,8 @@ All notable changes to `novatip-contracts` are documented here.
 - `create_jar` and `rename_jar` accept only canonical slugs — `@` followed by 3–32 characters from `[a-z0-9_-]`, matching the backend's `SLUG_REGEX` (#95). Upper case, whitespace, control bytes and lookalikes are rejected with `InvalidJarId`; `jar_exists` returns `false` for them.
 
 ### Changed (breaking: event payload)
+- `version()` is now `6`: `leave_jar` publishes its `splits` event as `SplitsUpdatedEvent { version, count, splits }`, the same payload `update_splits` publishes. It was still publishing a bare `u32` count, so an indexer decoding every `splits` event with one type failed on it
+- `version()` is now `5`: `set_jar_paused(jar_id, paused)`, `is_jar_paused(jar_id)` and `delete_jar(jar_id)` were added, with the appended error `JarPaused` (39). `contracts/tip-splitter/interface.json` is regenerated to match
 - `version()` is now `4`: the `tip_many` entry point, the `TipRequest` type and the `BatchEmpty` (37) / `BatchTooLarge` (38) errors were added to the public interface (#84). No existing function, error number or event shape changed
 - The `tip` event (`TipEvent`) gained a `fee: i128` field: the protocol fee the tip moved to the admin (#79). `version()` is now `3`
 - `collect_recurring` publishes the same `TipEvent` struct as `tip`; it was still publishing the old positional tuple

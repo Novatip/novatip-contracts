@@ -65,6 +65,10 @@
           "type_": "address"
         },
         {
+          "name": "paused",
+          "type_": "bool"
+        },
+        {
           "name": "splits",
           "type_": {
             "vec": {
@@ -158,6 +162,9 @@
         },
         {
           "name": "max_batch_tips",
+          "type_": "u32"
+        },
+        {
           "name": "max_jar_id_len",
           "type_": "u32"
         },
@@ -360,6 +367,10 @@
         {
           "name": "BatchTooLarge",
           "value": 38
+        },
+        {
+          "name": "JarPaused",
+          "value": 39
         }
       ]
     }
@@ -394,11 +405,8 @@
           "type_": {
             "vec": {
               "element_type": {
-                "tuple": {
-                  "value_types": [
-                    "address",
-                    "u32"
-                  ]
+                "udt": {
+                  "name": "Split"
                 }
               }
             }
@@ -683,6 +691,36 @@
   },
   {
     "function_v0": {
+      "name": "set_jar_paused",
+      "inputs": [
+        {
+          "name": "jar_id",
+          "type_": "string"
+        },
+        {
+          "name": "paused",
+          "type_": "bool"
+        }
+      ],
+      "outputs": []
+    }
+  },
+  {
+    "function_v0": {
+      "name": "is_jar_paused",
+      "inputs": [
+        {
+          "name": "jar_id",
+          "type_": "string"
+        }
+      ],
+      "outputs": [
+        "bool"
+      ]
+    }
+  },
+  {
+    "function_v0": {
       "name": "leave_jar",
       "inputs": [
         {
@@ -708,6 +746,18 @@
         {
           "name": "new_owner",
           "type_": "address"
+        }
+      ],
+      "outputs": []
+    }
+  },
+  {
+    "function_v0": {
+      "name": "delete_jar",
+      "inputs": [
+        {
+          "name": "jar_id",
+          "type_": "string"
         }
       ],
       "outputs": []

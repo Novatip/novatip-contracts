@@ -144,7 +144,7 @@ const INSTANCE_TTL_THRESHOLD: u32 = JAR_TTL_THRESHOLD;
 ///
 /// This is a per-contract number for client feature detection. It complements
 /// the per-event schema version proposed in #83 rather than replacing it.
-const INTERFACE_VERSION: u32 = 5;
+const INTERFACE_VERSION: u32 = 6;
 
 /// One recipient and the share of every tip they receive, in basis points.
 #[contracttype]
@@ -1018,6 +1018,7 @@ impl TipSplitter {
 
         Self::validate_splits(&env, &remaining);
         let split_count = remaining.len();
+        let new_splits = remaining.clone();
         let key = DataKey::Jar(jar_id.clone());
         env.storage().persistent().set(
             &key,
@@ -1029,8 +1030,16 @@ impl TipSplitter {
             },
         );
 
-        env.events()
-            .publish((symbol_short!("splits"), jar_id), split_count);
+        // Same payload as `update_splits`, so an indexer decodes every
+        // `splits` event with one shape.
+        env.events().publish(
+            (symbol_short!("splits"), jar_id),
+            SplitsUpdatedEvent {
+                version: 1,
+                count: split_count,
+                splits: new_splits,
+            },
+        );
     }
 
     /// Transfer control of a jar to a new owner. Both the current owner and the
@@ -1103,15 +1112,16 @@ impl TipSplitter {
         jar.owner.require_auth();
 
         env.storage().persistent().remove(&key);
-        env.storage().persistent().remove(&DataKey::Stats(jar_id.clone()));
-        env.storage().persistent().remove(&DataKey::MinTip(jar_id.clone()));
+        env.storage()
+            .persistent()
+            .remove(&DataKey::Stats(jar_id.clone()));
+        env.storage()
+            .persistent()
+            .remove(&DataKey::MinTip(jar_id.clone()));
 
         env.events().publish(
             (symbol_short!("jar_del"),),
-            JarDeletedEvent {
-                version: 1,
-                jar_id,
-            },
+            JarDeletedEvent { version: 1, jar_id },
         );
     }
 

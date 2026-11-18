@@ -2867,7 +2867,10 @@ fn transfer_jar_ownership_requires_new_owner_auth() {
     }]);
 
     let res = client.try_transfer_jar_ownership(&jar_id, &new_owner);
-    assert!(res.is_err(), "the incoming owner must authorize the transfer");
+    assert!(
+        res.is_err(),
+        "the incoming owner must authorize the transfer"
+    );
     assert_eq!(client.get_jar(&jar_id).owner, owner);
 }
 
@@ -2936,13 +2939,17 @@ fn delete_jar_releases_slug_and_requires_owner_auth() {
         invoke: &MockAuthInvoke {
             contract: &s.contract,
             fn_name: "create_jar",
-            args: (owner.clone(), jar_id.clone(), vec![
-                env,
-                Split {
-                    to: alice.clone(),
-                    bps: 10000,
-                },
-            ])
+            args: (
+                owner.clone(),
+                jar_id.clone(),
+                vec![
+                    env,
+                    Split {
+                        to: alice.clone(),
+                        bps: 10000,
+                    },
+                ],
+            )
                 .into_val(env),
             sub_invokes: &[],
         },
@@ -3831,7 +3838,6 @@ fn get_token_returns_constructor_token() {
 
     assert_eq!(client.get_token(), s.token);
 }
-
 
 #[test]
 fn set_min_tip_amount_sets_and_reads_minimum() {
@@ -5468,9 +5474,9 @@ fn tip_writes_the_two_totals_entries() {
     let first = env.cost_estimate().resources();
 
     // Measured against the same tip with `bump_totals` disabled: 4 write
-    // entries / 884 bytes / 3 rent bumps (the transfer's own three, the
-    // contract-instance write that carries the tip sequence counter, and the
-    // jar TTL bump). The two counters add exactly two writes, 404 bytes, and
+    // entries / 884 bytes / 2 rent bumps. `create_jar` already extends the
+    // jar's TTL, so the tip's own jar extension is a no-op on a fresh jar and
+    // does not count. The two counters add exactly two writes, 404 bytes, and
     // two rent bumps — see `docs/CONTRACT.md`.
     assert_eq!(
         first.write_entries, 6,
@@ -5481,7 +5487,7 @@ fn tip_writes_the_two_totals_entries() {
         "the totals cost 404 more bytes per tip"
     );
     assert_eq!(
-        first.persistent_entry_rent_bumps, 5,
+        first.persistent_entry_rent_bumps, 4,
         "both totals get the jar's TTL treatment, so each is bumped"
     );
 
@@ -5509,7 +5515,7 @@ fn version_matches_the_interface_constant() {
     assert_eq!(client.version(), INTERFACE_VERSION);
     assert_eq!(
         client.version(),
-        5,
+        6,
         "the published version is part of the public interface; bump \
          INTERFACE_VERSION when the shape changes, do not edit this test \
          to match a silent change"
@@ -8745,7 +8751,8 @@ fn touched_jar_survives_a_ledger_advance_that_archives_an_idle_one() {
     assert_eq!(jar_ttl(env, &s.contract, &touched), JAR_TTL_LEDGERS);
 
     // Advance past idle's expiration
-    env.ledger().set_sequence_number(start + JAR_TTL_LEDGERS + 1);
+    env.ledger()
+        .set_sequence_number(start + JAR_TTL_LEDGERS + 1);
 
     assert_eq!(client.get_jar(&touched).owner, owner);
     // The test host escalates any access to an archived entry into a panic
@@ -9230,7 +9237,12 @@ fn tipper_who_is_non_final_recipient_keeps_own_share() {
         ],
     );
 
-    client.tip(&tipper, &jar_id, &100, &String::from_str(env, "keep self share"));
+    client.tip(
+        &tipper,
+        &jar_id,
+        &100,
+        &String::from_str(env, "keep self share"),
+    );
 
     // Tipper started with 100, kept 30, only 70 left:
     assert_eq!(token.balance(&tipper), 30);
@@ -9332,7 +9344,12 @@ fn tip_tipper_holding_final_share_preserves_all_balances() {
 
     // Tipper tips 1000: alice receives 600, bob receives 200, tipper keeps their 200.
     // Total transferred is 800.
-    client.tip(&tipper, &jar_id, &1_000, &String::from_str(env, "ending split"));
+    client.tip(
+        &tipper,
+        &jar_id,
+        &1_000,
+        &String::from_str(env, "ending split"),
+    );
 
     assert_eq!(token.balance(&alice), 600);
     assert_eq!(token.balance(&bob), 200);
@@ -9343,4 +9360,3 @@ fn tip_tipper_holding_final_share_preserves_all_balances() {
     );
     assert_eq!(token.balance(&s.contract), 0);
 }
-
