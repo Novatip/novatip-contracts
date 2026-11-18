@@ -1103,15 +1103,16 @@ impl TipSplitter {
         jar.owner.require_auth();
 
         env.storage().persistent().remove(&key);
-        env.storage().persistent().remove(&DataKey::Stats(jar_id.clone()));
-        env.storage().persistent().remove(&DataKey::MinTip(jar_id.clone()));
+        env.storage()
+            .persistent()
+            .remove(&DataKey::Stats(jar_id.clone()));
+        env.storage()
+            .persistent()
+            .remove(&DataKey::MinTip(jar_id.clone()));
 
         env.events().publish(
             (symbol_short!("jar_del"),),
-            JarDeletedEvent {
-                version: 1,
-                jar_id,
-            },
+            JarDeletedEvent { version: 1, jar_id },
         );
     }
 
