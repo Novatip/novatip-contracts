@@ -5515,7 +5515,7 @@ fn version_matches_the_interface_constant() {
     assert_eq!(client.version(), INTERFACE_VERSION);
     assert_eq!(
         client.version(),
-        6,
+        7,
         "the published version is part of the public interface; bump \
          INTERFACE_VERSION when the shape changes, do not edit this test \
          to match a silent change"
@@ -5666,11 +5666,7 @@ fn allow_and_disallow_emit_events_naming_token_and_admin() {
     let eurc = second_asset(env, &s.admin);
 
     client.allow_token(&eurc.clone());
-    let allow_topics = vec![
-        env,
-        symbol_short!("tk_allow").into_val(env),
-        eurc.clone().into_val(env),
-    ];
+    let allow_topics = vec![env, symbol_short!("tk_allow").into_val(env)];
     let ev: std::vec::Vec<_> = env
         .events()
         .all()
@@ -5678,16 +5674,15 @@ fn allow_and_disallow_emit_events_naming_token_and_admin() {
         .filter(|e| e.0 == s.contract && e.1 == allow_topics)
         .collect();
     assert_eq!(ev.len(), 1, "allow_token must emit exactly one event");
-    let who: Address = TryFromVal::try_from_val(env, &ev.first().unwrap().2)
-        .expect("allow event carries the authorising admin");
-    assert_eq!(who, s.admin);
+    let allow: TokenAllowlistEvent =
+        TryFromVal::try_from_val(env, &ev.first().unwrap().2).expect("allow event payload");
+    assert_eq!(allow.version, 1);
+    assert_eq!(allow.admin, s.admin);
+    assert_eq!(allow.token, eurc);
+    assert!(allow.allowed);
 
     client.disallow_token(&eurc.clone());
-    let dis_topics = vec![
-        env,
-        symbol_short!("tk_dis").into_val(env),
-        eurc.clone().into_val(env),
-    ];
+    let dis_topics = vec![env, symbol_short!("tk_dis").into_val(env)];
     let ev: std::vec::Vec<_> = env
         .events()
         .all()
@@ -5695,6 +5690,12 @@ fn allow_and_disallow_emit_events_naming_token_and_admin() {
         .filter(|e| e.0 == s.contract && e.1 == dis_topics)
         .collect();
     assert_eq!(ev.len(), 1, "disallow_token must emit exactly one event");
+    let dis: TokenAllowlistEvent =
+        TryFromVal::try_from_val(env, &ev.first().unwrap().2).expect("disallow event payload");
+    assert_eq!(dis.version, 1);
+    assert_eq!(dis.admin, s.admin);
+    assert_eq!(dis.token, eurc);
+    assert!(!dis.allowed);
 }
 
 /// `tip` always pays through the deploy-time token, so removing it from the
@@ -6442,9 +6443,11 @@ fn set_tip_hook_is_admin_only_and_emits_on_change() {
         .filter(|e| e.0 == s.contract && topic_is_symbol(env, &e.1, 0, symbol_short!("tip_hook")))
         .collect();
     assert_eq!(evs.len(), 1);
-    assert_eq!(topic_at::<Address>(env, &evs[0].1, 1), s.admin);
-    let published: Address = TryFromVal::try_from_val(env, &evs[0].2).unwrap();
-    assert_eq!(published, hook);
+    assert_eq!(evs[0].1.len(), 1, "admin events carry only the name topic");
+    let event: TipHookEvent = TryFromVal::try_from_val(env, &evs[0].2).unwrap();
+    assert_eq!(event.version, 1);
+    assert_eq!(event.admin, s.admin);
+    assert_eq!(event.hook, Some(hook));
 }
 
 // ---------------------------------------------------------------------------
@@ -6723,9 +6726,11 @@ fn set_registrar_is_admin_only_and_round_trips_with_events() {
         .filter(|e| e.0 == s.contract && topic_is_symbol(env, &e.1, 0, symbol_short!("reg_set")))
         .collect();
     assert_eq!(evs.len(), 1, "installing the registrar publishes one event");
-    assert_eq!(topic_at::<Address>(env, &evs[0].1, 1), s.admin);
-    let first: Option<Address> = TryFromVal::try_from_val(env, &evs[0].2).unwrap();
-    assert_eq!(first, Some(registrar.clone()));
+    assert_eq!(evs[0].1.len(), 1, "admin events carry only the name topic");
+    let first: RegistrarEvent = TryFromVal::try_from_val(env, &evs[0].2).unwrap();
+    assert_eq!(first.version, 1);
+    assert_eq!(first.admin, s.admin);
+    assert_eq!(first.registrar, Some(registrar.clone()));
     assert_eq!(client.get_registrar(), Some(registrar.clone()));
 
     client.set_registrar(&None);
@@ -6736,9 +6741,11 @@ fn set_registrar_is_admin_only_and_round_trips_with_events() {
         .filter(|e| e.0 == s.contract && topic_is_symbol(env, &e.1, 0, symbol_short!("reg_set")))
         .collect();
     assert_eq!(evs.len(), 1, "clearing the registrar publishes one event");
-    assert_eq!(topic_at::<Address>(env, &evs[0].1, 1), s.admin);
-    let second: Option<Address> = TryFromVal::try_from_val(env, &evs[0].2).unwrap();
-    assert_eq!(second, None);
+    assert_eq!(evs[0].1.len(), 1, "admin events carry only the name topic");
+    let second: RegistrarEvent = TryFromVal::try_from_val(env, &evs[0].2).unwrap();
+    assert_eq!(second.version, 1);
+    assert_eq!(second.admin, s.admin);
+    assert_eq!(second.registrar, None);
     assert_eq!(client.get_registrar(), None);
 }
 
@@ -8446,8 +8453,8 @@ fn set_fee_bps_requires_admin_auth() {
     assert_eq!(client.get_fee_bps(), 100);
 }
 
-/// `set_fee_bps` publishes `fee_set` with the admin as topic and the new
-/// value as data, so a client can track the fee from the event log.
+/// `set_fee_bps` publishes `fee_set` in the shared admin shape, so a client
+/// can track the fee from the event log.
 #[test]
 fn set_fee_bps_emits_fee_set_event() {
     let s = setup();
@@ -8456,11 +8463,7 @@ fn set_fee_bps_emits_fee_set_event() {
 
     client.set_fee_bps(&100);
 
-    let expected_topics = vec![
-        env,
-        symbol_short!("fee_set").into_val(env),
-        s.admin.into_val(env),
-    ];
+    let expected_topics = vec![env, symbol_short!("fee_set").into_val(env)];
     let events: std::vec::Vec<_> = env
         .events()
         .all()
@@ -8468,8 +8471,10 @@ fn set_fee_bps_emits_fee_set_event() {
         .filter(|e| e.0 == s.contract && e.1 == expected_topics)
         .collect();
     assert_eq!(events.len(), 1);
-    let fee: u32 = TryFromVal::try_from_val(env, &events[0].2).unwrap();
-    assert_eq!(fee, 100);
+    let fee: FeeEvent = TryFromVal::try_from_val(env, &events[0].2).unwrap();
+    assert_eq!(fee.version, 1);
+    assert_eq!(fee.admin, s.admin);
+    assert_eq!(fee.fee_bps, 100);
 }
 
 /// The configured 1%: the fee comes off the top and goes to the admin, the
@@ -8985,6 +8990,115 @@ fn admin_can_upgrade_contract() {
     // We verify the function exists and accepts the right parameters
     // by checking it compiles. The actual WASM swap is tested manually
     // on testnet after deployment.
+}
+
+/// The upgrade event carries the version, the authorising admin, the hash the
+/// contract was running before, and the hash it now runs (#334).
+#[test]
+fn upgrade_event_records_previous_and_new_hash() {
+    let s = setup();
+    let env = &s.env;
+    let client = TipSplitterClient::new(env, &s.contract);
+
+    let previous = BytesN::<32>::from_array(env, &[7u8; 32]);
+    env.as_contract(&s.contract, || {
+        env.storage().instance().set(&DataKey::WasmHash, &previous);
+    });
+
+    // A minimal wasm module with the `contractenvmetav0` custom section the
+    // host requires at upload time. Nothing about it is executed; `upgrade`
+    // only hashes it and defers the code swap until the invocation ends.
+    let minimal_wasm = soroban_sdk::Bytes::from_slice(
+        env,
+        &[
+            0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, // wasm header
+            0x00, 0x1e, // custom section, 30 bytes
+            0x11, b'c', b'o', b'n', b't', b'r', b'a', b'c', b't', b'e', b'n', b'v', b'm', b'e',
+            b't', b'a', b'v', b'0', // "contractenvmetav0"
+            0x00, 0x00, 0x00, 0x00, // ScEnvMetaKindInterfaceVersion
+            0x00, 0x00, 0x00, 0x16, // protocol 22
+            0x00, 0x00, 0x00, 0x00, // pre-release 0
+        ],
+    );
+    let new_hash = env.deployer().upload_contract_wasm(minimal_wasm);
+    client.upgrade(&new_hash);
+
+    let evs: std::vec::Vec<_> = env
+        .events()
+        .all()
+        .iter()
+        .filter(|e| e.0 == s.contract && topic_is_symbol(env, &e.1, 0, symbol_short!("upgrade")))
+        .collect();
+    assert_eq!(evs.len(), 1);
+    assert_eq!(evs[0].1.len(), 1, "admin events carry only the name topic");
+    let event: UpgradedEvent = TryFromVal::try_from_val(env, &evs[0].2).unwrap();
+    assert_eq!(event.version, 1);
+    assert_eq!(event.admin, s.admin);
+    assert_eq!(event.previous_hash, Some(previous));
+    assert_eq!(event.new_hash, new_hash);
+}
+
+/// `pause` and `resume` publish the same versioned payload, with `paused`
+/// carrying the new state, and only the event name as a topic (#333).
+#[test]
+fn pause_and_resume_emit_the_shared_admin_shape() {
+    let s = setup();
+    let env = &s.env;
+    let client = TipSplitterClient::new(env, &s.contract);
+
+    client.pause();
+    let evs: std::vec::Vec<_> = env
+        .events()
+        .all()
+        .iter()
+        .filter(|e| e.0 == s.contract && topic_is_symbol(env, &e.1, 0, symbol_short!("pause")))
+        .collect();
+    assert_eq!(evs.len(), 1);
+    assert_eq!(evs[0].1.len(), 1, "admin events carry only the name topic");
+    let paused: PauseEvent = TryFromVal::try_from_val(env, &evs[0].2).unwrap();
+    assert_eq!(paused.version, 1);
+    assert_eq!(paused.admin, s.admin);
+    assert!(paused.paused);
+
+    client.resume();
+    let evs: std::vec::Vec<_> = env
+        .events()
+        .all()
+        .iter()
+        .filter(|e| e.0 == s.contract && topic_is_symbol(env, &e.1, 0, symbol_short!("resume")))
+        .collect();
+    assert_eq!(evs.len(), 1);
+    assert_eq!(evs[0].1.len(), 1, "admin events carry only the name topic");
+    let resumed: PauseEvent = TryFromVal::try_from_val(env, &evs[0].2).unwrap();
+    assert_eq!(resumed.version, 1);
+    assert_eq!(resumed.admin, s.admin);
+    assert!(!resumed.paused);
+}
+
+/// `transfer_admin` publishes both ends of the handover in the shared admin
+/// payload: `admin` is the outgoing key, `new_admin` the incoming one (#333).
+#[test]
+fn transfer_admin_emits_the_shared_admin_shape() {
+    let s = setup();
+    let env = &s.env;
+    let client = TipSplitterClient::new(env, &s.contract);
+    let new_admin = Address::generate(env);
+
+    client.transfer_admin(&new_admin);
+
+    let evs: std::vec::Vec<_> = env
+        .events()
+        .all()
+        .iter()
+        .filter(|e| e.0 == s.contract && topic_is_symbol(env, &e.1, 0, symbol_short!("adm_xfer")))
+        .collect();
+    assert_eq!(evs.len(), 1);
+    assert_eq!(evs[0].1.len(), 1, "admin events carry only the name topic");
+    let event: AdminTransferredEvent = TryFromVal::try_from_val(env, &evs[0].2).unwrap();
+    assert_eq!(event.version, 1);
+    assert_eq!(event.admin, s.admin);
+    assert_eq!(event.new_admin, new_admin);
+    assert_eq!(client.get_admin(), new_admin);
 }
 
 #[test]

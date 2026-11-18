@@ -96,8 +96,8 @@ one belongs to a jar, the other to a `(jar, supporter)` pair.
 | `collect_recurring(id)` | — (any caller, typically a keeper) | Collect **one due period** of a recurring tip (#175). Pays the schedule's `amount` from the supporter's approved allowance with `transfer_from` (this contract is the spender), split by the same arithmetic as `tip`, and publishes the identical `tip` event. `next_due_ledger` advances by exactly `period_ledgers`. Too early — `NotDue`; allowance below `amount` (exhausted or expired) — `InsufficientAllowance`; supporter balance below `amount` — `InsufficientBalance`; all raised before any transfer, with zero state change. See [collecting recurring tips](#collecting-a-due-recurring-tip-175). |
 | `tip(from, jar_id, amount, message)` | `from` | Transfer `amount` of the **default token** from `from`, split across the jar's recipients. Emits a `tip` event carrying the per-recipient breakdown and the token paid in. Rejects amounts below the jar's minimum with `BelowMinTipAmount`. |
 | `tip_in_token(from, jar_id, token, amount, message)` | `from` | Same split, paid in `token`, which must be on the allowlist — otherwise `TokenNotAllowed`, raised before any transfer. The jar minimum applies only when `token` is the default token. Emits the same `tip` event. |
-| `allow_token(token)` | contract `admin` | Add `token` to the allowlist. Idempotent. Emits a `tk_allow` event carrying the admin who authorised it. |
-| `disallow_token(token)` | contract `admin` | Remove `token` from the allowlist. Refuses the default token with `CannotDisallowDefault`. Emits a `tk_dis` event carrying the admin. |
+| `allow_token(token)` | contract `admin` | Add `token` to the allowlist. Idempotent. Emits a `tk_allow` event in the shared admin shape, carrying the admin and the allowed token. |
+| `disallow_token(token)` | contract `admin` | Remove `token` from the allowlist. Refuses the default token with `CannotDisallowDefault`. Emits a `tk_dis` event in the shared admin shape, carrying the admin and the token. |
 | `set_tip_hook(hook)` | contract `admin` | Register or clear (`None`) the post-tip hook contract (#176). Emits a `tip_hook` event carrying the admin who made the change. See [the post-tip hook](#the-post-tip-hook-176). |
 | `get_tip_hook() -> Option<Address>` | — | The registered hook, or `None` when tips settle without one. |
 | `set_registrar(registrar)` | contract `admin` | Register or clear (`None`) the registrar whose co-signature `create_jar` requires (#178). Emits a `reg_set` event carrying the admin. See [the registrar gate](#the-jar-registrar-and-its-trust-model-178). |
@@ -121,11 +121,11 @@ one belongs to a jar, the other to a `(jar, supporter)` pair.
 | `get_min_accepted_tip(jar_id) -> i128` | — | The smallest tip this jar accepts: the larger of the amount needed to give every recipient a non-zero share and the jar's configured minimum. See [the smallest amount a jar accepts](#the-smallest-amount-a-jar-accepts-86). Panics with `JarNotFound` if the slug is free. |
 | `get_token() -> Address` | — | The USDC token address tips settle in. |
 | `get_admin() -> Address` | — | The contract admin recorded at deploy time. |
-| `transfer_admin(new_admin)` | contract `admin` | Hand admin control to `new_admin`. Rejected with `AdminExists` when it is already the current admin. Emits an `adm_xfer` event carrying both addresses. |
-| `pause()` | contract `admin` | Pause tipping: `tip`, `tip_with_ref` and `tip_in_token` reject with `ContractPaused`. Emits a `pause` event. |
-| `resume()` | contract `admin` | Lift a pause. Emits a `resume` event. |
+| `transfer_admin(new_admin)` | contract `admin` | Hand admin control to `new_admin`. Rejected with `AdminExists` when it is already the current admin. Emits an `adm_xfer` event carrying the outgoing admin and `new_admin`. |
+| `pause()` | contract `admin` | Pause tipping: `tip`, `tip_with_ref` and `tip_in_token` reject with `ContractPaused`. Emits a `pause` event in the shared admin shape with `paused: true`. |
+| `resume()` | contract `admin` | Lift a pause. Emits a `resume` event in the shared admin shape with `paused: false`. |
 | `is_paused() -> bool` | — | Whether tipping is currently paused. Reads instance storage. |
-| `upgrade(new_wasm_hash)` | contract `admin` | Replace the running contract Wasm while keeping the address and all stored state. Emits an `upgrade` event carrying the new hash. |
+| `upgrade(new_wasm_hash)` | contract `admin` | Replace the running contract Wasm while keeping the address and all stored state. Emits an `upgrade` event carrying the previous and new hashes. |
 | `get_limits() -> Limits` | — | The bounds this contract enforces: `bps_denom`, `max_recipients`, `max_message_len`, `max_batch_tips`. Reads no storage. |
 | `get_limits() -> Limits` | — | The bounds this contract enforces: `bps_denom`, `max_recipients`, `max_message_len`, `max_jar_id_len`. Reads no storage. |
 | `version() -> u32` | — | Which interface shape this deployment speaks. Reads no storage. See [detecting the interface version](#detecting-the-interface-version). |
@@ -1065,21 +1065,42 @@ so indexers need no separate decoder for recurring payments.
 > `update_splits`, so an indexer refreshes its cached splits after a recipient
 > removes themselves.
 
-### `tip_hook` — published on every `set_tip_hook`
+### Admin events — one shape
 
-- **Topics:** `(symbol "tip_hook", admin: Address)`
-- **Data:** `hook: Option<Address>` (`None` when the hook was cleared)
+Every admin-gated configuration change publishes the same shape:
 
-Records who changed the post-tip hook configuration and to what, so the
-setting's history is attributable in the event log (#176).
+- **Topics:** `(symbol "<name>")` — the event name only.
+- **Data:** a versioned struct whose first two fields are `version: u32` and
+  `admin: Address`, followed by the value that changed.
 
-### `reg_set` — published on every `set_registrar`
+An indexer therefore reads the admin from the same field of every admin event
+instead of special-casing whether it is a topic or the whole payload. The
+events are:
 
-- **Topics:** `(symbol "reg_set", admin: Address)`
-- **Data:** `registrar: Option<Address>` (`None` when cleared)
+| Event | Data struct | Value |
+|-------|-------------|-------|
+| `tk_allow` | `TokenAllowlistEvent` | `token`, `allowed: true` |
+| `tk_dis` | `TokenAllowlistEvent` | `token`, `allowed: false` |
+| `tip_hook` | `TipHookEvent` | `hook: Option<Address>` (`None` clears it) |
+| `reg_set` | `RegistrarEvent` | `registrar: Option<Address>` (`None` clears it) |
+| `fee_set` | `FeeEvent` | `fee_bps: u32` |
+| `pause` | `PauseEvent` | `paused: true` |
+| `resume` | `PauseEvent` | `paused: false` |
+| `adm_xfer` | `AdminTransferredEvent` | `new_admin: Address` (`admin` is the outgoing key) |
+| `upgrade` | `UpgradedEvent` | `previous_hash: Option<BytesN<32>>`, `new_hash: BytesN<32>` |
 
-Records every installation or removal of the `create_jar` registrar (#178),
-including the moment the squatting gate goes up or down.
+`tip_hook` records who changed the post-tip hook configuration and to what
+(#176). `reg_set` records every installation or removal of the `create_jar`
+registrar (#178), including the moment the squatting gate goes up or down.
+
+For `upgrade` (#102, #334), `previous_hash` is the hash recorded by the last
+upgrade. soroban-sdk 22 exposes no deployer getter for the code hash the
+contract is currently running, so the **first** upgrade of a deployment that
+has never upgraded since this field was introduced reports `None`. Every later
+upgrade reports the hash installed by the previous one. The new build's
+`INTERFACE_VERSION` cannot be read inside the upgrade transaction — the
+executing code is still the old build — so clients call `version()` after the
+ledger closes if they need it.
 
 ## Locking a jar's splits
 
@@ -1435,8 +1456,8 @@ paying themselves, and the event then reports `fee = 0` because nothing moved.
 A fee transfer the admin cannot receive reverts the tip; the admin can set the
 fee to `0` to restore tipping.
 
-`set_fee_bps` emits a `fee_set` event: topics `(symbol "fee_set", admin)`, data
-the new `fee_bps: u32`.
+`set_fee_bps` emits a `fee_set` event: topic `(symbol "fee_set")`, data
+`FeeEvent { version, admin, fee_bps }` — the shared admin event shape.
 
 ## Detecting the interface version
 
@@ -1460,9 +1481,12 @@ changes. Do not bump it for an internal refactor, a new storage key, or a doc
 edit — none of those are visible to a consumer, and a version that changes when
 nothing observable did is a version consumers stop trusting.
 
-This build ships `version() == 6`. Version 6 changes the `leave_jar` `splits`
-event from a bare count to the same `SplitsUpdatedEvent` that `update_splits`
-publishes. Version 5 adds `set_jar_paused` / `is_jar_paused`, `delete_jar` and
+This build ships `version() == 7`. Version 7 gives every admin event one shape
+(name-only topic, versioned data struct with `version` and `admin`) and adds
+`previous_hash` to the `upgrade` event. Version 6 changes the `leave_jar`
+`splits` event from a bare count to the same `SplitsUpdatedEvent` that
+`update_splits` publishes. Version 5 adds `set_jar_paused` / `is_jar_paused`,
+`delete_jar` and
 the `JarPaused` error (39). Version 4 adds `tip_many` (#84). Version 3 adds `set_fee_bps` /
 `get_fee_bps`, the `fee_set` event, the `FeeTooHigh` error (35), and the `fee`
 field in the `tip` event (#79); it also changes what a tipper who is a

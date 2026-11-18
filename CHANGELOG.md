@@ -26,6 +26,7 @@ All notable changes to `novatip-contracts` are documented here.
 - `create_jar` and `rename_jar` accept only canonical slugs — `@` followed by 3–32 characters from `[a-z0-9_-]`, matching the backend's `SLUG_REGEX` (#95). Upper case, whitespace, control bytes and lookalikes are rejected with `InvalidJarId`; `jar_exists` returns `false` for them.
 
 ### Changed (breaking: event payload)
+- `version()` is now `7`: every admin event (`tk_allow`, `tk_dis`, `tip_hook`, `reg_set`, `fee_set`, `pause`, `resume`, `adm_xfer`, `upgrade`) has only the event-name topic, and its data is one versioned struct whose first fields are `version` and `admin`, followed by the changed value (#333). `UpgradedEvent` also gained `version` and `previous_hash`; the first upgrade of a pre-existing deployment reports `None` because soroban-sdk 22 has no getter for the running code hash (#334)
 - `version()` is now `6`: `leave_jar` publishes its `splits` event as `SplitsUpdatedEvent { version, count, splits }`, the same payload `update_splits` publishes. It was still publishing a bare `u32` count, so an indexer decoding every `splits` event with one type failed on it
 - `version()` is now `5`: `set_jar_paused(jar_id, paused)`, `is_jar_paused(jar_id)` and `delete_jar(jar_id)` were added, with the appended error `JarPaused` (39). `contracts/tip-splitter/interface.json` is regenerated to match
 - `version()` is now `4`: the `tip_many` entry point, the `TipRequest` type and the `BatchEmpty` (37) / `BatchTooLarge` (38) errors were added to the public interface (#84). No existing function, error number or event shape changed
@@ -47,8 +48,10 @@ All notable changes to `novatip-contracts` are documented here.
 
 ### Removed
 - `InvalidSplits` (code 4) is no longer raised; variant retained for code stability
+- `JarRecord` and `CompactSplit` were removed from the exported interface; neither was reachable from a function argument or return type
 
 ### Changed
+- The shipped wasm is ~34 KiB, down from ~65 KiB: Rust doc comments no longer ride along in `contractspecv0`, and the two unused exported types are gone (#329). `MAX_WASM_BYTES` is lowered from 128 KiB to 42 KiB
 - `0.1.0` release date corrected to match git tag date
 
 ## [0.1.0] - 2025-07-01

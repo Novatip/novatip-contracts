@@ -12,16 +12,16 @@ set -euo pipefail
 # Hard ceiling for the artifact `stellar contract build` produces — the same
 # wasm the deploy script ships (#131).
 #
-# This was 24 KiB when the contract built to ~15 KiB. The features merged
-# since (recurring tips, escrow, multi-token tips, tip_many, the protocol fee,
-# jar pause and delete_jar) grew it to ~65 KiB, and main failed on size alone.
-# Raised to 128 KiB so the check guards against a real regression (heavyweight
-# dep, profile misconfig) again. Bringing the contract back down is tracked
-# separately; lower this once it shrinks.
+# This was 24 KiB when the contract built to ~15 KiB. Feature growth took it
+# to ~65 KiB and the ceiling was temporarily raised to 128 KiB to unblock main.
+# The spec was carrying every Rust doc comment plus two unused exported types;
+# stripping those brought the artifact to ~34 KiB (#329). The ceiling is now
+# the new size plus ~25%, enough room for ordinary changes while still catching
+# a heavyweight dependency or profile regression.
 #
 # Raising it is fine when the growth is understood and intentional — the point
 # is that the bump shows up in a diff and gets a reason.
-MAX_WASM_BYTES="${MAX_WASM_BYTES:-131072}"
+MAX_WASM_BYTES="${MAX_WASM_BYTES:-43008}"
 
 # Prefer the stellar-contract-build artifact (wasm32v1-none). Fall back to a
 # path argument for local use.

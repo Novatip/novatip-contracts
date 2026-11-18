@@ -6,9 +6,9 @@ set -euo pipefail
 # List events published by a deployed tip_splitter contract, with the topic
 # filters computed correctly instead of hand-encoded.
 #
-# Every event the contract publishes has two topics: the event-name symbol
-# and the jar id string. `stellar events` wants each topic segment as base64
-# XDR of an ScVal, so this script encodes them with `stellar xdr encode
+# Jar events have two topics: the event-name symbol and the jar id string.
+# Admin events have only the name topic. `stellar events` wants each topic
+# segment as base64 XDR of an ScVal, so this script encodes them with `stellar xdr encode
 # --type ScVal` rather than hardcoding base64. A wrongly encoded segment fails
 # with "xdr value invalid"; a wrong segment *count* silently returns nothing,
 # which is why the encoding is derived here in one place.
@@ -18,9 +18,11 @@ set -euo pipefail
 #   CONTRACT_ID  optional; defaults to .contract-id.<NETWORK>
 #
 # Optional env:
-#   EVENT          one of jar_crtd | splits | jar_xfer | min_tip | tip | all
-#                  (default: all)
-#   SLUG           jar id to filter on, e.g. "@demo". Unset lists every jar.
+#   EVENT          one of jar_crtd | splits | jar_xfer | min_tip | tip |
+#                  tk_allow | tk_dis | tip_hook | reg_set | fee_set | pause |
+#                  resume | adm_xfer | upgrade | all (default: all)
+#   SLUG           jar id to filter on, e.g. "@demo". Ignored for admin events,
+#                  which have no jar id topic. Unset lists every jar.
 #   START_LEDGER   first ledger to scan. Default: WINDOW ledgers before the
 #                  network's current ledger.
 #   END_LEDGER     last ledger to scan. Default: the current ledger.
@@ -61,7 +63,20 @@ command -v jq >/dev/null 2>&1 || {
   exit 1
 }
 
-VALID_EVENTS=(jar_crtd splits jar_xfer min_tip tip)
+# Events published with the jar id as their second topic. Admin events carry
+# only the event-name topic, so SLUG must not be appended for them.
+JAR_EVENTS=(jar_crtd splits jar_xfer min_tip tip)
+ADMIN_EVENTS=(tk_allow tk_dis tip_hook reg_set fee_set pause resume adm_xfer upgrade)
+VALID_EVENTS=("${JAR_EVENTS[@]}" "${ADMIN_EVENTS[@]}")
+
+is_jar_event() {
+  local e
+  for e in "${JAR_EVENTS[@]}"; do
+    [ "${e}" = "$1" ] && return 0
+  done
+  return 1
+}
+
 if [ "${EVENT}" != "all" ]; then
   ok=0
   for e in "${VALID_EVENTS[@]}"; do
@@ -133,7 +148,7 @@ list_events() {
                  --start-ledger "${START_LEDGER}" --end-ledger "${END_LEDGER}"
                  --output json)
   args+=(--topic "$(encode_scval "{\"symbol\":\"${name}\"}")")
-  if [ -n "${SLUG:-}" ]; then
+  if [ -n "${SLUG:-}" ] && is_jar_event "${name}"; then
     args+=(--topic "$(encode_scval "{\"string\":\"${SLUG}\"}")")
   fi
 
