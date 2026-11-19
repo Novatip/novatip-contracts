@@ -5,6 +5,9 @@ All notable changes to `novatip-contracts` are documented here.
 ## [Unreleased]
 
 ### Added
+- `update_recurring(id, amount, message)` lets the supporter change a recurring tip without cancelling, keeping the id and `next_due_ledger`; validated like `create_recurring` and published as `recr_upd` (#316)
+- `get_jar_info(jar_id) -> JarInfo` returns owner, splits, locked, paused, minimum tip, minimum accepted tip, totals and the current fee in one call (#319)
+- `get_limits()` reports `min_jar_id_len` (4) and `max_fee_bps` (500) (#320)
 - `tip_many(from, tips) -> Vec<u64>` tips several jars in one transaction from a single authorisation, each entry carrying its own amount and message and publishing its own `tip` event (#84). Bounded by `MAX_BATCH_TIPS` (10); the whole call is all-or-nothing. New `TipRequest { jar_id, amount, message }` type, new errors `BatchEmpty` (37) and `BatchTooLarge` (38), and `get_limits().max_batch_tips`
 - Protocol fee (#79): `set_fee_bps(fee_bps)` (admin only, default `0`, capped at 500 bps / 5%) and `get_fee_bps() -> u32`. The fee is taken from each tip before the split and paid to the admin; recipients' total plus the fee equals the tip exactly. New `fee_set` event, new error `FeeTooHigh` (35), and `scripts/set-fee.sh` (defaults to the intended 100 bps)
 - Tests for authority moving with jar ownership (#75), multi-byte messages at the 280-byte limit (#74), and a tipper who holds a share in the distribution property test (#78)
@@ -26,6 +29,7 @@ All notable changes to `novatip-contracts` are documented here.
 - `create_jar` and `rename_jar` accept only canonical slugs — `@` followed by 3–32 characters from `[a-z0-9_-]`, matching the backend's `SLUG_REGEX` (#95). Upper case, whitespace, control bytes and lookalikes are rejected with `InvalidJarId`; `jar_exists` returns `false` for them.
 
 ### Changed (breaking: event payload)
+- `version()` is now `8`: `recr_add` publishes `RecurringAddedEvent { version, id, jar_id, amount, period_ledgers, next_due_ledger }` instead of a bare id, and its topics are `(recr_add, supporter, jar_id)` so a creator can filter by jar (#317)
 - `version()` is now `7`: every admin event (`tk_allow`, `tk_dis`, `tip_hook`, `reg_set`, `fee_set`, `pause`, `resume`, `adm_xfer`, `upgrade`) has only the event-name topic, and its data is one versioned struct whose first fields are `version` and `admin`, followed by the changed value (#333). `UpgradedEvent` also gained `version` and `previous_hash`; the first upgrade of a pre-existing deployment reports `None` because soroban-sdk 22 has no getter for the running code hash (#334)
 - `version()` is now `7`: `lock`, `jar_pause`, `withdraw`, `adm_xfer` and `jar_rnm` publish named, versioned structs (`JarLockEvent`, `JarPausedEvent`, `HeldWithdrawnEvent`, `AdminTransferredEvent`, `JarRenamedEvent`) instead of bare values or positional tuples. `jar_del` topics are now `(jar_del, jar_id)` and `jar_rnm` topics are `(jar_rnm, old_jar_id)`, so a per-jar subscription sees renames and deletions. Consumers that decoded the old bare payloads or tuples must read the named fields.
 - `version()` is now `6`: `leave_jar` publishes its `splits` event as `SplitsUpdatedEvent { version, count, splits }`, the same payload `update_splits` publishes. It was still publishing a bare `u32` count, so an indexer decoding every `splits` event with one type failed on it
