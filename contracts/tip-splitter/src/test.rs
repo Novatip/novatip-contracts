@@ -9573,7 +9573,6 @@ fn tip_tipper_holding_final_share_preserves_all_balances() {
     assert_eq!(token.balance(&s.contract), 0);
 }
 
-
 // ---------------------------------------------------------------------------
 // #324 — the jar owner can cancel recurring tips into their jar
 // ---------------------------------------------------------------------------
@@ -9641,9 +9640,7 @@ fn recr_del_records_who_cancelled() {
         .events()
         .all()
         .iter()
-        .filter(|e| {
-            e.0 == s.contract && topic_is_symbol(env, &e.1, 0, symbol_short!("recr_del"))
-        })
+        .filter(|e| e.0 == s.contract && topic_is_symbol(env, &e.1, 0, symbol_short!("recr_del")))
         .collect();
     assert_eq!(evs.len(), 1);
     let (cancelled, cancelled_by): (u128, Address) =
