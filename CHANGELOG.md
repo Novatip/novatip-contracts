@@ -5,6 +5,10 @@ All notable changes to `novatip-contracts` are documented here.
 ## [Unreleased]
 
 ### Added
+- `tip_many(from, tips, token)` takes an optional `token` for the whole batch, checked against the allowlist like `tip_in_token`; the jar minimum applies only to the default token (#322). `TipRequest` gains `reference: Option<BytesN<32>>`, echoed in each entry's `tip` event (#318)
+- `get_allowed_tokens() -> Vec<Address>` lists the allowlist, default first, capped at `MAX_ALLOWED_TOKENS` (10) with the appended error `TooManyAllowedTokens` (40) (#321)
+- `set_max_tip_amount(jar_id, max_amount)` and `get_max_tip_amount(jar_id)`: an optional per-jar maximum, owner only, at least the minimum, enforced by default-token tips and previews, with a `max_tip` event and appended errors `AboveMaxTipAmount` (41) and `InvalidMaximumAmount` (42) (#323)
+- `version()` is now `8`: `tip_many` gained a `token` argument and `TipRequest` a `reference` field, so existing callers must pass `None` for both (#318, #322)
 - `tip_many(from, tips) -> Vec<u64>` tips several jars in one transaction from a single authorisation, each entry carrying its own amount and message and publishing its own `tip` event (#84). Bounded by `MAX_BATCH_TIPS` (10); the whole call is all-or-nothing. New `TipRequest { jar_id, amount, message }` type, new errors `BatchEmpty` (37) and `BatchTooLarge` (38), and `get_limits().max_batch_tips`
 - Protocol fee (#79): `set_fee_bps(fee_bps)` (admin only, default `0`, capped at 500 bps / 5%) and `get_fee_bps() -> u32`. The fee is taken from each tip before the split and paid to the admin; recipients' total plus the fee equals the tip exactly. New `fee_set` event, new error `FeeTooHigh` (35), and `scripts/set-fee.sh` (defaults to the intended 100 bps)
 - Tests for authority moving with jar ownership (#75), multi-byte messages at the 280-byte limit (#74), and a tipper who holds a share in the distribution property test (#78)
