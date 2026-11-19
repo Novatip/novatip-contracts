@@ -18,7 +18,7 @@ set -euo pipefail
 #   CONTRACT_ID  optional; defaults to .contract-id.<NETWORK>
 #
 # Optional env:
-#   EVENT          one of jar_crtd | splits | jar_xfer | min_tip | tip | all
+#   EVENT          one of jar_crtd | splits | jar_xfer | jar_del | min_tip | tip | all
 #                  (default: all)
 #   SLUG           jar id to filter on, e.g. "@demo". Unset lists every jar.
 #   START_LEDGER   first ledger to scan. Default: WINDOW ledgers before the
@@ -61,7 +61,7 @@ command -v jq >/dev/null 2>&1 || {
   exit 1
 }
 
-VALID_EVENTS=(jar_crtd splits jar_xfer min_tip tip)
+VALID_EVENTS=(jar_crtd splits jar_xfer jar_del min_tip tip)
 if [ "${EVENT}" != "all" ]; then
   ok=0
   for e in "${VALID_EVENTS[@]}"; do

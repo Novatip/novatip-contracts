@@ -144,7 +144,7 @@ const INSTANCE_TTL_THRESHOLD: u32 = JAR_TTL_THRESHOLD;
 ///
 /// This is a per-contract number for client feature detection. It complements
 /// the per-event schema version proposed in #83 rather than replacing it.
-const INTERFACE_VERSION: u32 = 6;
+const INTERFACE_VERSION: u32 = 7;
 
 /// One recipient and the share of every tip they receive, in basis points.
 #[contracttype]
@@ -522,6 +522,48 @@ pub struct JarDeletedEvent {
     pub jar_id: String,
 }
 
+/// Data published by `lock`; fields are named for forward-compatible decoding.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct JarLockEvent {
+    pub version: u32,
+    pub locked: bool,
+}
+
+/// Data published by `jar_pause`; fields are named for forward-compatible decoding.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct JarPausedEvent {
+    pub version: u32,
+    pub paused: bool,
+}
+
+/// Data published by `withdraw`; fields are named for forward-compatible decoding.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct HeldWithdrawnEvent {
+    pub version: u32,
+    pub amount: i128,
+}
+
+/// Data published by `adm_xfer`; fields are named for forward-compatible decoding.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AdminTransferredEvent {
+    pub version: u32,
+    pub previous_admin: Address,
+    pub new_admin: Address,
+}
+
+/// Data published by `jar_rnm`; fields are named for forward-compatible decoding.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct JarRenamedEvent {
+    pub version: u32,
+    pub jar_id: String,
+    pub new_jar_id: String,
+}
+
 /// Data published by `min_tip`; fields are named for forward-compatible decoding.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -584,11 +626,7 @@ impl TipSplitter {
     /// The contract admin, which every admin-gated entry point requires.
     /// Returns the address so the caller can name it in an event.
     fn require_admin(env: &Env) -> Address {
-        let admin: Address = env
-            .storage()
-            .instance()
-            .get(&DataKey::Admin)
-            .unwrap_or_else(|| panic_with_error!(env, Error::NotInitialized));
+        let admin: Address = Self::get_admin(env.clone());
         admin.require_auth();
         admin
     }
@@ -620,11 +658,7 @@ impl TipSplitter {
     /// are untouched — this only stops future tips in that asset.
     pub fn disallow_token(env: Env, token: Address) {
         let admin = Self::require_admin(&env);
-        let default: Address = env
-            .storage()
-            .instance()
-            .get(&DataKey::Token)
-            .unwrap_or_else(|| panic_with_error!(&env, Error::NotInitialized));
+        let default: Address = Self::get_token(env.clone());
         if token == default {
             panic_with_error!(&env, Error::CannotDisallowDefault);
         }
@@ -687,11 +721,7 @@ impl TipSplitter {
         }
         // Issue #94: reject the contract itself or its token as jar owner.
         let contract_addr = env.current_contract_address();
-        let token_addr: Address = env
-            .storage()
-            .instance()
-            .get(&DataKey::Token)
-            .unwrap_or_else(|| panic_with_error!(&env, Error::NotInitialized));
+        let token_addr: Address = Self::get_token(env.clone());
         if owner == contract_addr || owner == token_addr {
             panic_with_error!(&env, Error::InvalidRecipient);
         }
@@ -835,7 +865,13 @@ impl TipSplitter {
             },
         );
 
-        env.events().publish((symbol_short!("lock"), jar_id), true);
+        env.events().publish(
+            (symbol_short!("lock"), jar_id),
+            JarLockEvent {
+                version: 1,
+                locked: true,
+            },
+        );
     }
 
     /// Unlock a jar's splits, restoring the owner's unilateral control.
@@ -876,7 +912,13 @@ impl TipSplitter {
             },
         );
 
-        env.events().publish((symbol_short!("lock"), jar_id), false);
+        env.events().publish(
+            (symbol_short!("lock"), jar_id),
+            JarLockEvent {
+                version: 1,
+                locked: false,
+            },
+        );
     }
 
     /// Whether a jar's splits are locked against unilateral owner edits (#173).
@@ -930,8 +972,10 @@ impl TipSplitter {
             },
         );
 
-        env.events()
-            .publish((symbol_short!("jar_pause"), jar_id), paused);
+        env.events().publish(
+            (symbol_short!("jar_pause"), jar_id),
+            JarPausedEvent { version: 1, paused },
+        );
     }
 
     /// Whether tipping is currently paused for a jar (#45).
@@ -1058,11 +1102,7 @@ impl TipSplitter {
         Self::extend_jar_and_min_ttl(&env, &jar_id);
         // Issue #94: reject the contract itself or its token as new owner.
         let contract_addr = env.current_contract_address();
-        let token_addr: Address = env
-            .storage()
-            .instance()
-            .get(&DataKey::Token)
-            .unwrap_or_else(|| panic_with_error!(&env, Error::NotInitialized));
+        let token_addr: Address = Self::get_token(env.clone());
         if new_owner == contract_addr || new_owner == token_addr || new_owner == jar.owner {
             panic_with_error!(&env, Error::InvalidRecipient);
         }
@@ -1120,7 +1160,7 @@ impl TipSplitter {
             .remove(&DataKey::MinTip(jar_id.clone()));
 
         env.events().publish(
-            (symbol_short!("jar_del"),),
+            (symbol_short!("jar_del"), jar_id.clone()),
             JarDeletedEvent { version: 1, jar_id },
         );
     }
@@ -1136,8 +1176,14 @@ impl TipSplitter {
         env.storage()
             .instance()
             .set(&DataKey::Admin, &new_admin.clone());
-        env.events()
-            .publish((symbol_short!("adm_xfer"),), (current_admin, new_admin));
+        env.events().publish(
+            (symbol_short!("adm_xfer"),),
+            AdminTransferredEvent {
+                version: 1,
+                previous_admin: current_admin,
+                new_admin,
+            },
+        );
     }
 
     /// Pause all tipping operations. Only the admin may call this.
@@ -1246,8 +1292,14 @@ impl TipSplitter {
             env.storage().persistent().remove(&old_min_key);
         }
 
-        env.events()
-            .publish((symbol_short!("jar_rnm"),), (jar_id, new_jar_id));
+        env.events().publish(
+            (symbol_short!("jar_rnm"), jar_id.clone()),
+            JarRenamedEvent {
+                version: 1,
+                jar_id,
+                new_jar_id,
+            },
+        );
     }
 
     /// Set an optional minimum tip amount for a jar. Only the jar owner may do this.
@@ -1375,11 +1427,7 @@ impl TipSplitter {
         if tips.len() > MAX_BATCH_TIPS {
             panic_with_error!(&env, Error::BatchTooLarge);
         }
-        let token_addr: Address = env
-            .storage()
-            .instance()
-            .get(&DataKey::Token)
-            .unwrap_or_else(|| panic_with_error!(&env, Error::NotInitialized));
+        let token_addr: Address = Self::get_token(env.clone());
 
         let mut seqs: Vec<u64> = Vec::new(&env);
         for i in 0..tips.len() {
@@ -1416,11 +1464,7 @@ impl TipSplitter {
         if env.storage().instance().has(&DataKey::Paused) {
             panic_with_error!(&env, Error::ContractPaused);
         }
-        let token_addr: Address = env
-            .storage()
-            .instance()
-            .get(&DataKey::Token)
-            .unwrap_or_else(|| panic_with_error!(&env, Error::NotInitialized));
+        let token_addr: Address = Self::get_token(env.clone());
         Self::settle_tip(
             &env,
             &from,
@@ -1477,11 +1521,7 @@ impl TipSplitter {
         {
             panic_with_error!(&env, Error::TokenNotAllowed);
         }
-        let default: Address = env
-            .storage()
-            .instance()
-            .get(&DataKey::Token)
-            .unwrap_or_else(|| panic_with_error!(&env, Error::NotInitialized));
+        let default: Address = Self::get_token(env.clone());
         Self::settle_tip(
             &env,
             &from,
@@ -1980,11 +2020,7 @@ impl TipSplitter {
             panic_with_error!(&env, Error::NothingHeld);
         }
 
-        let token_addr: Address = env
-            .storage()
-            .instance()
-            .get(&DataKey::Token)
-            .unwrap_or_else(|| panic_with_error!(&env, Error::NotInitialized));
+        let token_addr: Address = Self::get_token(env.clone());
         let client = token::Client::new(&env, &token_addr);
         let contract_addr = env.current_contract_address();
 
@@ -1994,8 +2030,13 @@ impl TipSplitter {
         env.storage().persistent().remove(&held_key);
         client.transfer(&contract_addr, &recipient, &held);
 
-        env.events()
-            .publish((symbol_short!("withdraw"), recipient), held);
+        env.events().publish(
+            (symbol_short!("withdraw"), recipient),
+            HeldWithdrawnEvent {
+                version: 1,
+                amount: held,
+            },
+        );
     }
 
     /// Register a recurring tip to a jar (#174), authorized by the supporter.
@@ -2181,11 +2222,7 @@ impl TipSplitter {
         // A recurring schedule is a promise about the *default* token: it was
         // registered against `tip`'s token and minimum, and it is collected
         // with the contract's own allowance, which is per-asset.
-        let token_addr: Address = env
-            .storage()
-            .instance()
-            .get(&DataKey::Token)
-            .unwrap_or_else(|| panic_with_error!(&env, Error::NotInitialized));
+        let token_addr: Address = Self::get_token(env.clone());
         let client = token::Client::new(&env, &token_addr);
         let contract_addr = env.current_contract_address();
 
@@ -2930,11 +2967,7 @@ impl TipSplitter {
         // withdrawal function for tips, and the token contract cannot receive
         // transfers meant for end users.
         let contract_addr = env.current_contract_address();
-        let token_addr: Address = env
-            .storage()
-            .instance()
-            .get(&DataKey::Token)
-            .unwrap_or_else(|| panic_with_error!(env, Error::NotInitialized));
+        let token_addr: Address = Self::get_token(env.clone());
 
         let mut total: u32 = 0;
         let mut seen: Vec<Address> = Vec::new(env);

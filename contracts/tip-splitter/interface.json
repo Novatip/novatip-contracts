@@ -458,6 +458,94 @@
   {
     "udt_struct_v0": {
       "lib": "",
+      "name": "JarLockEvent",
+      "fields": [
+        {
+          "name": "locked",
+          "type_": "bool"
+        },
+        {
+          "name": "version",
+          "type_": "u32"
+        }
+      ]
+    }
+  },
+  {
+    "udt_struct_v0": {
+      "lib": "",
+      "name": "JarPausedEvent",
+      "fields": [
+        {
+          "name": "paused",
+          "type_": "bool"
+        },
+        {
+          "name": "version",
+          "type_": "u32"
+        }
+      ]
+    }
+  },
+  {
+    "udt_struct_v0": {
+      "lib": "",
+      "name": "HeldWithdrawnEvent",
+      "fields": [
+        {
+          "name": "amount",
+          "type_": "i128"
+        },
+        {
+          "name": "version",
+          "type_": "u32"
+        }
+      ]
+    }
+  },
+  {
+    "udt_struct_v0": {
+      "lib": "",
+      "name": "AdminTransferredEvent",
+      "fields": [
+        {
+          "name": "new_admin",
+          "type_": "address"
+        },
+        {
+          "name": "previous_admin",
+          "type_": "address"
+        },
+        {
+          "name": "version",
+          "type_": "u32"
+        }
+      ]
+    }
+  },
+  {
+    "udt_struct_v0": {
+      "lib": "",
+      "name": "JarRenamedEvent",
+      "fields": [
+        {
+          "name": "jar_id",
+          "type_": "string"
+        },
+        {
+          "name": "new_jar_id",
+          "type_": "string"
+        },
+        {
+          "name": "version",
+          "type_": "u32"
+        }
+      ]
+    }
+  },
+  {
+    "udt_struct_v0": {
+      "lib": "",
       "name": "MinTipEvent",
       "fields": [
         {
