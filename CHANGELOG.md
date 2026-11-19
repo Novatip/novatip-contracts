@@ -5,6 +5,7 @@ All notable changes to `novatip-contracts` are documented here.
 ## [Unreleased]
 
 ### Added
+- `migrate()` (admin only) moves stored state to the installed build's schema after an `upgrade`, once per `SCHEMA_VERSION`, and emits a `migrate` event with `MigratedEvent { version, admin, from_version, to_version }` (#325)
 - `update_recurring(id, amount, message)` lets the supporter change a recurring tip without cancelling, keeping the id and `next_due_ledger`; validated like `create_recurring` and published as `recr_upd` (#316)
 - `get_jar_info(jar_id) -> JarInfo` returns owner, splits, locked, paused, minimum tip, minimum accepted tip, totals and the current fee in one call (#319)
 - `get_limits()` reports `min_jar_id_len` (4) and `max_fee_bps` (500) (#320)
@@ -29,6 +30,7 @@ All notable changes to `novatip-contracts` are documented here.
 - `create_jar` and `rename_jar` accept only canonical slugs — `@` followed by 3–32 characters from `[a-z0-9_-]`, matching the backend's `SLUG_REGEX` (#95). Upper case, whitespace, control bytes and lookalikes are rejected with `InvalidJarId`; `jar_exists` returns `false` for them.
 
 ### Changed (breaking: event payload)
+- `version()` is now `8`: `cancel_recurring(caller, id)` takes the caller, which may be the supporter or the jar owner (#324); anyone else gets the new error `NotAuthorized` (40). `recr_del` data is now `(id, cancelled_by)`
 - `version()` is now `8`: `recr_add` publishes `RecurringAddedEvent { version, id, jar_id, amount, period_ledgers, next_due_ledger }` instead of a bare id, and its topics are `(recr_add, supporter, jar_id)` so a creator can filter by jar (#317)
 - `version()` is now `7`: every admin event (`tk_allow`, `tk_dis`, `tip_hook`, `reg_set`, `fee_set`, `pause`, `resume`, `adm_xfer`, `upgrade`) has only the event-name topic, and its data is one versioned struct whose first fields are `version` and `admin`, followed by the changed value (#333). `UpgradedEvent` also gained `version` and `previous_hash`; the first upgrade of a pre-existing deployment reports `None` because soroban-sdk 22 has no getter for the running code hash (#334)
 - `version()` is now `7`: `lock`, `jar_pause`, `withdraw`, `adm_xfer` and `jar_rnm` publish named, versioned structs (`JarLockEvent`, `JarPausedEvent`, `HeldWithdrawnEvent`, `AdminTransferredEvent`, `JarRenamedEvent`) instead of bare values or positional tuples. `jar_del` topics are now `(jar_del, jar_id)` and `jar_rnm` topics are `(jar_rnm, old_jar_id)`, so a per-jar subscription sees renames and deletions. Consumers that decoded the old bare payloads or tuples must read the named fields.

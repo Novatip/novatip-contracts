@@ -5075,7 +5075,7 @@ fn recurring_tip_create_read_cancel_roundtrip() {
     assert_eq!(rec.period_ledgers, 100);
     assert_eq!(rec.next_due_ledger, seq + 100);
 
-    client.cancel_recurring(&id);
+    client.cancel_recurring(&supporter, &id);
     assert!(client.try_get_recurring(&id).is_err());
 }
 
@@ -5147,7 +5147,7 @@ fn cancel_recurring_requires_the_supporter() {
     // Only the supporter's signature authorizes cancellation; without it the
     // entry survives.
     env.mock_auths(&[]);
-    assert!(client.try_cancel_recurring(&id).is_err());
+    assert!(client.try_cancel_recurring(&supporter, &id).is_err());
     // still present
     assert_eq!(client.get_recurring(&id).supporter, supporter);
 }
@@ -7792,6 +7792,7 @@ fn error_codes_are_pinned_to_the_public_interface() {
         (Error::BatchEmpty, 37),
         (Error::BatchTooLarge, 38),
         (Error::JarPaused, 39),
+        (Error::NotAuthorized, 40),
     ];
 
     for (variant, expected) in codes {
@@ -9675,4 +9676,114 @@ fn tip_tipper_holding_final_share_preserves_all_balances() {
         "tipper's 200 final share stayed in their wallet: only 800 left for alice and bob"
     );
     assert_eq!(token.balance(&s.contract), 0);
+}
+
+// ---------------------------------------------------------------------------
+// #324 — the jar owner can cancel recurring tips into their jar
+// ---------------------------------------------------------------------------
+
+#[test]
+fn cancel_recurring_accepts_the_supporter_or_the_jar_owner_only() {
+    let s = setup();
+    let env = &s.env;
+    let client = TipSplitterClient::new(env, &s.contract);
+    let owner = Address::generate(env);
+    let supporter = Address::generate(env);
+    let jar_id = String::from_str(env, "@sched");
+    client.create_jar(
+        &owner,
+        &jar_id,
+        &vec![
+            env,
+            Split {
+                to: Address::generate(env),
+                bps: 10000,
+            },
+        ],
+    );
+    let memo = String::from_str(env, "");
+
+    let first = client.create_recurring(&supporter, &jar_id, &500, &100, &memo);
+    client.cancel_recurring(&supporter, &first);
+    assert!(client.try_get_recurring(&first).is_err());
+
+    let second = client.create_recurring(&supporter, &jar_id, &500, &100, &memo);
+    let stranger = Address::generate(env);
+    assert_eq!(
+        client.try_cancel_recurring(&stranger, &second),
+        Err(Ok(Error::NotAuthorized.into()))
+    );
+    assert_eq!(client.get_recurring(&second).supporter, supporter);
+
+    client.cancel_recurring(&owner, &second);
+    assert!(client.try_get_recurring(&second).is_err());
+}
+
+#[test]
+fn recr_del_records_who_cancelled() {
+    let s = setup();
+    let env = &s.env;
+    let client = TipSplitterClient::new(env, &s.contract);
+    let owner = Address::generate(env);
+    let supporter = Address::generate(env);
+    let jar_id = String::from_str(env, "@sched");
+    client.create_jar(
+        &owner,
+        &jar_id,
+        &vec![
+            env,
+            Split {
+                to: Address::generate(env),
+                bps: 10000,
+            },
+        ],
+    );
+    let id = client.create_recurring(&supporter, &jar_id, &500, &100, &String::from_str(env, ""));
+
+    client.cancel_recurring(&owner, &id);
+    let evs: std::vec::Vec<_> = env
+        .events()
+        .all()
+        .iter()
+        .filter(|e| e.0 == s.contract && topic_is_symbol(env, &e.1, 0, symbol_short!("recr_del")))
+        .collect();
+    assert_eq!(evs.len(), 1);
+    let (cancelled, cancelled_by): (u128, Address) =
+        TryFromVal::try_from_val(env, &evs[0].2).unwrap();
+    assert_eq!(cancelled, id);
+    assert_eq!(cancelled_by, owner);
+}
+
+// ---------------------------------------------------------------------------
+// #325 — versioned migration entry point
+// ---------------------------------------------------------------------------
+
+#[test]
+fn migrate_runs_once_per_schema_version() {
+    let s = setup();
+    let env = &s.env;
+    let client = TipSplitterClient::new(env, &s.contract);
+
+    client.migrate();
+    let evs: std::vec::Vec<_> = env
+        .events()
+        .all()
+        .iter()
+        .filter(|e| e.0 == s.contract && topic_is_symbol(env, &e.1, 0, symbol_short!("migrate")))
+        .collect();
+    assert_eq!(evs.len(), 1);
+    let event: MigratedEvent = TryFromVal::try_from_val(env, &evs[0].2).unwrap();
+    assert_eq!(event.admin, s.admin);
+    assert_eq!(event.from_version, 0);
+    assert_eq!(event.to_version, SCHEMA_VERSION);
+
+    // Nothing left to do: a second call changes nothing and emits nothing.
+    client.migrate();
+    let again = env
+        .events()
+        .all()
+        .iter()
+        .filter(|e| e.0 == s.contract && topic_is_symbol(env, &e.1, 0, symbol_short!("migrate")))
+        .count();
+    assert_eq!(again, 0);
 }
