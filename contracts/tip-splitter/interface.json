@@ -31,6 +31,18 @@
         {
           "name": "message",
           "type_": "string"
+        },
+        {
+          "name": "reference",
+          "type_": {
+            "option": {
+              "value_type": {
+                "bytes_n": {
+                  "n": 32
+                }
+              }
+            }
+          }
         }
       ]
     }
@@ -401,6 +413,16 @@
           "value": 39
         },
         {
+          "name": "TooManyAllowedTokens",
+          "value": 40
+        },
+        {
+          "name": "AboveMaxTipAmount",
+          "value": 41
+        },
+        {
+          "name": "InvalidMaximumAmount",
+          "value": 42
           "name": "NotAuthorized",
           "value": 40
         }
@@ -559,6 +581,26 @@
     "udt_struct_v0": {
       "lib": "",
       "name": "MinTipEvent",
+      "fields": [
+        {
+          "name": "amount",
+          "type_": {
+            "option": {
+              "value_type": "i128"
+            }
+          }
+        },
+        {
+          "name": "version",
+          "type_": "u32"
+        }
+      ]
+    }
+  },
+  {
+    "udt_struct_v0": {
+      "lib": "",
+      "name": "MaxTipEvent",
       "fields": [
         {
           "name": "amount",
@@ -1175,6 +1217,26 @@
   },
   {
     "function_v0": {
+      "name": "set_max_tip_amount",
+      "inputs": [
+        {
+          "name": "jar_id",
+          "type_": "string"
+        },
+        {
+          "name": "max_amount",
+          "type_": {
+            "option": {
+              "value_type": "i128"
+            }
+          }
+        }
+      ],
+      "outputs": []
+    }
+  },
+  {
+    "function_v0": {
       "name": "tip",
       "inputs": [
         {
@@ -1254,6 +1316,14 @@
                   "name": "TipRequest"
                 }
               }
+            }
+          }
+        },
+        {
+          "name": "token",
+          "type_": {
+            "option": {
+              "value_type": "address"
             }
           }
         }
@@ -1629,6 +1699,24 @@
   },
   {
     "function_v0": {
+      "name": "get_max_tip_amount",
+      "inputs": [
+        {
+          "name": "jar_id",
+          "type_": "string"
+        }
+      ],
+      "outputs": [
+        {
+          "option": {
+            "value_type": "i128"
+          }
+        }
+      ]
+    }
+  },
+  {
+    "function_v0": {
       "name": "get_min_tip_amount",
       "inputs": [
         {
@@ -1723,6 +1811,19 @@
       "inputs": [],
       "outputs": [
         "u32"
+      ]
+    }
+  },
+  {
+    "function_v0": {
+      "name": "get_allowed_tokens",
+      "inputs": [],
+      "outputs": [
+        {
+          "vec": {
+            "element_type": "address"
+          }
+        }
       ]
     }
   },

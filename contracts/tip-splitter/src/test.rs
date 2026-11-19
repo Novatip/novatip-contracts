@@ -804,13 +804,16 @@ fn tip_many_pays_every_jar_and_returns_a_seq_per_entry() {
                 jar_id: jar_one.clone(),
                 amount: 100,
                 message: String::from_str(env, "first"),
+                reference: None,
             },
             TipRequest {
                 jar_id: jar_two.clone(),
                 amount: 200,
                 message: String::from_str(env, "second"),
+                reference: None,
             },
         ],
+        &None,
     );
 
     // Read the events before touching the token: the test environment only
@@ -886,13 +889,16 @@ fn tip_many_rolls_back_every_entry_when_one_fails() {
                 jar_id: good.clone(),
                 amount: 100,
                 message: String::from_str(env, "ok"),
+                reference: None,
             },
             TipRequest {
                 jar_id: missing.clone(),
                 amount: 100,
                 message: String::from_str(env, "missing"),
+                reference: None,
             },
         ],
+        &None,
     );
 
     assert_eq!(result, Err(Ok(Error::JarNotFound.into())));
@@ -931,11 +937,11 @@ fn tip_many_rejects_empty_and_oversized_batches() {
     );
 
     assert_eq!(
-        client.try_tip_many(&tipper, &Vec::new(env)),
+        client.try_tip_many(&tipper, &Vec::new(env), &None),
         Err(Ok(Error::BatchEmpty.into()))
     );
     assert_eq!(
-        client.try_tip_many(&tipper, &batch_of(env, &jar_id, MAX_BATCH_TIPS + 1)),
+        client.try_tip_many(&tipper, &batch_of(env, &jar_id, MAX_BATCH_TIPS + 1), &None),
         Err(Ok(Error::BatchTooLarge.into()))
     );
 }
@@ -3794,13 +3800,13 @@ fn get_limits_describes_the_enforced_bounds() {
 
     let exact_batch = batch_of(env, &batch_jar, limits.max_batch_tips);
     assert_eq!(
-        client.tip_many(&tipper, &exact_batch).len(),
+        client.tip_many(&tipper, &exact_batch, &None).len(),
         limits.max_batch_tips
     );
 
     let over_batch = batch_of(env, &batch_jar, batch_count);
     assert_eq!(
-        client.try_tip_many(&tipper, &over_batch),
+        client.try_tip_many(&tipper, &over_batch, &None),
         Err(Ok(Error::BatchTooLarge.into()))
     );
 }
@@ -3814,6 +3820,7 @@ fn batch_of(env: &Env, jar_id: &String, n: u32) -> Vec<TipRequest> {
             jar_id: jar_id.clone(),
             amount: 1,
             message: String::from_str(env, "t"),
+            reference: None,
         });
     }
     tips
@@ -4844,10 +4851,11 @@ fn paused_jar_rejects_tips_until_unpaused() {
             jar_id: jar_id.clone(),
             amount: 100,
             message: String::from_str(env, "paused"),
+            reference: None,
         },
     ];
     assert_eq!(
-        client.try_tip_many(&tipper, &batch),
+        client.try_tip_many(&tipper, &batch, &None),
         Err(Ok(Error::JarPaused.into()))
     );
     // Balances are untouched by every rejected attempt.
@@ -9678,6 +9686,131 @@ fn tip_tipper_holding_final_share_preserves_all_balances() {
     assert_eq!(token.balance(&s.contract), 0);
 }
 
+/// #318: each `tip_many` entry's `tip` event echoes its own reference.
+#[test]
+fn tip_many_entries_echo_their_reference() {
+    let s = setup();
+    let env = &s.env;
+    let client = TipSplitterClient::new(env, &s.contract);
+    let token_admin = token::StellarAssetClient::new(env, &s.token);
+    let tipper = Address::generate(env);
+    token_admin.mint(&tipper, &100);
+    let (_, _, jar_id) = one_recipient_jar(env, &client, "@refs");
+
+    let reference = sample_reference(env, 7);
+    client.tip_many(
+        &tipper,
+        &vec![
+            env,
+            TipRequest {
+                jar_id: jar_id.clone(),
+                amount: 100,
+                message: String::from_str(env, "ref"),
+                reference: Some(reference.clone()),
+            },
+        ],
+        &None,
+    );
+    assert_eq!(
+        last_tip_event(env, &s.contract, &jar_id).reference,
+        Some(reference)
+    );
+}
+
+/// #321: the list starts with the default token, follows add and remove, and
+/// is capped with a typed error.
+#[test]
+fn get_allowed_tokens_tracks_the_allowlist_and_is_capped() {
+    let s = setup();
+    let env = &s.env;
+    let client = TipSplitterClient::new(env, &s.contract);
+
+    assert_eq!(client.get_allowed_tokens(), vec![env, s.token.clone()]);
+    let eurc = second_asset(env, &s.admin);
+    client.allow_token(&eurc);
+    client.allow_token(&eurc);
+    assert_eq!(
+        client.get_allowed_tokens(),
+        vec![env, s.token.clone(), eurc.clone()]
+    );
+    client.disallow_token(&eurc);
+    assert_eq!(client.get_allowed_tokens(), vec![env, s.token.clone()]);
+
+    for _ in 1..MAX_ALLOWED_TOKENS {
+        client.allow_token(&Address::generate(env));
+    }
+    assert_eq!(client.get_allowed_tokens().len(), MAX_ALLOWED_TOKENS);
+    assert_eq!(
+        client.try_allow_token(&Address::generate(env)),
+        Err(Ok(Error::TooManyAllowedTokens.into()))
+    );
+}
+
+/// #322: `tip_many` pays in an allowed token, rejects a disallowed one before
+/// any transfer, and skips the minimum for a non-default token.
+#[test]
+fn tip_many_pays_in_an_allowed_token() {
+    let s = setup();
+    let env = &s.env;
+    let client = TipSplitterClient::new(env, &s.contract);
+    let eurc = second_asset(env, &s.admin);
+    let eurc_client = token::Client::new(env, &eurc);
+    let tipper = Address::generate(env);
+    token::StellarAssetClient::new(env, &eurc).mint(&tipper, &100);
+    let (_, recipient, jar_id) = one_recipient_jar(env, &client, "@eurc");
+    client.set_min_tip_amount(&jar_id, &Some(1_000));
+    let batch = vec![
+        env,
+        TipRequest {
+            jar_id: jar_id.clone(),
+            amount: 100,
+            message: String::from_str(env, "eurc"),
+            reference: None,
+        },
+    ];
+
+    assert_eq!(
+        client.try_tip_many(&tipper, &batch, &Some(eurc.clone())),
+        Err(Ok(Error::TokenNotAllowed.into()))
+    );
+    client.allow_token(&eurc);
+    client.tip_many(&tipper, &batch, &Some(eurc.clone()));
+    assert_eq!(eurc_client.balance(&recipient), 100);
+}
+
+/// #323: owner-set maximum is validated against the minimum and rejects
+/// larger tips and previews with a typed error.
+#[test]
+fn max_tip_amount_caps_tips_and_previews() {
+    let s = setup();
+    let env = &s.env;
+    let client = TipSplitterClient::new(env, &s.contract);
+    let token_admin = token::StellarAssetClient::new(env, &s.token);
+    let tipper = Address::generate(env);
+    token_admin.mint(&tipper, &1_000);
+    let (_, _, jar_id) = one_recipient_jar(env, &client, "@capped");
+
+    client.set_min_tip_amount(&jar_id, &Some(50));
+    assert_eq!(
+        client.try_set_max_tip_amount(&jar_id, &Some(10)),
+        Err(Ok(Error::InvalidMaximumAmount.into()))
+    );
+    client.set_max_tip_amount(&jar_id, &Some(100));
+    assert_eq!(client.get_max_tip_amount(&jar_id), Some(100));
+
+    let msg = String::from_str(env, "big");
+    assert_eq!(
+        client.try_tip(&tipper, &jar_id, &101, &msg),
+        Err(Ok(Error::AboveMaxTipAmount.into()))
+    );
+    assert_eq!(
+        client.try_preview_tip(&jar_id, &tipper, &101),
+        Err(Ok(Error::AboveMaxTipAmount.into()))
+    );
+    client.tip(&tipper, &jar_id, &100, &msg);
+
+    client.set_max_tip_amount(&jar_id, &None);
+    assert_eq!(client.get_max_tip_amount(&jar_id), None);
 // ---------------------------------------------------------------------------
 // #324 — the jar owner can cancel recurring tips into their jar
 // ---------------------------------------------------------------------------

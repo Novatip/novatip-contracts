@@ -5,6 +5,10 @@ All notable changes to `novatip-contracts` are documented here.
 ## [Unreleased]
 
 ### Added
+- `tip_many(from, tips, token)` takes an optional `token` for the whole batch, checked against the allowlist like `tip_in_token`; the jar minimum applies only to the default token (#322). `TipRequest` gains `reference: Option<BytesN<32>>`, echoed in each entry's `tip` event (#318)
+- `get_allowed_tokens() -> Vec<Address>` lists the allowlist, default first, capped at `MAX_ALLOWED_TOKENS` (10) with the appended error `TooManyAllowedTokens` (40) (#321)
+- `set_max_tip_amount(jar_id, max_amount)` and `get_max_tip_amount(jar_id)`: an optional per-jar maximum, owner only, at least the minimum, enforced by default-token tips and previews, with a `max_tip` event and appended errors `AboveMaxTipAmount` (41) and `InvalidMaximumAmount` (42) (#323)
+- `version()` is now `8`: `tip_many` gained a `token` argument and `TipRequest` a `reference` field, so existing callers must pass `None` for both (#318, #322)
 - `migrate()` (admin only) moves stored state to the installed build's schema after an `upgrade`, once per `SCHEMA_VERSION`, and emits a `migrate` event with `MigratedEvent { version, admin, from_version, to_version }` (#325)
 - `update_recurring(id, amount, message)` lets the supporter change a recurring tip without cancelling, keeping the id and `next_due_ledger`; validated like `create_recurring` and published as `recr_upd` (#316)
 - `get_jar_info(jar_id) -> JarInfo` returns owner, splits, locked, paused, minimum tip, minimum accepted tip, totals and the current fee in one call (#319)

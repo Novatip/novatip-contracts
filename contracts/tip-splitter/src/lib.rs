@@ -36,6 +36,9 @@ const MAX_RECIPIENTS: u32 = 20;
 /// larger batch would abort on budget rather than on a typed error, which is
 /// exactly the failure this bound exists to convert into a named one.
 const MAX_BATCH_TIPS: u32 = 10;
+/// Most tokens the allowlist may hold, the default token included (#321).
+/// Bounds the `Vec` that `get_allowed_tokens` returns.
+const MAX_ALLOWED_TOKENS: u32 = 10;
 /// Longest `jar_id`, in bytes, accepted by `create_jar`.
 ///
 /// The id is used as a storage key, an event topic, and a public URL slug, so
@@ -163,6 +166,9 @@ pub struct TipRequest {
     pub jar_id: String,
     pub amount: i128,
     pub message: String,
+    /// Optional opaque 32-byte client reference echoed in this entry's `tip`
+    /// event, as `tip_with_ref` does for a single tip (#318).
+    pub reference: Option<BytesN<32>>,
 }
 
 // Internal argument bundle for `settle_tip` (#335). Named fields make the two
@@ -302,6 +308,11 @@ pub enum DataKey {
     /// Used as the `previous_hash` in the next upgrade event. Absent on a
     /// deployment that has never been upgraded since this key was introduced.
     WasmHash,
+    /// Optional maximum tip amount for a jar keyed by its public slug (#323).
+    MaxTip(String),
+    /// Every allowed token in insertion order, default first (#321). Instance
+    /// storage like `AllowedToken`; bounded by `MAX_ALLOWED_TOKENS`.
+    AllowedTokens,
     /// Storage schema version recorded by `migrate` (#325). Instance storage;
     /// absent on a deployment that has never migrated, read as 0.
     SchemaVersion,
@@ -350,6 +361,9 @@ pub enum Error {
     BatchEmpty = 37,
     BatchTooLarge = 38,
     JarPaused = 39,
+    TooManyAllowedTokens = 40,
+    AboveMaxTipAmount = 41,
+    InvalidMaximumAmount = 42,
     NotAuthorized = 40,
 }
 
@@ -423,6 +437,13 @@ pub struct JarRenamedEvent {
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct MinTipEvent {
+    pub version: u32,
+    pub amount: Option<i128>,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MaxTipEvent {
     pub version: u32,
     pub amount: Option<i128>,
 }
@@ -562,7 +583,19 @@ impl TipSplitter {
         env.storage().instance().set(&DataKey::Token, &token);
         env.storage()
             .instance()
-            .set(&DataKey::AllowedToken(token), &true);
+            .set(&DataKey::AllowedToken(token.clone()), &true);
+        env.storage()
+            .instance()
+            .set(&DataKey::AllowedTokens, &Vec::from_array(&env, [token]));
+    }
+
+    /// The allowlist as a list, default token first. A deployment created
+    /// before #321 has no list yet and reports just the default token.
+    fn allowed_tokens(env: &Env) -> Vec<Address> {
+        env.storage()
+            .instance()
+            .get(&DataKey::AllowedTokens)
+            .unwrap_or_else(|| Vec::from_array(env, [Self::get_token(env.clone())]))
     }
 
     /// The contract admin, which every admin-gated entry point requires.
@@ -575,6 +608,14 @@ impl TipSplitter {
 
     pub fn allow_token(env: Env, token: Address) {
         let admin = Self::require_admin(&env);
+        let mut list = Self::allowed_tokens(&env);
+        if !list.contains(&token) {
+            if list.len() >= MAX_ALLOWED_TOKENS {
+                panic_with_error!(&env, Error::TooManyAllowedTokens);
+            }
+            list.push_back(token.clone());
+            env.storage().instance().set(&DataKey::AllowedTokens, &list);
+        }
         env.storage()
             .instance()
             .set(&DataKey::AllowedToken(token.clone()), &true);
@@ -598,6 +639,11 @@ impl TipSplitter {
         env.storage()
             .instance()
             .remove(&DataKey::AllowedToken(token.clone()));
+        let mut list = Self::allowed_tokens(&env);
+        if let Some(i) = list.first_index_of(&token) {
+            list.remove(i);
+            env.storage().instance().set(&DataKey::AllowedTokens, &list);
+        }
         env.events().publish(
             (symbol_short!("tk_dis"),),
             TokenAllowlistEvent {
@@ -943,6 +989,9 @@ impl TipSplitter {
         env.storage()
             .persistent()
             .remove(&DataKey::MinTip(jar_id.clone()));
+        env.storage()
+            .persistent()
+            .remove(&DataKey::MaxTip(jar_id.clone()));
 
         env.events().publish(
             (symbol_short!("jar_del"), jar_id.clone()),
@@ -1104,6 +1153,15 @@ impl TipSplitter {
                 .extend_ttl(&new_min_key, JAR_TTL_THRESHOLD, JAR_TTL_LEDGERS);
             env.storage().persistent().remove(&old_min_key);
         }
+        let old_max_key = DataKey::MaxTip(jar_id.clone());
+        if let Some(max_amount) = env.storage().persistent().get::<_, i128>(&old_max_key) {
+            let new_max_key = DataKey::MaxTip(new_jar_id.clone());
+            env.storage().persistent().set(&new_max_key, &max_amount);
+            env.storage()
+                .persistent()
+                .extend_ttl(&new_max_key, JAR_TTL_THRESHOLD, JAR_TTL_LEDGERS);
+            env.storage().persistent().remove(&old_max_key);
+        }
 
         env.events().publish(
             (symbol_short!("jar_rnm"), jar_id.clone()),
@@ -1125,6 +1183,15 @@ impl TipSplitter {
                 if amount <= 0 {
                     panic_with_error!(&env, Error::InvalidMinimumAmount);
                 }
+                if let Some(max) = env
+                    .storage()
+                    .persistent()
+                    .get::<DataKey, i128>(&DataKey::MaxTip(jar_id.clone()))
+                {
+                    if amount > max {
+                        panic_with_error!(&env, Error::InvalidMinimumAmount);
+                    }
+                }
                 env.storage().persistent().set(&min_key, &amount);
                 env.storage()
                     .persistent()
@@ -1144,6 +1211,55 @@ impl TipSplitter {
         );
     }
 
+    /// Set or clear an optional per-jar maximum tip (#323), mirroring
+    /// `set_min_tip_amount`. Owner only; the maximum must be positive and no
+    /// lower than the jar's minimum. Enforced for the default token only.
+    pub fn set_max_tip_amount(env: Env, jar_id: String, max_amount: Option<i128>) {
+        let key = DataKey::Jar(jar_id.clone());
+        let jar: Jar = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .unwrap_or_else(|| panic_with_error!(&env, Error::JarNotFound));
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, JAR_TTL_THRESHOLD, JAR_TTL_LEDGERS);
+        jar.owner.require_auth();
+
+        let max_key = DataKey::MaxTip(jar_id.clone());
+        match max_amount {
+            Some(amount) => {
+                if amount <= 0 {
+                    panic_with_error!(&env, Error::InvalidMaximumAmount);
+                }
+                if let Some(min) = env
+                    .storage()
+                    .persistent()
+                    .get::<DataKey, i128>(&DataKey::MinTip(jar_id.clone()))
+                {
+                    if amount < min {
+                        panic_with_error!(&env, Error::InvalidMaximumAmount);
+                    }
+                }
+                env.storage().persistent().set(&max_key, &amount);
+                env.storage()
+                    .persistent()
+                    .extend_ttl(&max_key, JAR_TTL_THRESHOLD, JAR_TTL_LEDGERS);
+            }
+            None => {
+                env.storage().persistent().remove(&max_key);
+            }
+        }
+
+        env.events().publish(
+            (symbol_short!("max_tip"), jar_id),
+            MaxTipEvent {
+                version: 1,
+                amount: max_amount,
+            },
+        );
+    }
+
     pub fn tip(env: Env, from: Address, jar_id: String, amount: i128, message: String) -> u64 {
         Self::tip_inner(env, from, jar_id, amount, message, None)
     }
@@ -1159,7 +1275,12 @@ impl TipSplitter {
         Self::tip_inner(env, from, jar_id, amount, message, reference)
     }
 
-    pub fn tip_many(env: Env, from: Address, tips: Vec<TipRequest>) -> Vec<u64> {
+    pub fn tip_many(
+        env: Env,
+        from: Address,
+        tips: Vec<TipRequest>,
+        token: Option<Address>,
+    ) -> Vec<u64> {
         // One signature covers the whole batch; no entry re-requires it.
         from.require_auth();
         if env.storage().instance().has(&DataKey::Paused) {
@@ -1171,7 +1292,23 @@ impl TipSplitter {
         if tips.len() > MAX_BATCH_TIPS {
             panic_with_error!(&env, Error::BatchTooLarge);
         }
-        let token_addr: Address = Self::get_token(env.clone());
+        // One token per batch (#322), checked like `tip_in_token` before any
+        // transfer; the minimum applies only to the default token.
+        let default: Address = Self::get_token(env.clone());
+        let token_addr = match token {
+            Some(t) => {
+                if !env
+                    .storage()
+                    .instance()
+                    .has(&DataKey::AllowedToken(t.clone()))
+                {
+                    panic_with_error!(&env, Error::TokenNotAllowed);
+                }
+                t
+            }
+            None => default.clone(),
+        };
+        let enforce_min = token_addr == default;
 
         let mut seqs: Vec<u64> = Vec::new(&env);
         for i in 0..tips.len() {
@@ -1184,8 +1321,8 @@ impl TipSplitter {
                     amount: req.amount,
                     message: &req.message,
                     token_addr: &token_addr,
-                    enforce_min: true,
-                    reference: None,
+                    enforce_min,
+                    reference: req.reference.clone(),
                 },
             );
             seqs.push_back(seq);
@@ -1310,6 +1447,7 @@ impl TipSplitter {
                     .persistent()
                     .extend_ttl(&min_key, JAR_TTL_THRESHOLD, JAR_TTL_LEDGERS);
             }
+            Self::check_max_tip(env, jar_id, amount);
         }
 
         // Issue #91: extend the contract instance TTL alongside the jar so the
@@ -1994,7 +2132,7 @@ impl TipSplitter {
 
         let jar = Self::load_jar(&env, &jar_id);
 
-        let min_key = DataKey::MinTip(jar_id);
+        let min_key = DataKey::MinTip(jar_id.clone());
         if let Some(min_amount) = env.storage().persistent().get::<DataKey, i128>(&min_key) {
             if amount < min_amount {
                 panic_with_error!(&env, Error::BelowMinTipAmount);
@@ -2003,6 +2141,7 @@ impl TipSplitter {
                 .persistent()
                 .extend_ttl(&min_key, JAR_TTL_THRESHOLD, JAR_TTL_LEDGERS);
         }
+        Self::check_max_tip(&env, &jar_id, amount);
 
         let (_, net) = Self::split_fee(&env, amount);
         Self::compute_shares(&env, &jar.splits, net)
@@ -2034,7 +2173,7 @@ impl TipSplitter {
         }
         let jar = Self::load_jar(&env, &jar_id);
 
-        let min_key = DataKey::MinTip(jar_id);
+        let min_key = DataKey::MinTip(jar_id.clone());
         if let Some(min_amount) = env.storage().persistent().get::<DataKey, i128>(&min_key) {
             if amount < min_amount {
                 panic_with_error!(&env, Error::BelowMinTipAmount);
@@ -2044,8 +2183,30 @@ impl TipSplitter {
                 .extend_ttl(&min_key, JAR_TTL_THRESHOLD, JAR_TTL_LEDGERS);
         }
 
+        Self::check_max_tip(&env, &jar_id, amount);
+
         let (_, net) = Self::split_fee(&env, amount);
         Self::payout_amounts(&env, &jar.splits, &from, net)
+    }
+
+    /// Reject `amount` above the jar's optional maximum (#323).
+    fn check_max_tip(env: &Env, jar_id: &String, amount: i128) {
+        if let Some(max) = env
+            .storage()
+            .persistent()
+            .get::<DataKey, i128>(&DataKey::MaxTip(jar_id.clone()))
+        {
+            if amount > max {
+                panic_with_error!(env, Error::AboveMaxTipAmount);
+            }
+        }
+    }
+
+    pub fn get_max_tip_amount(env: Env, jar_id: String) -> Option<i128> {
+        if !env.storage().persistent().has(&DataKey::Jar(jar_id.clone())) {
+            panic_with_error!(&env, Error::JarNotFound);
+        }
+        env.storage().persistent().get(&DataKey::MaxTip(jar_id))
     }
 
     pub fn get_min_tip_amount(env: Env, jar_id: String) -> Option<i128> {
@@ -2154,6 +2315,11 @@ impl TipSplitter {
 
     pub fn version(_env: Env) -> u32 {
         INTERFACE_VERSION
+    }
+
+    /// Every allowed token, default first (#321).
+    pub fn get_allowed_tokens(env: Env) -> Vec<Address> {
+        Self::allowed_tokens(&env)
     }
 
     pub fn is_token_allowed(env: Env, token: Address) -> bool {
