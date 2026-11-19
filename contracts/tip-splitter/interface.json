@@ -335,6 +335,10 @@
         {
           "name": "JarPaused",
           "value": 39
+        },
+        {
+          "name": "NotAuthorized",
+          "value": 40
         }
       ]
     }
@@ -740,6 +744,30 @@
     }
   },
   {
+    "udt_struct_v0": {
+      "lib": "",
+      "name": "MigratedEvent",
+      "fields": [
+        {
+          "name": "admin",
+          "type_": "address"
+        },
+        {
+          "name": "from_version",
+          "type_": "u32"
+        },
+        {
+          "name": "to_version",
+          "type_": "u32"
+        },
+        {
+          "name": "version",
+          "type_": "u32"
+        }
+      ]
+    }
+  },
+  {
     "function_v0": {
       "name": "__constructor",
       "inputs": [
@@ -991,6 +1019,13 @@
           }
         }
       ],
+      "outputs": []
+    }
+  },
+  {
+    "function_v0": {
+      "name": "migrate",
+      "inputs": [],
       "outputs": []
     }
   },
@@ -1302,6 +1337,10 @@
     "function_v0": {
       "name": "cancel_recurring",
       "inputs": [
+        {
+          "name": "caller",
+          "type_": "address"
+        },
         {
           "name": "id",
           "type_": "u128"

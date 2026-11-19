@@ -91,7 +91,7 @@ one belongs to a jar, the other to a `(jar, supporter)` pair.
 | `get_held(recipient) -> i128` | — | How much the contract is holding for `recipient` because a past tip could not deliver their share. `0` when nothing is held. |
 | `withdraw_held(recipient)` | `recipient` | Pay a recipient their held balance once they can receive again. Rejected with `NothingHeld` when nothing is owed. Emits a `withdraw` event with `HeldWithdrawnEvent { version, amount }` data. |
 | `create_recurring(supporter, jar_id, amount, period_ledgers, message) -> u128` | `supporter` | Register a recurring-tip schedule. Validates the jar exists and the amount/message pass the same checks `tip` applies; `period_ledgers` must be non-zero. Assigns a fresh id, stores the entry with its first `next_due_ledger`, and emits a `recr_add` event. Returns the id. The schedule moves funds through `collect_recurring`: the supporter must have approved this contract as a token spender for at least `amount` per period. |
-| `cancel_recurring(id)` | the entry's `supporter` | Remove a recurring-tip record. Emits a `recr_del` event. |
+| `cancel_recurring(caller, id)` | `caller`: the entry's `supporter` or the jar's `owner` | Remove a recurring-tip record. Either party may cancel (#324); anyone else gets `NotAuthorized`. Emits a `recr_del` event naming who cancelled. |
 | `get_recurring(id) -> Recurring` | — | Read a stored recurring-tip entry. Panics with `RecurringNotFound` for an unknown id. |
 | `collect_recurring(id)` | — (any caller, typically a keeper) | Collect **one due period** of a recurring tip (#175). Pays the schedule's `amount` from the supporter's approved allowance with `transfer_from` (this contract is the spender), split by the same arithmetic as `tip`, and publishes the identical `tip` event. `next_due_ledger` advances by exactly `period_ledgers`. Too early — `NotDue`; allowance below `amount` (exhausted or expired) — `InsufficientAllowance`; supporter balance below `amount` — `InsufficientBalance`; all raised before any transfer, with zero state change. See [collecting recurring tips](#collecting-a-due-recurring-tip-175). |
 | `tip(from, jar_id, amount, message)` | `from` | Transfer `amount` of the **default token** from `from`, split across the jar's recipients. Emits a `tip` event carrying the per-recipient breakdown and the token paid in. Rejects amounts below the jar's minimum with `BelowMinTipAmount`. |
@@ -126,6 +126,7 @@ one belongs to a jar, the other to a `(jar, supporter)` pair.
 | `resume()` | contract `admin` | Lift a pause. Emits a `resume` event in the shared admin shape with `paused: false`. |
 | `is_paused() -> bool` | — | Whether tipping is currently paused. Reads instance storage. |
 | `upgrade(new_wasm_hash)` | contract `admin` | Replace the running contract Wasm while keeping the address and all stored state. Emits an `upgrade` event carrying the previous and new hashes. |
+| `migrate()` | contract `admin` | Bring stored state up to this build's schema after an `upgrade` (#325). Runs once per schema version and emits a `migrate` event; a call with nothing to do changes nothing. |
 | `get_limits() -> Limits` | — | The bounds this contract enforces: `bps_denom`, `max_recipients`, `max_message_len`, `max_batch_tips`. Reads no storage. |
 | `get_limits() -> Limits` | — | The bounds this contract enforces: `bps_denom`, `max_recipients`, `max_message_len`, `max_jar_id_len`. Reads no storage. |
 | `version() -> u32` | — | Which interface shape this deployment speaks. Reads no storage. See [detecting the interface version](#detecting-the-interface-version). |
@@ -762,6 +763,7 @@ does not check the admin.
 | `transfer_admin(new_admin)` | Hand the role to another address. It takes effect immediately; there is no acceptance step. |
 | `pause()` / `resume()` | Stop and restart `tip`, `tip_with_ref` and `tip_in_token`. |
 | `upgrade(new_wasm_hash)` | Replace the running Wasm, keeping the address and all stored state. |
+| `migrate()` | Run the stored-state migration for the installed build, once per schema version. |
 
 The powers are configuration, not custody. The admin **cannot**:
 
@@ -845,6 +847,7 @@ exactly the way issue #87 found it had.
 | 37 | `BatchEmpty` | `tip_many` was given a batch with no entries. Raised before any jar is looked up, so an empty batch never moves funds. |
 | 38 | `BatchTooLarge` | `tip_many` was given more entries than `MAX_BATCH_TIPS` (10). Raised before any jar is looked up. |
 | 39 | `JarPaused` | A tip was attempted to a jar its owner has paused with `set_jar_paused` (#45). Raised after `JarNotFound` and before any transfer, so a rejected tip moves no funds; reads stay available while the jar is paused. |
+| 40 | `NotAuthorized` | `cancel_recurring` was called by an address that is neither the schedule's supporter nor the owner of its jar (#324). |
 
 Error codes are part of the public interface: `@novatip/sdk` and the frontend
 both map these numbers to user-facing messages. New variants are **appended**
@@ -1078,7 +1081,7 @@ positional pair.
 ### `recr_add` / `recr_del` — recurring-tip registration and cancellation
 
 - **`recr_add` Topics:** `(symbol "recr_add", supporter: Address)`, **Data:** `id: u128`
-- **`recr_del` Topics:** `(symbol "recr_del", supporter: Address)`, **Data:** `id: u128`
+- **`recr_del` Topics:** `(symbol "recr_del", supporter: Address)`, **Data:** `(id: u128, cancelled_by: Address)`, where `cancelled_by` is the supporter or the jar owner (#324)
 
 Publishes the assigned schedule id (and `recr_del` the id it removed).
 A schedule becomes a payment rail through `collect_recurring` (#175): the
@@ -1113,6 +1116,7 @@ events are:
 | `resume` | `PauseEvent` | `paused: false` |
 | `adm_xfer` | `AdminTransferredEvent` | `new_admin: Address` (`admin` is the outgoing key) |
 | `upgrade` | `UpgradedEvent` | `previous_hash: Option<BytesN<32>>`, `new_hash: BytesN<32>` |
+| `migrate` | `MigratedEvent` | `from_version: u32`, `to_version: u32` |
 
 `tip_hook` records who changed the post-tip hook configuration and to what
 (#176). `reg_set` records every installation or removal of the `create_jar`
@@ -1126,6 +1130,20 @@ upgrade reports the hash installed by the previous one. The new build's
 `INTERFACE_VERSION` cannot be read inside the upgrade transaction — the
 executing code is still the old build — so clients call `version()` after the
 ledger closes if they need it.
+
+### Upgrade, then migrate (#325)
+
+`upgrade` swaps the code but cannot transform stored state. A build that
+changes storage bumps `SCHEMA_VERSION` and adds a step to `migrate`, guarded
+by the stored schema version. The procedure is:
+
+1. Install and call `upgrade(new_wasm_hash)`.
+2. In a later transaction, once the new code is live, call `migrate()`.
+
+`migrate` is admin-only and idempotent: each step runs once, the new version
+is recorded, and a `migrate` event reports `from_version` and `to_version`.
+Calling it again does nothing. A deployment that has never migrated reads as
+schema version 0.
 
 ## Locking a jar's splits
 
