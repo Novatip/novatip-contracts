@@ -77,19 +77,19 @@ one belongs to a jar, the other to a `(jar, supporter)` pair.
 | `__constructor(admin, token)` | — | Deploy-time init. Stores the admin and USDC token address, and puts that token on the tip allowlist as its first entry. |
 | `create_jar(owner, jar_id, splits)` | `owner`, plus the `registrar`'s co-signature over `(jar_id, owner)` while one is registered | Register a new jar. Fails if the slug is not a canonical `@`-prefixed `[a-z0-9_-]{3,32}` slug, already exists, or splits are invalid. Emits a `jar_crtd` event. See [the registrar gate](#the-jar-registrar-and-its-trust-model-178). |
 | `update_splits(jar_id, splits)` | jar `owner`, plus every current recipient whose share **decreases or is removed** when the jar is locked | Replace a jar's splits. Subject to the same validation as `create_jar`. On a locked jar the owner alone cannot cut a collaborator — see [`lock_splits`](#locking-a-jars-splits). Emits a `splits` event. |
-| `lock_splits(jar_id)` | jar `owner` | Lock a jar so `update_splits` needs each reduced/removed recipient's consent. Emits a `lock` event with data `true`. |
-| `unlock_splits(jar_id)` | jar `owner` **and every current recipient** | Remove the lock. Consent mirrors a reduction: all recipients must sign, or the owner could disarm the lock and then cut shares. Emits a `lock` event with data `false`. |
+| `lock_splits(jar_id)` | jar `owner` | Lock a jar so `update_splits` needs each reduced/removed recipient's consent. Emits a `lock` event with `JarLockEvent { version, locked: true }` data. |
+| `unlock_splits(jar_id)` | jar `owner` **and every current recipient** | Remove the lock. Consent mirrors a reduction: all recipients must sign, or the owner could disarm the lock and then cut shares. Emits a `lock` event with `JarLockEvent { version, locked: false }` data. |
 | `is_splits_locked(jar_id) -> bool` | — | Whether the jar's splits are locked. Panics with `JarNotFound` if the slug is free. |
-| `set_jar_paused(jar_id, paused)` | jar `owner` | Pause (`true`) or resume (`false`) tipping for one jar (#45). While paused, every tip entry point rejects the jar with `JarPaused`; reads stay available. The flag survives `transfer_jar_ownership`. Emits a `jar_pause` event carrying the new value. See [pausing a jar](#pausing-a-jar-45). |
+| `set_jar_paused(jar_id, paused)` | jar `owner` | Pause (`true`) or resume (`false`) tipping for one jar (#45). While paused, every tip entry point rejects the jar with `JarPaused`; reads stay available. The flag survives `transfer_jar_ownership`. Emits a `jar_pause` event with `JarPausedEvent { version, paused }` data. See [pausing a jar](#pausing-a-jar-45). |
 | `is_jar_paused(jar_id) -> bool` | — | Whether tipping is currently paused for the jar. Panics with `JarNotFound` if the slug is free. |
 | `leave_jar(jar_id, recipient)` | `recipient` | Remove `recipient` from the jar's splits. Their share is added to the last remaining entry so the splits still sum to 10 000. Rejected with `SoleRecipient` (only entry) or `NotRecipient` (not in the jar). Emits a `splits` event. |
 | `set_min_tip_amount(jar_id, min_amount)` | jar `owner` | Set or clear an optional minimum tip amount for a jar. `min_amount` must be strictly positive (`> 0`) or `None` to clear. Emits a `min_tip` event. |
 | `transfer_jar_ownership(jar_id, new_owner)` | current jar `owner` and `new_owner` | Hand control of a jar to `new_owner`. The exact `(jar_id, new_owner)` pair must be signed by both parties; a transfer to the current owner is rejected. Splits are unchanged. Emits a `jar_xfer` event carrying both owners. |
-| `delete_jar(jar_id)` | current jar `owner` | Delete a registered jar and free its slug so it can be recreated. Removes the jar, its stats, and any minimum-tip value for that slug. Emits a `jar_del` event. |
-| `rename_jar(jar_id, new_jar_id)` | jar `owner` | Move a jar, its stats and its minimum to a new slug. The old slug stops resolving immediately; `new_jar_id` must be free and pass the same length checks as `create_jar`. Emits a `jar_rnm` event carrying both ids. |
+| `delete_jar(jar_id)` | current jar `owner` | Delete a registered jar and free its slug so it can be recreated. Removes the jar, its stats, and any minimum-tip value for that slug. Emits a `jar_del` event with the jar id as a topic. |
+| `rename_jar(jar_id, new_jar_id)` | jar `owner` | Move a jar, its stats and its minimum to a new slug. The old slug stops resolving immediately; `new_jar_id` must be free and pass the same length checks as `create_jar`. Emits a `jar_rnm` event with the old jar id as a topic and `JarRenamedEvent { version, jar_id, new_jar_id }` data. |
 | `tip(from, jar_id, amount, message)` | `from` | Move `amount` USDC out of `from` and route it across the jar's recipients. A recipient who cannot receive the token has their share **escrowed in the contract** (see `get_held`/`withdraw_held`) instead of reverting the tip. Emits a `tip` event carrying the per-recipient breakdown. Rejects amounts below the jar's minimum with `BelowMinTipAmount`. |
 | `get_held(recipient) -> i128` | — | How much the contract is holding for `recipient` because a past tip could not deliver their share. `0` when nothing is held. |
-| `withdraw_held(recipient)` | `recipient` | Pay a recipient their held balance once they can receive again. Rejected with `NothingHeld` when nothing is owed. Emits a `withdraw` event. |
+| `withdraw_held(recipient)` | `recipient` | Pay a recipient their held balance once they can receive again. Rejected with `NothingHeld` when nothing is owed. Emits a `withdraw` event with `HeldWithdrawnEvent { version, amount }` data. |
 | `create_recurring(supporter, jar_id, amount, period_ledgers, message) -> u128` | `supporter` | Register a recurring-tip schedule. Validates the jar exists and the amount/message pass the same checks `tip` applies; `period_ledgers` must be non-zero. Assigns a fresh id, stores the entry with its first `next_due_ledger`, and emits a `recr_add` event. Returns the id. The schedule moves funds through `collect_recurring`: the supporter must have approved this contract as a token spender for at least `amount` per period. |
 | `cancel_recurring(id)` | the entry's `supporter` | Remove a recurring-tip record. Emits a `recr_del` event. |
 | `get_recurring(id) -> Recurring` | — | Read a stored recurring-tip entry. Panics with `RecurringNotFound` for an unknown id. |
@@ -124,6 +124,9 @@ one belongs to a jar, the other to a `(jar, supporter)` pair.
 | `transfer_admin(new_admin)` | contract `admin` | Hand admin control to `new_admin`. Rejected with `AdminExists` when it is already the current admin. Emits an `adm_xfer` event carrying the outgoing admin and `new_admin`. |
 | `pause()` | contract `admin` | Pause tipping: `tip`, `tip_with_ref` and `tip_in_token` reject with `ContractPaused`. Emits a `pause` event in the shared admin shape with `paused: true`. |
 | `resume()` | contract `admin` | Lift a pause. Emits a `resume` event in the shared admin shape with `paused: false`. |
+| `transfer_admin(new_admin)` | contract `admin` | Hand admin control to `new_admin`. Rejected with `AdminExists` when it is already the current admin. Emits an `adm_xfer` event with `AdminTransferredEvent { version, previous_admin, new_admin }` data. |
+| `pause()` | contract `admin` | Pause tipping: `tip`, `tip_with_ref` and `tip_in_token` reject with `ContractPaused`. Emits a `pause` event. |
+| `resume()` | contract `admin` | Lift a pause. Emits a `resume` event. |
 | `is_paused() -> bool` | — | Whether tipping is currently paused. Reads instance storage. |
 | `upgrade(new_wasm_hash)` | contract `admin` | Replace the running contract Wasm while keeping the address and all stored state. Emits an `upgrade` event carrying the previous and new hashes. |
 | `get_limits() -> Limits` | — | The bounds this contract enforces: `bps_denom`, `max_recipients`, `max_message_len`, `max_batch_tips`. Reads no storage. |
@@ -144,8 +147,8 @@ written as raised only when every earlier check has passed.
 | `update_splits(jar_id, splits)` | jar `owner` | `JarNotFound` → `SplitsEmpty` → `TooManyRecipients` → `SplitOutOfRange` / `DuplicateRecipient` (per entry) → `SplitSumNot100Pct` | Replace a jar's splits. Subject to the same validation as `create_jar`. Emits a `splits` event. |
 | `set_min_tip_amount(jar_id, min_amount)` | jar `owner` | `JarNotFound` → `InvalidMinimumAmount` | Set or clear an optional minimum tip amount for a jar. `min_amount` must be strictly positive (`> 0`) or `None` to clear. Emits a `min_tip` event. |
 | `transfer_jar_ownership(jar_id, new_owner)` | current jar `owner` and `new_owner` | `JarNotFound` → `InvalidRecipient` (new owner is the current owner, the contract itself, or the token) | Hand control of a jar to `new_owner`. The exact `(jar_id, new_owner)` pair is signed by both owners. Splits are unchanged. Emits a `jar_xfer` event carrying both owners. |
-| `delete_jar(jar_id)` | current jar `owner` | `JarNotFound` | Delete a registered jar and free its slug for reuse. Removes the jar, its stats, and the associated minimum-tip value. Emits a `jar_del` event. |
-| `rename_jar(jar_id, new_jar_id)` | jar `owner` | `InvalidJarId` (new id not a canonical `@`-prefixed `[a-z0-9_-]{3,32}` slug) → `JarNotFound` → `JarIdInUse` | Move a jar, its stats and its minimum to `new_jar_id`. The old id stops resolving once the move is complete. Emits a `jar_rnm` event carrying both ids. |
+| `delete_jar(jar_id)` | current jar `owner` | `JarNotFound` | Delete a registered jar and free its slug for reuse. Removes the jar, its stats, and the associated minimum-tip value. Emits a `jar_del` event with the jar id as a topic. |
+| `rename_jar(jar_id, new_jar_id)` | jar `owner` | `InvalidJarId` (new id not a canonical `@`-prefixed `[a-z0-9_-]{3,32}` slug) → `JarNotFound` → `JarIdInUse` | Move a jar, its stats and its minimum to `new_jar_id`. The old id stops resolving once the move is complete. Emits a `jar_rnm` event with the old jar id as a topic and `JarRenamedEvent { version, jar_id, new_jar_id }` data. |
 | `tip(from, jar_id, amount, message)` | `from` | `ContractPaused` → `NotInitialized` → `AmountZero` (amount = 0) / `AmountNegative` (amount < 0) → `MessageTooLong` → `JarNotFound` → `JarPaused` → `BelowMinTipAmount` → `InsufficientBalance` → `SplitAmountTooSmall` (a share truncates to zero) / `AmountOverflow` (`amount * bps` overflows `i128`) | Transfer `amount` USDC from `from`, split across the jar's recipients. Emits a `tip` event carrying the per-recipient breakdown. Rejects amounts below the jar's minimum with `BelowMinTipAmount` and amounts that cannot pay every recipient with `SplitAmountTooSmall`; see [the smallest amount a jar accepts](#the-smallest-amount-a-jar-accepts-86). A failing token `transfer` reverts the whole call with the **token contract's own error**, not one of this contract's codes (e.g. an insufficient balance). |
 | `get_jar(jar_id) -> Jar` | — | `JarNotFound` | Read a jar's configuration. Panics with `JarNotFound` if the slug is free. |
 | `get_jar_owner(jar_id) -> Address` | — | `JarNotFound` | Read just a jar's owner. Panics with `JarNotFound` if the slug is free. |
@@ -949,12 +952,16 @@ unchanged by a transfer, so no `splits` event accompanies this one.
 
 ### `jar_del` — published on every successful `delete_jar`
 
-- **Topics:** `(symbol "jar_del")`
-- **Data:** `JarDeletedEvent { jar_id: String }`
+- **Topics:** `(symbol "jar_del", jar_id: String)`
+- **Data:** `JarDeletedEvent { version: u32, jar_id: String }`
 
 Lets an indexer drop a jar from its cached list as soon as the slug is retired,
 without polling `jar_exists` or re-reading the jar. A deleted slug is free for
 `create_jar` to reuse immediately after the write settles.
+
+The jar id is a topic, like every other jar event, so a per-jar subscription
+receives the deletion instead of having to decode every `jar_del` payload. It
+remains in the data as well so the event is self-describing.
 
 ### `min_tip` — published on every successful `set_min_tip_amount`
 
@@ -1027,15 +1034,16 @@ whether an address is a recipient *now*, use
 ### `lock` — published on `lock_splits` and `unlock_splits`
 
 - **Topics:** `(symbol "lock", jar_id: String)`
-- **Data:** `locked: bool` (`true` when locked, `false` when unlocked)
+- **Data:** `JarLockEvent { version: u32, locked: bool }` (`true` when locked, `false` when unlocked)
 
 Lets an indexer cache whether a jar protects its collaborators against a
-unilateral owner edit (#173).
+unilateral owner edit (#173). The flag is named and versioned, so a decoder
+reads it by field rather than relying on the payload being a bare `bool`.
 
 ### `jar_pause` — published on every `set_jar_paused`
 
 - **Topics:** `(symbol "jar_pause", jar_id: String)`
-- **Data:** `paused: bool` (`true` when paused, `false` when resumed)
+- **Data:** `JarPausedEvent { version: u32, paused: bool }` (`true` when paused, `false` when resumed)
 
 Lets an indexer cache whether a jar is currently refusing tips (#45), so a tip
 page can show a "paused" badge without a separate read. Emitted even when the
@@ -1044,11 +1052,31 @@ flag is set to the value it already held, so the intent is always recorded.
 ### `withdraw` — published on every successful `withdraw_held`
 
 - **Topics:** `(symbol "withdraw", recipient: Address)`
-- **Data:** `amount: i128`
+- **Data:** `HeldWithdrawnEvent { version: u32, amount: i128 }`
 
 Records the moment an escrowed share (#171) is released to its recipient. The
 recipient is a topic (not just data) so an indexer can subscribe to one
-address's withdrawals.
+address's withdrawals. `amount` is named and versioned, so a future field (the
+token withdrawn, for example) can be added without changing the payload type.
+
+### `adm_xfer` — published on every successful `transfer_admin`
+
+- **Topics:** `(symbol "adm_xfer")`
+- **Data:** `AdminTransferredEvent { version: u32, previous_admin: Address, new_admin: Address }`
+
+Publishes both ends of the admin handover, so an indexer can track who held the
+role without replaying every prior transfer. The data is a named struct rather
+than a positional tuple, so fields can be added without breaking decoders.
+
+### `jar_rnm` — published on every successful `rename_jar`
+
+- **Topics:** `(symbol "jar_rnm", jar_id: String)` — the **old** jar id
+- **Data:** `JarRenamedEvent { version: u32, jar_id: String, new_jar_id: String }`
+
+Lets an indexer move a jar in its cache immediately. The old id is a topic so a
+subscription for that jar sees the rename, and the data carries both ids so the
+event is self-describing. The payload is a named struct rather than a
+positional pair.
 
 ### `recr_add` / `recr_del` — recurring-tip registration and cancellation
 
@@ -1488,6 +1516,13 @@ This build ships `version() == 7`. Version 7 gives every admin event one shape
 `update_splits` publishes. Version 5 adds `set_jar_paused` / `is_jar_paused`,
 `delete_jar` and
 the `JarPaused` error (39). Version 4 adds `tip_many` (#84). Version 3 adds `set_fee_bps` /
+This build ships `version() == 7`. Version 7 turns `lock`, `jar_pause`,
+`withdraw`, `adm_xfer` and `jar_rnm` into named, versioned structs, and adds the
+jar id to the `jar_del` and `jar_rnm` topics. Version 6 changes the `leave_jar`
+`splits` event from a bare count to the same `SplitsUpdatedEvent` that
+`update_splits` publishes. Version 5 adds `set_jar_paused` / `is_jar_paused`,
+`delete_jar` and the `JarPaused` error (39). Version 4 adds `tip_many` (#84).
+Version 3 adds `set_fee_bps` /
 `get_fee_bps`, the `fee_set` event, the `FeeTooHigh` error (35), and the `fee`
 field in the `tip` event (#79); it also changes what a tipper who is a
 recipient pays (#78), which `preview_tip` already reports.
