@@ -470,26 +470,6 @@
   {
     "udt_struct_v0": {
       "lib": "",
-      "name": "AdminTransferredEvent",
-      "fields": [
-        {
-          "name": "new_admin",
-          "type_": "address"
-        },
-        {
-          "name": "previous_admin",
-          "type_": "address"
-        },
-        {
-          "name": "version",
-          "type_": "u32"
-        }
-      ]
-    }
-  },
-  {
-    "udt_struct_v0": {
-      "lib": "",
       "name": "JarRenamedEvent",
       "fields": [
         {

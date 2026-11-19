@@ -5028,7 +5028,7 @@ fn admin_transfer_and_jar_rename_delete_events_are_versioned() {
     let transferred: AdminTransferredEvent =
         TryFromVal::try_from_val(env, &admin_events[0].2).expect("adm_xfer event data shape");
     assert_eq!(transferred.version, 1);
-    assert_eq!(transferred.previous_admin, s.admin);
+    assert_eq!(transferred.admin, s.admin);
     assert_eq!(transferred.new_admin, new_admin);
 }
 

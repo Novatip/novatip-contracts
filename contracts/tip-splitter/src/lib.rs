@@ -23,130 +23,112 @@ use soroban_sdk::{
     symbol_short, token, Address, BytesN, Env, IntoVal, String, Val, Vec,
 };
 
-// 100% expressed in basis points.
+/// 100% expressed in basis points.
 const BPS_DENOM: u32 = 10_000;
-// Safety bound so a single tip can't fan out to an unbounded recipient list.
+/// Safety bound so a single tip can't fan out to an unbounded recipient list.
 const MAX_RECIPIENTS: u32 = 20;
-// Most jars one `tip_many` call may tip.
-//
-// Each entry pays up to `MAX_RECIPIENTS` recipients, so the batch fan-out is
-// `MAX_BATCH_TIPS * MAX_RECIPIENTS` token transfers plus one `tip` event per
-// jar, all inside one transaction's budget. 10 keeps the worst case at 200
-// transfers, in the same order of magnitude as a single maximum-size jar; a
-// larger batch would abort on budget rather than on a typed error, which is
-// exactly the failure this bound exists to convert into a named one.
+/// Most jars one `tip_many` call may tip.
+///
+/// Each entry pays up to `MAX_RECIPIENTS` recipients, so the batch fan-out is
+/// `MAX_BATCH_TIPS * MAX_RECIPIENTS` token transfers plus one `tip` event per
+/// jar, all inside one transaction's budget. 10 keeps the worst case at 200
+/// transfers, in the same order of magnitude as a single maximum-size jar; a
+/// larger batch would abort on budget rather than on a typed error, which is
+/// exactly the failure this bound exists to convert into a named one.
 const MAX_BATCH_TIPS: u32 = 10;
-// Longest `jar_id`, in bytes, accepted by `create_jar`.
-//
-// The id is used as a storage key, an event topic, and a public URL slug, so
-// an unbounded id costs unnecessary rent and can produce jars no frontend can
-// address.
+/// Longest `jar_id`, in bytes, accepted by `create_jar`.
+///
+/// The id is used as a storage key, an event topic, and a public URL slug, so
+/// an unbounded id costs unnecessary rent and can produce jars no frontend can
+/// address.
 const MAX_JAR_ID_LEN: u32 = 64;
-// Shortest slug body, excluding the leading `@`. Mirrors `novatip-backend`'s
-// `SLUG_REGEX`, so every id a tip page can produce is accepted here.
+/// Shortest slug body, excluding the leading `@`. Mirrors `novatip-backend`'s
+/// `SLUG_REGEX`, so every id a tip page can produce is accepted here.
 const MIN_JAR_SLUG_LEN: u32 = 3;
-// Longest slug body, excluding the leading `@`. Mirrors the backend as well;
-// the backend never emits a longer slug, and a jar it cannot link to is dead
-// weight.
+/// Longest slug body, excluding the leading `@`. Mirrors the backend as well;
+/// the backend never emits a longer slug, and a jar it cannot link to is dead
+/// weight.
 const MAX_JAR_SLUG_LEN: u32 = 32;
-// Longest tip message, in UTF-8 bytes, that may ride along in the `tip` event.
-//
-// The message is echoed verbatim into the event payload, so an unbounded
-// string inflates the transaction and every downstream copy the indexer has
-// to store and serve. 280 matches the character budget the tip form implies
-// for plain-ASCII text.
-//
-// This is a byte count, not a character count. Accented characters (é, ö)
-// cost 2 bytes each in UTF-8 and most emoji cost 4, so a non-ASCII message
-// hits the limit at well under 280 visible characters. The contract checks
-// `message.len()`, which returns the byte count, so the rejection boundary
-// is 280 bytes regardless of character count.
-//
-// Clients should count UTF-8 bytes — not `message.length` in JavaScript or
-// `len(message)` in Rust — to show an accurate remaining-bytes indicator.
-//
-// Length is only half the contract: the bytes must also be valid UTF-8 text
-// with no control characters other than `\n` (see `validate_message`).
+/// Longest tip message, in UTF-8 bytes, that may ride along in the `tip` event.
+///
+/// The message is echoed verbatim into the event payload, so an unbounded
+/// string inflates the transaction and every downstream copy the indexer has
+/// to store and serve. 280 matches the character budget the tip form implies
+/// for plain-ASCII text.
+///
+/// This is a byte count, not a character count. Accented characters (é, ö)
+/// cost 2 bytes each in UTF-8 and most emoji cost 4, so a non-ASCII message
+/// hits the limit at well under 280 visible characters. The contract checks
+/// `message.len()`, which returns the byte count, so the rejection boundary
+/// is 280 bytes regardless of character count.
+///
+/// Clients should count UTF-8 bytes — not `message.length` in JavaScript or
+/// `len(message)` in Rust — to show an accurate remaining-bytes indicator.
+///
+/// Length is only half the contract: the bytes must also be valid UTF-8 text
+/// with no control characters other than `\n` (see `validate_message`).
 const MAX_MESSAGE_LEN: u32 = 280;
 
-// Highest protocol fee the admin may configure, in basis points (5%).
-//
-// The fee is taken from every tip before the split, so an uncapped value
-// would let a compromised or careless admin key swallow a tip outright. 5%
-// matches what Buy Me a Coffee charges and stays well under Patreon's 8–12%;
-// the intended configured value is 100 bps (1%), which keeps cross-border
-// micro-tipping viable. `set_fee_bps` rejects anything above this with
-// `FeeTooHigh`.
+/// Highest protocol fee the admin may configure, in basis points (5%).
+///
+/// The fee is taken from every tip before the split, so an uncapped value
+/// would let a compromised or careless admin key swallow a tip outright. 5%
+/// matches what Buy Me a Coffee charges and stays well under Patreon's 8–12%;
+/// the intended configured value is 100 bps (1%), which keeps cross-border
+/// micro-tipping viable. `set_fee_bps` rejects anything above this with
+/// `FeeTooHigh`.
 const MAX_FEE_BPS: u32 = 500;
 
-// Width, in bytes, of the optional client reference a tipper may attach.
-//
-// A reference is an opaque id the integration uses to match the on-chain
-// `tip` event back to whatever it created off-chain (a pending alert, a bot
-// command, a checkout session). 32 bytes fits the id spaces those clients
-// already use — a UUIDv4 in binary, a `sha256` tag, an 8-byte big-endian
-// primary key — without the contract ascribing any meaning to the contents.
-//
-// Written as a literal `BytesN<32>` in the entry-point signatures rather than
-// `BytesN<REFERENCE_LEN>`: `#[contractimpl]` parses the generic arguments of
-// its own parameters and rejects a const with
-// "incorrect number of generic arguments, expect one for BytesN<N>", which
-// aborts expansion of the whole impl — every method then vanishes from the
-// generated client, and the error surfaces far from its cause.
+/// Width, in bytes, of the optional client reference a tipper may attach.
+///
+/// A reference is an opaque id the integration uses to match the on-chain
+/// `tip` event back to whatever it created off-chain (a pending alert, a bot
+/// command, a checkout session). 32 bytes fits the id spaces those clients
+/// already use — a UUIDv4 in binary, a `sha256` tag, an 8-byte big-endian
+/// primary key — without the contract ascribing any meaning to the contents.
+///
+/// Written as a literal `BytesN<32>` in the entry-point signatures rather than
+/// `BytesN<REFERENCE_LEN>`: `#[contractimpl]` parses the generic arguments of
+/// its own parameters and rejects a const with
+/// "incorrect number of generic arguments, expect one for BytesN<N>", which
+/// aborts expansion of the whole impl — every method then vanishes from the
+/// generated client, and the error surfaces far from its cause.
 pub const REFERENCE_LEN: usize = 32;
 
-// How long a jar's persistent entry is extended to on access, in ledgers.
-//
-// Soroban archives a persistent entry once its time to live runs out, after
-// which `get_jar` and `tip` fail until it is restored. Every read and write
-// path bumps the entry, so a jar that is used at all never expires; this
-// bound only governs how long a completely idle jar survives.
-//
-// At the default 5-second close rate, 1 000 000 ledgers is roughly 58 days.
-// That comfortably covers a creator between gigs while staying inside the
-// network's maximum persistent entry lifetime.
+/// How long a jar's persistent entry is extended to on access, in ledgers.
+///
+/// Soroban archives a persistent entry once its time to live runs out, after
+/// which `get_jar` and `tip` fail until it is restored. Every read and write
+/// path bumps the entry, so a jar that is used at all never expires; this
+/// bound only governs how long a completely idle jar survives.
+///
+/// At the default 5-second close rate, 1 000 000 ledgers is roughly 58 days.
+/// That comfortably covers a creator between gigs while staying inside the
+/// network's maximum persistent entry lifetime.
 const JAR_TTL_LEDGERS: u32 = 1_000_000;
 
-// Bump a jar's time to live only once it drops below this many ledgers.
-//
-// `extend_ttl` takes a threshold as well as a target: below the threshold the
-// entry is extended back up to `JAR_TTL_LEDGERS`, and above it the call is a
-// no-op. Setting the threshold under the target means an actively tipped jar
-// pays for the write occasionally rather than on every single access.
+/// Bump a jar's time to live only once it drops below this many ledgers.
+///
+/// `extend_ttl` takes a threshold as well as a target: below the threshold the
+/// entry is extended back up to `JAR_TTL_LEDGERS`, and above it the call is a
+/// no-op. Setting the threshold under the target means an actively tipped jar
+/// pays for the write occasionally rather than on every single access.
 const JAR_TTL_THRESHOLD: u32 = 500_000;
 
-// Extend the contract instance TTL to this many ledgers on use.
-//
-// The instance storage holds the admin and token addresses, plus the Wasm code
-// entry itself in soroban-sdk 22. Once archived, every call fails until someone
-// restores it. Reusing the same target as jars keeps the lifetime consistent
-// across all persistent state (~58 days at 5s per ledger).
+/// Extend the contract instance TTL to this many ledgers on use.
+///
+/// The instance storage holds the admin and token addresses, plus the Wasm code
+/// entry itself in soroban-sdk 22. Once archived, every call fails until someone
+/// restores it. Reusing the same target as jars keeps the lifetime consistent
+/// across all persistent state (~58 days at 5s per ledger).
 const INSTANCE_TTL_LEDGERS: u32 = JAR_TTL_LEDGERS;
 
-// Threshold below which the instance TTL is extended.
-//
-// Matches `JAR_TTL_THRESHOLD`: extend when half the lifetime remains so active
-// contracts don't pay the write cost on every call.
+/// Threshold below which the instance TTL is extended.
+///
+/// Matches `JAR_TTL_THRESHOLD`: extend when half the lifetime remains so active
+/// contracts don't pay the write cost on every call.
 const INSTANCE_TTL_THRESHOLD: u32 = JAR_TTL_THRESHOLD;
 
-// The public interface this deployment speaks.
-//
-// `tip` has already changed shape twice (three event elements, then four) and
-// `jar_xfer` went from an address to a tuple, all under the same function
-// names. A client that is only given a contract id had no way to tell which
-// build it was talking to, so it discovered the mismatch when decoding failed
-// — or, worse, silently ignored new data. This view lets it ask first.
-//
-// Bump by one whenever the public interface changes: a function is added or
-// removed, an error code is added or renumbered, or an event's shape changes.
-// Do not bump for internal refactors, new storage keys, or doc edits — none of
-// those are visible to a consumer.
-//
-// This is a per-contract number for client feature detection. It complements
-// the per-event schema version proposed in #83 rather than replacing it.
-const INTERFACE_VERSION: u32 = 7;
-
-// One recipient and the share of every tip they receive, in basis points.
 /// The public interface this deployment speaks.
 ///
 /// `tip` has already changed shape twice (three event elements, then four) and
@@ -164,7 +146,7 @@ const INTERFACE_VERSION: u32 = 7;
 /// the per-event schema version proposed in #83 rather than replacing it.
 const INTERFACE_VERSION: u32 = 7;
 
-/// One recipient and the share of every tip they receive, in basis points.
+// One recipient and the share of every tip they receive, in basis points.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Split {
@@ -325,60 +307,60 @@ pub struct Recurring {
 
 #[contracttype(export = false)]
 pub enum DataKey {
-    // Contract admin: the address that gates the nine configuration entry
-    // points listed under "Admin-only functions" in `docs/CONTRACT.md`.
-    // Written by the constructor and by `transfer_admin`; grants nothing
-    // beyond that list.
+    /// Contract admin: the address that gates the nine configuration entry
+    /// points listed under "Admin-only functions" in `docs/CONTRACT.md`.
+    /// Written by the constructor and by `transfer_admin`; grants nothing
+    /// beyond that list.
     Admin,
-    // Address of the USDC Stellar Asset Contract used for all tips.
+    /// Address of the USDC Stellar Asset Contract used for all tips.
     Token,
-    // A tip jar keyed by its public slug, e.g. "@alice".
+    /// A tip jar keyed by its public slug, e.g. "@alice".
     Jar(String),
-    // Optional minimum tip amount for a jar keyed by its public slug.
+    /// Optional minimum tip amount for a jar keyed by its public slug.
     MinTip(String),
-    // A recipient's undeliverable share, held by the contract until they can
-    // receive it again (see #171). Keyed by the recipient address; value is
-    // the amount owed them in the jar token.
+    /// A recipient's undeliverable share, held by the contract until they can
+    /// receive it again (see #171). Keyed by the recipient address; value is
+    /// the amount owed them in the jar token.
     Held(Address),
-    // A recurring-tip schedule keyed by its assigned id.
+    /// A recurring-tip schedule keyed by its assigned id.
     Recurring(u128),
-    // Monotonic counter of issued recurring-tip ids.
+    /// Monotonic counter of issued recurring-tip ids.
     RecurringCount,
-    // A jar's settled tip totals, under the same slug as the jar itself.
+    /// A jar's settled tip totals, under the same slug as the jar itself.
     Stats(String),
-    // One supporter's settled totals, keyed by the `(jar_id, supporter)` pair
-    // the entry describes.
+    /// One supporter's settled totals, keyed by the `(jar_id, supporter)` pair
+    /// the entry describes.
     Supporter(String, Address),
-    // An address in the tip allowlist, keyed by the token itself. Presence is
-    // the whole answer, so `is_token_allowed` is a `has` check.
-    //
-    // Instance rather than persistent on purpose: an allowlist entry is
-    // contract configuration, like the `Admin` and `Token` keys beside it. A
-    // persistent entry nobody bumps is archived silently, which would surface
-    // as "this token suddenly stopped working" with no admin having removed
-    // it — the one failure mode an allowlist must not have.
+    /// An address in the tip allowlist, keyed by the token itself. Presence is
+    /// the whole answer, so `is_token_allowed` is a `has` check.
+    ///
+    /// Instance rather than persistent on purpose: an allowlist entry is
+    /// contract configuration, like the `Admin` and `Token` keys beside it. A
+    /// persistent entry nobody bumps is archived silently, which would surface
+    /// as "this token suddenly stopped working" with no admin having removed
+    /// it — the one failure mode an allowlist must not have.
     AllowedToken(Address),
-    // Contract-wide count of successful tips, used as each tip's sequence
-    // number. Held in instance storage: one `u64`, incremented once per tip,
-    // independent of how many jars exist.
+    /// Contract-wide count of successful tips, used as each tip's sequence
+    /// number. Held in instance storage: one `u64`, incremented once per tip,
+    /// independent of how many jars exist.
     TipCount,
-    // Optional post-tip hook contract, set and cleared by the admin (#176).
-    // Instance storage, like the other configuration keys beside it.
+    /// Optional post-tip hook contract, set and cleared by the admin (#176).
+    /// Instance storage, like the other configuration keys beside it.
     TipHook,
-    // Optional registrar contract whose co-signature `create_jar` requires
-    // while it is set (#178). Instance storage; absence means jar creation
-    // stays exactly as it was: owner auth only.
+    /// Optional registrar contract whose co-signature `create_jar` requires
+    /// while it is set (#178). Instance storage; absence means jar creation
+    /// stays exactly as it was: owner auth only.
     Registrar,
-    // Contract-wide pause flag. When present in instance storage, tipping is disabled.
+    /// Contract-wide pause flag. When present in instance storage, tipping is disabled.
     Paused,
-    // Protocol fee taken from every tip before the split, in basis points
-    // (#79). Instance storage, like the other configuration keys; absence
-    // means 0, so an upgraded deployment charges nothing until the admin
-    // opts in with `set_fee_bps`.
+    /// Protocol fee taken from every tip before the split, in basis points
+    /// (#79). Instance storage, like the other configuration keys; absence
+    /// means 0, so an upgraded deployment charges nothing until the admin
+    /// opts in with `set_fee_bps`.
     FeeBps,
-    // Wasm hash installed by the most recent successful `upgrade` (#334).
-    // Used as the `previous_hash` in the next upgrade event. Absent on a
-    // deployment that has never been upgraded since this key was introduced.
+    /// Wasm hash installed by the most recent successful `upgrade` (#334).
+    /// Used as the `previous_hash` in the next upgrade event. Absent on a
+    /// deployment that has never been upgraded since this key was introduced.
     WasmHash,
 }
 
@@ -541,8 +523,7 @@ pub struct JarDeletedEvent {
     pub jar_id: String,
 }
 
-// Data published by `min_tip`; fields are named for forward-compatible decoding.
-/// Data published by `lock`; fields are named for forward-compatible decoding.
+// Data published by `lock`; fields are named for forward-compatible decoding.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct JarLockEvent {
@@ -550,7 +531,7 @@ pub struct JarLockEvent {
     pub locked: bool,
 }
 
-/// Data published by `jar_pause`; fields are named for forward-compatible decoding.
+// Data published by `jar_pause`; fields are named for forward-compatible decoding.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct JarPausedEvent {
@@ -558,7 +539,7 @@ pub struct JarPausedEvent {
     pub paused: bool,
 }
 
-/// Data published by `withdraw`; fields are named for forward-compatible decoding.
+// Data published by `withdraw`; fields are named for forward-compatible decoding.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct HeldWithdrawnEvent {
@@ -566,16 +547,7 @@ pub struct HeldWithdrawnEvent {
     pub amount: i128,
 }
 
-/// Data published by `adm_xfer`; fields are named for forward-compatible decoding.
-#[contracttype]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct AdminTransferredEvent {
-    pub version: u32,
-    pub previous_admin: Address,
-    pub new_admin: Address,
-}
-
-/// Data published by `jar_rnm`; fields are named for forward-compatible decoding.
+// Data published by `jar_rnm`; fields are named for forward-compatible decoding.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct JarRenamedEvent {
@@ -584,7 +556,7 @@ pub struct JarRenamedEvent {
     pub new_jar_id: String,
 }
 
-/// Data published by `min_tip`; fields are named for forward-compatible decoding.
+// Data published by `min_tip`; fields are named for forward-compatible decoding.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct MinTipEvent {
@@ -710,8 +682,8 @@ impl TipSplitter {
             .set(&DataKey::AllowedToken(token), &true);
     }
 
-    // The contract admin, which every admin-gated entry point requires.
-    // Returns the address so the caller can name it in an event.
+    /// The contract admin, which every admin-gated entry point requires.
+    /// Returns the address so the caller can name it in an event.
     fn require_admin(env: &Env) -> Address {
         let admin: Address = Self::get_admin(env.clone());
         admin.require_auth();
@@ -770,17 +742,17 @@ impl TipSplitter {
         );
     }
 
-    // Whether `jar_id` is a canonical slug: a leading `@` followed by
-    // 3–32 lower-case ASCII letters, digits, `_` or `-`.
-    //
-    // The contract is the only place that can enforce one shape for every
-    // client. Without it, `@alice`, `@Alice` and `@alice ` are three distinct
-    // jars, and the lookalikes are indistinguishable wherever a raw id is
-    // rendered. The backend's `SLUG_REGEX` is the same rule, so rejecting
-    // anything else cannot lock out a jar a tip page could create.
-    //
-    // Copies at most 33 bytes into a stack buffer; no allocation, so it is
-    // cheap enough to run before the storage lookup.
+    /// Whether `jar_id` is a canonical slug: a leading `@` followed by
+    /// 3–32 lower-case ASCII letters, digits, `_` or `-`.
+    ///
+    /// The contract is the only place that can enforce one shape for every
+    /// client. Without it, `@alice`, `@Alice` and `@alice ` are three distinct
+    /// jars, and the lookalikes are indistinguishable wherever a raw id is
+    /// rendered. The backend's `SLUG_REGEX` is the same rule, so rejecting
+    /// anything else cannot lock out a jar a tip page could create.
+    ///
+    /// Copies at most 33 bytes into a stack buffer; no allocation, so it is
+    /// cheap enough to run before the storage lookup.
     fn is_valid_jar_id(jar_id: &String) -> bool {
         let len = jar_id.len();
         if len > MAX_JAR_ID_LEN || !(MIN_JAR_SLUG_LEN + 1..=MAX_JAR_SLUG_LEN + 1).contains(&len) {
@@ -1282,7 +1254,6 @@ impl TipSplitter {
             AdminTransferredEvent {
                 version: 1,
                 admin: current_admin,
-                previous_admin: current_admin,
                 new_admin,
             },
         );
@@ -1576,11 +1547,11 @@ impl TipSplitter {
         seqs
     }
 
-    // The single transfer loop behind `tip` and `tip_with_ref`.
-    //
-    // Kept private and non-exposed so the two public entry points cannot
-    // disagree about validation, the order of transfers, the self-transfer
-    // skip, or the event shape.
+    /// The single transfer loop behind `tip` and `tip_with_ref`.
+    ///
+    /// Kept private and non-exposed so the two public entry points cannot
+    /// disagree about validation, the order of transfers, the self-transfer
+    /// skip, or the event shape.
     fn tip_inner(
         env: Env,
         from: Address,
@@ -1667,21 +1638,21 @@ impl TipSplitter {
         )
     }
 
-    // The body every tip entry point shares: validate, split, transfer, bump
-    // the running totals, assign the sequence number, and emit the `tip`
-    // event.
-    //
-    // `from` must already have authorized. `enforce_min` says whether this
-    // call is in the token the jar's minimum tip is denominated in.
-    //
-    // Stats are written after the transfer loop. A transfer that traps (for
-    // instance a sender with an insufficient balance) reverts the whole call,
-    // so the counters never record a tip that did not settle — which is what
-    // makes them usable as an authoritative check on the indexer.
-    //
-    // The per-recipient amounts transferred here and the ones
-    // [`Self::preview_tip`] reports for the same sender come from one helper,
-    // [`Self::payout_amounts`], so the two can never drift apart (#177).
+    /// The body every tip entry point shares: validate, split, transfer, bump
+    /// the running totals, assign the sequence number, and emit the `tip`
+    /// event.
+    ///
+    /// `from` must already have authorized. `enforce_min` says whether this
+    /// call is in the token the jar's minimum tip is denominated in.
+    ///
+    /// Stats are written after the transfer loop. A transfer that traps (for
+    /// instance a sender with an insufficient balance) reverts the whole call,
+    /// so the counters never record a tip that did not settle — which is what
+    /// makes them usable as an authoritative check on the indexer.
+    ///
+    /// The per-recipient amounts transferred here and the ones
+    /// [`Self::preview_tip`] reports for the same sender come from one helper,
+    /// [`Self::payout_amounts`], so the two can never drift apart (#177).
     fn settle_tip(env: &Env, from: &Address, params: TipParams) -> u64 {
         let TipParams {
             jar_id,
@@ -1905,13 +1876,13 @@ impl TipSplitter {
         env.storage().instance().get(&DataKey::TipHook)
     }
 
-    // Fire the post-tip hook if one is registered (#176).
-    //
-    // Deliberately last in every settle path, and deliberately result-blind:
-    // whatever the hook does to its own state, the tip has already moved the
-    // funds and published its event. A failed invocation is discarded rather
-    // than propagated — the whole point is that a broken badge contract cannot
-    // stop a creator being paid.
+    /// Fire the post-tip hook if one is registered (#176).
+    ///
+    /// Deliberately last in every settle path, and deliberately result-blind:
+    /// whatever the hook does to its own state, the tip has already moved the
+    /// funds and published its event. A failed invocation is discarded rather
+    /// than propagated — the whole point is that a broken badge contract cannot
+    /// stop a creator being paid.
     fn call_tip_hook(env: &Env, jar_id: &String, from: &Address, amount: i128) {
         let Some(hook): Option<Address> = env.storage().instance().get(&DataKey::TipHook) else {
             return;
@@ -2024,12 +1995,12 @@ impl TipSplitter {
         env.storage().instance().get(&DataKey::FeeBps).unwrap_or(0)
     }
 
-    // Split a gross tip into `(fee, net)` under the configured fee (#79).
-    //
-    // The fee truncates, so any rounding favours the tipper's recipients, and
-    // `fee + net == amount` always. With `fee_bps <= MAX_FEE_BPS` the net is
-    // at least 95% of the tip, so a positive amount always leaves a positive
-    // net for `compute_shares` to split.
+    /// Split a gross tip into `(fee, net)` under the configured fee (#79).
+    ///
+    /// The fee truncates, so any rounding favours the tipper's recipients, and
+    /// `fee + net == amount` always. With `fee_bps <= MAX_FEE_BPS` the net is
+    /// at least 95% of the tip, so a positive amount always leaves a positive
+    /// net for `compute_shares` to split.
     fn split_fee(env: &Env, amount: i128) -> (i128, i128) {
         let fee_bps = Self::get_fee_bps(env.clone());
         if fee_bps == 0 {
@@ -2042,10 +2013,10 @@ impl TipSplitter {
         (fee, amount - fee)
     }
 
-    // Who a fee of `fee` should be transferred to, or `None` when nothing
-    // moves: no fee, or the tipper is the admin. That second case is the
-    // self-transfer rule applied to the fee, and the `tip` event then
-    // reports a fee of 0 because nothing moved.
+    /// Who a fee of `fee` should be transferred to, or `None` when nothing
+    /// moves: no fee, or the tipper is the admin. That second case is the
+    /// self-transfer rule applied to the fee, and the `tip` event then
+    /// reports a fee of 0 because nothing moved.
     fn fee_payee(env: &Env, from: &Address, fee: i128) -> Option<Address> {
         if fee == 0 {
             return None;
@@ -2077,14 +2048,14 @@ impl TipSplitter {
             .unwrap_or(0u64)
     }
 
-    // Bump both running totals for a settled tip: the jar's aggregate and this
-    // supporter's against that jar.
-    //
-    // Two extra persistent writes per tip, which is real rent — see the
-    // measured budget delta in `docs/CONTRACT.md`. It buys a figure the
-    // indexer can be checked against, and the reason #167 and #168 share one
-    // helper is that they need the identical guarantee: both are updated only
-    // after the transfers succeeded, in the same call that paid them out.
+    /// Bump both running totals for a settled tip: the jar's aggregate and this
+    /// supporter's against that jar.
+    ///
+    /// Two extra persistent writes per tip, which is real rent — see the
+    /// measured budget delta in `docs/CONTRACT.md`. It buys a figure the
+    /// indexer can be checked against, and the reason #167 and #168 share one
+    /// helper is that they need the identical guarantee: both are updated only
+    /// after the transfers succeeded, in the same call that paid them out.
     fn bump_totals(env: &Env, jar_id: &String, from: &Address, amount: i128) {
         let stats_key = DataKey::Stats(jar_id.clone());
         let jar_stats = env
@@ -2948,26 +2919,26 @@ impl TipSplitter {
         }
     }
 
-    // The amounts a settled tip of `amount` from `from` actually transfers,
-    // one per recipient in split order (#177).
-    //
-    // This is `compute_shares` plus the one sender-dependent rule: a
-    // recipient who *is* the sender is reported as `0` — no self-transfer,
-    // and their share stays with them. Every other recipient gets exactly
-    // their `compute_shares` entry, so what leaves the tipper is what the
-    // other recipients receive, and that is `amount` minus the tipper's own
-    // share.
-    //
-    // An earlier version rolled the withheld share into the last recipient,
-    // which made a tipper who held a share pay it out to someone else (#78).
-    //
-    // `settle_tip` pays exactly these numbers out and
-    // [`Self::preview_tip`] reports them, which is what keeps a tip's event
-    // breakdown and its preview from ever diverging; `collect_recurring`
-    // builds its `transfer_from` plan from here too.
-    //
-    // Panics with the same errors as [`Self::compute_shares`] for amounts a
-    // tip of this jar could not pay.
+    /// The amounts a settled tip of `amount` from `from` actually transfers,
+    /// one per recipient in split order (#177).
+    ///
+    /// This is `compute_shares` plus the one sender-dependent rule: a
+    /// recipient who *is* the sender is reported as `0` — no self-transfer,
+    /// and their share stays with them. Every other recipient gets exactly
+    /// their `compute_shares` entry, so what leaves the tipper is what the
+    /// other recipients receive, and that is `amount` minus the tipper's own
+    /// share.
+    ///
+    /// An earlier version rolled the withheld share into the last recipient,
+    /// which made a tipper who held a share pay it out to someone else (#78).
+    ///
+    /// `settle_tip` pays exactly these numbers out and
+    /// [`Self::preview_tip`] reports them, which is what keeps a tip's event
+    /// breakdown and its preview from ever diverging; `collect_recurring`
+    /// builds its `transfer_from` plan from here too.
+    ///
+    /// Panics with the same errors as [`Self::compute_shares`] for amounts a
+    /// tip of this jar could not pay.
     fn payout_amounts(env: &Env, splits: &Vec<Split>, from: &Address, amount: i128) -> Vec<i128> {
         let shares = Self::compute_shares(env, splits, amount);
         let mut plan: Vec<i128> = Vec::new(env);
@@ -2981,20 +2952,20 @@ impl TipSplitter {
         plan
     }
 
-    // Split `amount` across `splits` in basis points, returning one share per
-    // recipient in split order.
-    //
-    // This is the single source of the rounding rule: each non-final recipient
-    // gets `amount * bps / 10_000` (truncating integer division) and the final
-    // recipient gets the remainder, so the shares always sum to exactly
-    // `amount` and no dust is lost. `tip` pays these out and `preview_split`
-    // reports them, which is what keeps the quoted split and the paid split
-    // identical.
-    //
-    // Panics with `AmountZero` / `AmountNegative` if `amount` is not positive,
-    // `SplitAmountTooSmall` if it is small enough that some recipient's share
-    // would truncate to zero, and `AmountOverflow` if `amount * bps` overflows
-    // `i128`.
+    /// Split `amount` across `splits` in basis points, returning one share per
+    /// recipient in split order.
+    ///
+    /// This is the single source of the rounding rule: each non-final recipient
+    /// gets `amount * bps / 10_000` (truncating integer division) and the final
+    /// recipient gets the remainder, so the shares always sum to exactly
+    /// `amount` and no dust is lost. `tip` pays these out and `preview_split`
+    /// reports them, which is what keeps the quoted split and the paid split
+    /// identical.
+    ///
+    /// Panics with `AmountZero` / `AmountNegative` if `amount` is not positive,
+    /// `SplitAmountTooSmall` if it is small enough that some recipient's share
+    /// would truncate to zero, and `AmountOverflow` if `amount * bps` overflows
+    /// `i128`.
     fn compute_shares(env: &Env, splits: &Vec<Split>, amount: i128) -> Vec<i128> {
         if amount == 0 {
             panic_with_error!(env, Error::AmountZero);
@@ -3044,12 +3015,12 @@ impl TipSplitter {
         shares
     }
 
-    // Extend a jar's TTL and its minimum-tip entry in lockstep (issue #92).
-    //
-    // The min-tip lives in a separate persistent key with its own TTL. If only
-    // the jar is extended, an idle jar can still tip: `get_jar` succeeds but
-    // `tip` fails once the min-tip entry expires. This helper keeps them
-    // aligned so a jar is only as available as its least-recently-touched entry.
+    /// Extend a jar's TTL and its minimum-tip entry in lockstep (issue #92).
+    ///
+    /// The min-tip lives in a separate persistent key with its own TTL. If only
+    /// the jar is extended, an idle jar can still tip: `get_jar` succeeds but
+    /// `tip` fails once the min-tip entry expires. This helper keeps them
+    /// aligned so a jar is only as available as its least-recently-touched entry.
     fn extend_jar_and_min_ttl(env: &Env, jar_id: &String) {
         let key = DataKey::Jar(jar_id.clone());
         env.storage()
@@ -3064,22 +3035,22 @@ impl TipSplitter {
         }
     }
 
-    // Validate a message's length and content (#96).
-    //
-    // A Soroban `String` is a byte buffer with no encoding guarantee, so
-    // without this check a tipper can attach invalid UTF-8 or embedded
-    // control bytes and the contract echoes them verbatim into the `tip`
-    // event. Consumers assume text: the backend writes the message into a
-    // Postgres text column, which rejects NUL, so such a tip is silently
-    // dropped by the indexer, and invalid UTF-8 renders differently in every
-    // client.
-    //
-    // Newline is allowed because the tip form offers multi-line input; every
-    // other control character — including NUL, tab, carriage return and DEL —
-    // is rejected. `char::is_control` also covers the C1 range, which is only
-    // reachable through a valid multi-byte sequence.
-    //
-    // The check runs before any transfer, so a rejected tip moves no funds.
+    /// Validate a message's length and content (#96).
+    ///
+    /// A Soroban `String` is a byte buffer with no encoding guarantee, so
+    /// without this check a tipper can attach invalid UTF-8 or embedded
+    /// control bytes and the contract echoes them verbatim into the `tip`
+    /// event. Consumers assume text: the backend writes the message into a
+    /// Postgres text column, which rejects NUL, so such a tip is silently
+    /// dropped by the indexer, and invalid UTF-8 renders differently in every
+    /// client.
+    ///
+    /// Newline is allowed because the tip form offers multi-line input; every
+    /// other control character — including NUL, tab, carriage return and DEL —
+    /// is rejected. `char::is_control` also covers the C1 range, which is only
+    /// reachable through a valid multi-byte sequence.
+    ///
+    /// The check runs before any transfer, so a rejected tip moves no funds.
     fn validate_message(env: &Env, message: &String) {
         let len = message.len();
         if len > MAX_MESSAGE_LEN {
@@ -3094,14 +3065,14 @@ impl TipSplitter {
         }
     }
 
-    // Validate splits in one pass: range, duplicate recipient, then total sum.
-    //
-    // A zero-bps entry is dead weight that consumes a slot and misleads clients.
-    //
-    // A `bps > BPS_DENOM` entry claims more than the whole tip, so it can never
-    // belong to a set summing to 100%. Rejecting it per entry also bounds the
-    // running total at `MAX_RECIPIENTS * BPS_DENOM` (200_000), which keeps the
-    // accumulator far below `u32::MAX` by construction.
+    /// Validate splits in one pass: range, duplicate recipient, then total sum.
+    ///
+    /// A zero-bps entry is dead weight that consumes a slot and misleads clients.
+    ///
+    /// A `bps > BPS_DENOM` entry claims more than the whole tip, so it can never
+    /// belong to a set summing to 100%. Rejecting it per entry also bounds the
+    /// running total at `MAX_RECIPIENTS * BPS_DENOM` (200_000), which keeps the
+    /// accumulator far below `u32::MAX` by construction.
     fn validate_splits(env: &Env, splits: &Vec<Split>) {
         let n = splits.len();
         if n == 0 {

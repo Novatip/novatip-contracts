@@ -121,12 +121,9 @@ one belongs to a jar, the other to a `(jar, supporter)` pair.
 | `get_min_accepted_tip(jar_id) -> i128` | — | The smallest tip this jar accepts: the larger of the amount needed to give every recipient a non-zero share and the jar's configured minimum. See [the smallest amount a jar accepts](#the-smallest-amount-a-jar-accepts-86). Panics with `JarNotFound` if the slug is free. |
 | `get_token() -> Address` | — | The USDC token address tips settle in. |
 | `get_admin() -> Address` | — | The contract admin recorded at deploy time. |
-| `transfer_admin(new_admin)` | contract `admin` | Hand admin control to `new_admin`. Rejected with `AdminExists` when it is already the current admin. Emits an `adm_xfer` event carrying the outgoing admin and `new_admin`. |
+| `transfer_admin(new_admin)` | contract `admin` | Hand admin control to `new_admin`. Rejected with `AdminExists` when it is already the current admin. Emits an `adm_xfer` event with `AdminTransferredEvent { version, admin, new_admin }` data. |
 | `pause()` | contract `admin` | Pause tipping: `tip`, `tip_with_ref` and `tip_in_token` reject with `ContractPaused`. Emits a `pause` event in the shared admin shape with `paused: true`. |
 | `resume()` | contract `admin` | Lift a pause. Emits a `resume` event in the shared admin shape with `paused: false`. |
-| `transfer_admin(new_admin)` | contract `admin` | Hand admin control to `new_admin`. Rejected with `AdminExists` when it is already the current admin. Emits an `adm_xfer` event with `AdminTransferredEvent { version, previous_admin, new_admin }` data. |
-| `pause()` | contract `admin` | Pause tipping: `tip`, `tip_with_ref` and `tip_in_token` reject with `ContractPaused`. Emits a `pause` event. |
-| `resume()` | contract `admin` | Lift a pause. Emits a `resume` event. |
 | `is_paused() -> bool` | — | Whether tipping is currently paused. Reads instance storage. |
 | `upgrade(new_wasm_hash)` | contract `admin` | Replace the running contract Wasm while keeping the address and all stored state. Emits an `upgrade` event carrying the previous and new hashes. |
 | `get_limits() -> Limits` | — | The bounds this contract enforces: `bps_denom`, `max_recipients`, `max_message_len`, `max_batch_tips`. Reads no storage. |
@@ -1062,7 +1059,7 @@ token withdrawn, for example) can be added without changing the payload type.
 ### `adm_xfer` — published on every successful `transfer_admin`
 
 - **Topics:** `(symbol "adm_xfer")`
-- **Data:** `AdminTransferredEvent { version: u32, previous_admin: Address, new_admin: Address }`
+- **Data:** `AdminTransferredEvent { version: u32, admin: Address, new_admin: Address }` (`admin` is the outgoing key)
 
 Publishes both ends of the admin handover, so an indexer can track who held the
 role without replaying every prior transfer. The data is a named struct rather
@@ -1510,15 +1507,10 @@ edit — none of those are visible to a consumer, and a version that changes whe
 nothing observable did is a version consumers stop trusting.
 
 This build ships `version() == 7`. Version 7 gives every admin event one shape
-(name-only topic, versioned data struct with `version` and `admin`) and adds
+(name-only topic, versioned data struct with `version` and `admin`), turns
+`lock`, `jar_pause`, `withdraw`, `adm_xfer` and `jar_rnm` into named, versioned
+structs, adds the jar id to the `jar_del` and `jar_rnm` topics, and adds
 `previous_hash` to the `upgrade` event. Version 6 changes the `leave_jar`
-`splits` event from a bare count to the same `SplitsUpdatedEvent` that
-`update_splits` publishes. Version 5 adds `set_jar_paused` / `is_jar_paused`,
-`delete_jar` and
-the `JarPaused` error (39). Version 4 adds `tip_many` (#84). Version 3 adds `set_fee_bps` /
-This build ships `version() == 7`. Version 7 turns `lock`, `jar_pause`,
-`withdraw`, `adm_xfer` and `jar_rnm` into named, versioned structs, and adds the
-jar id to the `jar_del` and `jar_rnm` topics. Version 6 changes the `leave_jar`
 `splits` event from a bare count to the same `SplitsUpdatedEvent` that
 `update_splits` publishes. Version 5 adds `set_jar_paused` / `is_jar_paused`,
 `delete_jar` and the `JarPaused` error (39). Version 4 adds `tip_many` (#84).
