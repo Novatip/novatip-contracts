@@ -63,6 +63,7 @@ ci:
 	cargo clippy --locked --all-targets -- -D warnings
 	cargo test --locked
 	cargo build --locked --target wasm32-unknown-unknown --release
+	stellar contract build
 	./scripts/check-wasm-size.sh
 
 # Regenerate the committed public interface snapshot (#134).

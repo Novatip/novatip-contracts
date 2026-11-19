@@ -38,22 +38,6 @@
   {
     "udt_struct_v0": {
       "lib": "",
-      "name": "CompactSplit",
-      "fields": [
-        {
-          "name": "0",
-          "type_": "address"
-        },
-        {
-          "name": "1",
-          "type_": "u32"
-        }
-      ]
-    }
-  },
-  {
-    "udt_struct_v0": {
-      "lib": "",
       "name": "Jar",
       "fields": [
         {
@@ -78,26 +62,6 @@
                 }
               }
             }
-          }
-        }
-      ]
-    }
-  },
-  {
-    "udt_union_v0": {
-      "lib": "",
-      "name": "JarRecord",
-      "cases": [
-        {
-          "tuple_v0": {
-            "name": "V1",
-            "type_": [
-              {
-                "udt": {
-                  "name": "Jar"
-                }
-              }
-            ]
           }
         }
       ]
@@ -506,26 +470,6 @@
   {
     "udt_struct_v0": {
       "lib": "",
-      "name": "AdminTransferredEvent",
-      "fields": [
-        {
-          "name": "new_admin",
-          "type_": "address"
-        },
-        {
-          "name": "previous_admin",
-          "type_": "address"
-        },
-        {
-          "name": "version",
-          "type_": "u32"
-        }
-      ]
-    }
-  },
-  {
-    "udt_struct_v0": {
-      "lib": "",
       "name": "JarRenamedEvent",
       "fields": [
         {
@@ -630,6 +574,138 @@
   {
     "udt_struct_v0": {
       "lib": "",
+      "name": "TokenAllowlistEvent",
+      "fields": [
+        {
+          "name": "admin",
+          "type_": "address"
+        },
+        {
+          "name": "allowed",
+          "type_": "bool"
+        },
+        {
+          "name": "token",
+          "type_": "address"
+        },
+        {
+          "name": "version",
+          "type_": "u32"
+        }
+      ]
+    }
+  },
+  {
+    "udt_struct_v0": {
+      "lib": "",
+      "name": "TipHookEvent",
+      "fields": [
+        {
+          "name": "admin",
+          "type_": "address"
+        },
+        {
+          "name": "hook",
+          "type_": {
+            "option": {
+              "value_type": "address"
+            }
+          }
+        },
+        {
+          "name": "version",
+          "type_": "u32"
+        }
+      ]
+    }
+  },
+  {
+    "udt_struct_v0": {
+      "lib": "",
+      "name": "RegistrarEvent",
+      "fields": [
+        {
+          "name": "admin",
+          "type_": "address"
+        },
+        {
+          "name": "registrar",
+          "type_": {
+            "option": {
+              "value_type": "address"
+            }
+          }
+        },
+        {
+          "name": "version",
+          "type_": "u32"
+        }
+      ]
+    }
+  },
+  {
+    "udt_struct_v0": {
+      "lib": "",
+      "name": "FeeEvent",
+      "fields": [
+        {
+          "name": "admin",
+          "type_": "address"
+        },
+        {
+          "name": "fee_bps",
+          "type_": "u32"
+        },
+        {
+          "name": "version",
+          "type_": "u32"
+        }
+      ]
+    }
+  },
+  {
+    "udt_struct_v0": {
+      "lib": "",
+      "name": "PauseEvent",
+      "fields": [
+        {
+          "name": "admin",
+          "type_": "address"
+        },
+        {
+          "name": "paused",
+          "type_": "bool"
+        },
+        {
+          "name": "version",
+          "type_": "u32"
+        }
+      ]
+    }
+  },
+  {
+    "udt_struct_v0": {
+      "lib": "",
+      "name": "AdminTransferredEvent",
+      "fields": [
+        {
+          "name": "admin",
+          "type_": "address"
+        },
+        {
+          "name": "new_admin",
+          "type_": "address"
+        },
+        {
+          "name": "version",
+          "type_": "u32"
+        }
+      ]
+    }
+  },
+  {
+    "udt_struct_v0": {
+      "lib": "",
       "name": "UpgradedEvent",
       "fields": [
         {
@@ -643,6 +719,22 @@
               "n": 32
             }
           }
+        },
+        {
+          "name": "previous_hash",
+          "type_": {
+            "option": {
+              "value_type": {
+                "bytes_n": {
+                  "n": 32
+                }
+              }
+            }
+          }
+        },
+        {
+          "name": "version",
+          "type_": "u32"
         }
       ]
     }
