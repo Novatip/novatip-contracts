@@ -9606,7 +9606,7 @@ fn cancel_recurring_accepts_the_supporter_or_the_jar_owner_only() {
     let stranger = Address::generate(env);
     assert_eq!(
         client.try_cancel_recurring(&stranger, &second),
-        Err(Ok(Error::NotAuthorized))
+        Err(Ok(Error::NotAuthorized.into()))
     );
     assert_eq!(client.get_recurring(&second).supporter, supporter);
 
