@@ -144,7 +144,7 @@ const INSTANCE_TTL_THRESHOLD: u32 = JAR_TTL_THRESHOLD;
 ///
 /// This is a per-contract number for client feature detection. It complements
 /// the per-event schema version proposed in #83 rather than replacing it.
-const INTERFACE_VERSION: u32 = 7;
+const INTERFACE_VERSION: u32 = 8;
 
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -211,6 +211,23 @@ pub struct Limits {
     pub max_message_len: u32,
     pub max_batch_tips: u32,
     pub max_jar_id_len: u32,
+    pub min_jar_id_len: u32,
+    pub max_fee_bps: u32,
+}
+
+/// Everything a tip page needs about one jar, in one simulation (#319).
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct JarInfo {
+    pub owner: Address,
+    pub splits: Vec<Split>,
+    pub locked: bool,
+    pub paused: bool,
+    pub min_tip_amount: Option<i128>,
+    pub min_accepted_tip: i128,
+    pub tip_count: u64,
+    pub total: i128,
+    pub fee_bps: u32,
 }
 
 #[contracttype]
@@ -489,6 +506,28 @@ pub struct UpgradedEvent {
     pub admin: Address,
     pub previous_hash: Option<BytesN<32>>,
     pub new_hash: BytesN<32>,
+}
+
+// Data published by `recr_add` (#317). Topics: `("recr_add", supporter, jar_id)`.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RecurringAddedEvent {
+    pub version: u32,
+    pub id: u128,
+    pub jar_id: String,
+    pub amount: i128,
+    pub period_ledgers: u32,
+    pub next_due_ledger: u32,
+}
+
+// Data published by `recr_upd` (#316). Topics: `("recr_upd", supporter)`.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RecurringUpdatedEvent {
+    pub version: u32,
+    pub id: u128,
+    pub amount: i128,
+    pub message: String,
 }
 
 #[contractimpl]
@@ -1739,7 +1778,7 @@ impl TipSplitter {
 
         let entry = Recurring {
             supporter: supporter.clone(),
-            jar_id,
+            jar_id: jar_id.clone(),
             amount,
             period_ledgers,
             message,
@@ -1754,8 +1793,17 @@ impl TipSplitter {
             .persistent()
             .extend_ttl(&count_key, JAR_TTL_THRESHOLD, JAR_TTL_LEDGERS);
 
-        env.events()
-            .publish((symbol_short!("recr_add"), supporter), id);
+        env.events().publish(
+            (symbol_short!("recr_add"), supporter, jar_id.clone()),
+            RecurringAddedEvent {
+                version: 1,
+                id,
+                jar_id,
+                amount,
+                period_ledgers,
+                next_due_ledger,
+            },
+        );
         id
     }
 
@@ -1771,6 +1819,56 @@ impl TipSplitter {
         env.storage().persistent().remove(&rec_key);
         env.events()
             .publish((symbol_short!("recr_del"), entry.supporter), id);
+    }
+
+    /// Change a recurring tip's amount and message in place (#316). Keeps the
+    /// id and `next_due_ledger`; validated like `create_recurring`.
+    pub fn update_recurring(env: Env, id: u128, amount: i128, message: String) {
+        let rec_key = DataKey::Recurring(id);
+        let mut entry: Recurring = env
+            .storage()
+            .persistent()
+            .get(&rec_key)
+            .unwrap_or_else(|| panic_with_error!(&env, Error::RecurringNotFound));
+        entry.supporter.require_auth();
+        if amount == 0 {
+            panic_with_error!(&env, Error::AmountZero);
+        }
+        if amount < 0 {
+            panic_with_error!(&env, Error::AmountNegative);
+        }
+        Self::validate_message(&env, &message);
+
+        let jar: Jar = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Jar(entry.jar_id.clone()))
+            .unwrap_or_else(|| panic_with_error!(&env, Error::JarNotFound));
+        let min_key = DataKey::MinTip(entry.jar_id.clone());
+        if let Some(min_amount) = env.storage().persistent().get::<DataKey, i128>(&min_key) {
+            if amount < min_amount {
+                panic_with_error!(&env, Error::BelowMinTipAmount);
+            }
+        }
+        let (_, net) = Self::split_fee(&env, amount);
+        let _ = Self::compute_shares(&env, &jar.splits, net);
+
+        entry.amount = amount;
+        entry.message = message.clone();
+        env.storage().persistent().set(&rec_key, &entry);
+        env.storage()
+            .persistent()
+            .extend_ttl(&rec_key, JAR_TTL_THRESHOLD, JAR_TTL_LEDGERS);
+
+        env.events().publish(
+            (symbol_short!("recr_upd"), entry.supporter),
+            RecurringUpdatedEvent {
+                version: 1,
+                id,
+                amount,
+                message,
+            },
+        );
     }
 
     pub fn get_recurring(env: Env, id: u128) -> Recurring {
@@ -2143,6 +2241,25 @@ impl TipSplitter {
         }
     }
 
+    /// `get_jar`, `get_min_tip_amount`, `get_min_accepted_tip`,
+    /// `get_jar_stats` and `get_fee_bps` in one call (#319). Fails with
+    /// `JarNotFound` for an unknown slug, like `get_jar`.
+    pub fn get_jar_info(env: Env, jar_id: String) -> JarInfo {
+        let jar = Self::get_jar(env.clone(), jar_id.clone());
+        let stats = Self::get_jar_stats(env.clone(), jar_id.clone());
+        JarInfo {
+            owner: jar.owner,
+            splits: jar.splits,
+            locked: jar.locked,
+            paused: jar.paused,
+            min_tip_amount: Self::get_min_tip_amount(env.clone(), jar_id.clone()),
+            min_accepted_tip: Self::get_min_accepted_tip(env.clone(), jar_id),
+            tip_count: stats.tip_count,
+            total: stats.total,
+            fee_bps: Self::get_fee_bps(env),
+        }
+    }
+
     pub fn get_supporter_stats(env: Env, jar_id: String, supporter: Address) -> SupporterStats {
         let jar_key = DataKey::Jar(jar_id.clone());
         if !env.storage().persistent().has(&jar_key) {
@@ -2224,6 +2341,8 @@ impl TipSplitter {
             max_message_len: MAX_MESSAGE_LEN,
             max_batch_tips: MAX_BATCH_TIPS,
             max_jar_id_len: MAX_JAR_SLUG_LEN + 1,
+            min_jar_id_len: MIN_JAR_SLUG_LEN + 1,
+            max_fee_bps: MAX_FEE_BPS,
         }
     }
 

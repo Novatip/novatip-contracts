@@ -3687,6 +3687,8 @@ fn get_limits_matches_contract_constants() {
     assert_eq!(limits.max_message_len, MAX_MESSAGE_LEN);
     assert_eq!(limits.max_batch_tips, MAX_BATCH_TIPS);
     assert_eq!(limits.max_jar_id_len, MAX_JAR_SLUG_LEN + 1);
+    assert_eq!(limits.min_jar_id_len, MIN_JAR_SLUG_LEN + 1);
+    assert_eq!(limits.max_fee_bps, MAX_FEE_BPS);
     assert_eq!(
         limits,
         Limits {
@@ -3695,6 +3697,8 @@ fn get_limits_matches_contract_constants() {
             max_message_len: 280,
             max_batch_tips: 10,
             max_jar_id_len: 33,
+            min_jar_id_len: 4,
+            max_fee_bps: 500,
         },
         "the published limits are part of the public interface; changing one \
          means clients and docs/CONTRACT.md have to change with it"
@@ -5147,6 +5151,107 @@ fn cancel_recurring_requires_the_supporter() {
     // still present
     assert_eq!(client.get_recurring(&id).supporter, supporter);
 }
+
+// #316 / #317 — update_recurring keeps the id and due date; recr_add carries
+// the schedule and the jar as a topic.
+#[test]
+fn update_recurring_keeps_id_and_due_date_and_recr_add_has_payload() {
+    let s = setup();
+    let env = &s.env;
+    let client = TipSplitterClient::new(env, &s.contract);
+
+    let owner = Address::generate(env);
+    let alice = Address::generate(env);
+    let supporter = Address::generate(env);
+    let jar_id = String::from_str(env, "@monthly");
+    client.create_jar(
+        &owner,
+        &jar_id,
+        &vec![
+            env,
+            Split {
+                to: alice.clone(),
+                bps: 10000,
+            },
+        ],
+    );
+    let id = client.create_recurring(&supporter, &jar_id, &500, &100, &String::from_str(env, "a"));
+
+    let add_topics = vec![
+        env,
+        symbol_short!("recr_add").into_val(env),
+        supporter.clone().into_val(env),
+        jar_id.clone().into_val(env),
+    ];
+    let add_events: std::vec::Vec<_> = env
+        .events()
+        .all()
+        .iter()
+        .filter(|e| e.0 == s.contract && e.1 == add_topics)
+        .collect();
+    assert_eq!(add_events.len(), 1);
+    let added: RecurringAddedEvent =
+        TryFromVal::try_from_val(env, &add_events[0].2).expect("recr_add event data shape");
+    let before = client.get_recurring(&id);
+    assert_eq!(added.id, id);
+    assert_eq!(added.jar_id, jar_id);
+    assert_eq!(added.amount, 500);
+    assert_eq!(added.period_ledgers, 100);
+    assert_eq!(added.next_due_ledger, before.next_due_ledger);
+
+    client.update_recurring(&id, &700, &String::from_str(env, "b"));
+    let after = client.get_recurring(&id);
+    assert_eq!(after.amount, 700);
+    assert_eq!(after.message, String::from_str(env, "b"));
+    assert_eq!(after.next_due_ledger, before.next_due_ledger);
+
+    assert_eq!(
+        client.try_update_recurring(&id, &0, &String::from_str(env, "")),
+        Err(Ok(Error::AmountZero.into()))
+    );
+    env.mock_auths(&[]);
+    assert!(client.try_update_recurring(&id, &900, &String::from_str(env, "")).is_err());
+    assert_eq!(client.get_recurring(&id).amount, 700);
+}
+
+// #319 — get_jar_info matches the individual views.
+#[test]
+fn get_jar_info_matches_the_individual_views() {
+    let s = setup();
+    let env = &s.env;
+    let client = TipSplitterClient::new(env, &s.contract);
+
+    let owner = Address::generate(env);
+    let alice = Address::generate(env);
+    let jar_id = String::from_str(env, "@info");
+    client.create_jar(
+        &owner,
+        &jar_id,
+        &vec![
+            env,
+            Split {
+                to: alice.clone(),
+                bps: 10000,
+            },
+        ],
+    );
+
+    let info = client.get_jar_info(&jar_id);
+    let jar = client.get_jar(&jar_id);
+    let stats = client.get_jar_stats(&jar_id);
+    assert_eq!(info.owner, jar.owner);
+    assert_eq!(info.splits, jar.splits);
+    assert_eq!(info.locked, jar.locked);
+    assert_eq!(info.paused, client.is_jar_paused(&jar_id));
+    assert_eq!(info.min_tip_amount, client.get_min_tip_amount(&jar_id));
+    assert_eq!(info.min_accepted_tip, client.get_min_accepted_tip(&jar_id));
+    assert_eq!(info.tip_count, stats.tip_count);
+    assert_eq!(info.total, stats.total);
+    assert_eq!(info.fee_bps, client.get_fee_bps());
+
+    let res = client.try_get_jar_info(&String::from_str(env, "@nope"));
+    assert_eq!(res, Err(Ok(Error::JarNotFound.into())));
+}
 // ---------------------------------------------------------------------------
 // #167 — per-jar running tip totals
 // ---------------------------------------------------------------------------
@@ -5612,7 +5717,7 @@ fn version_matches_the_interface_constant() {
     assert_eq!(client.version(), INTERFACE_VERSION);
     assert_eq!(
         client.version(),
-        7,
+        8,
         "the published version is part of the public interface; bump \
          INTERFACE_VERSION when the shape changes, do not edit this test \
          to match a silent change"

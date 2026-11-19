@@ -129,6 +129,10 @@
           "type_": "u32"
         },
         {
+          "name": "max_fee_bps",
+          "type_": "u32"
+        },
+        {
           "name": "max_jar_id_len",
           "type_": "u32"
         },
@@ -139,6 +143,66 @@
         {
           "name": "max_recipients",
           "type_": "u32"
+        },
+        {
+          "name": "min_jar_id_len",
+          "type_": "u32"
+        }
+      ]
+    }
+  },
+  {
+    "udt_struct_v0": {
+      "lib": "",
+      "name": "JarInfo",
+      "fields": [
+        {
+          "name": "fee_bps",
+          "type_": "u32"
+        },
+        {
+          "name": "locked",
+          "type_": "bool"
+        },
+        {
+          "name": "min_accepted_tip",
+          "type_": "i128"
+        },
+        {
+          "name": "min_tip_amount",
+          "type_": {
+            "option": {
+              "value_type": "i128"
+            }
+          }
+        },
+        {
+          "name": "owner",
+          "type_": "address"
+        },
+        {
+          "name": "paused",
+          "type_": "bool"
+        },
+        {
+          "name": "splits",
+          "type_": {
+            "vec": {
+              "element_type": {
+                "udt": {
+                  "name": "Split"
+                }
+              }
+            }
+          }
+        },
+        {
+          "name": "tip_count",
+          "type_": "u64"
+        },
+        {
+          "name": "total",
+          "type_": "i128"
         }
       ]
     }
@@ -740,6 +804,62 @@
     }
   },
   {
+    "udt_struct_v0": {
+      "lib": "",
+      "name": "RecurringAddedEvent",
+      "fields": [
+        {
+          "name": "amount",
+          "type_": "i128"
+        },
+        {
+          "name": "id",
+          "type_": "u128"
+        },
+        {
+          "name": "jar_id",
+          "type_": "string"
+        },
+        {
+          "name": "next_due_ledger",
+          "type_": "u32"
+        },
+        {
+          "name": "period_ledgers",
+          "type_": "u32"
+        },
+        {
+          "name": "version",
+          "type_": "u32"
+        }
+      ]
+    }
+  },
+  {
+    "udt_struct_v0": {
+      "lib": "",
+      "name": "RecurringUpdatedEvent",
+      "fields": [
+        {
+          "name": "amount",
+          "type_": "i128"
+        },
+        {
+          "name": "id",
+          "type_": "u128"
+        },
+        {
+          "name": "message",
+          "type_": "string"
+        },
+        {
+          "name": "version",
+          "type_": "u32"
+        }
+      ]
+    }
+  },
+  {
     "function_v0": {
       "name": "__constructor",
       "inputs": [
@@ -1312,6 +1432,26 @@
   },
   {
     "function_v0": {
+      "name": "update_recurring",
+      "inputs": [
+        {
+          "name": "id",
+          "type_": "u128"
+        },
+        {
+          "name": "amount",
+          "type_": "i128"
+        },
+        {
+          "name": "message",
+          "type_": "string"
+        }
+      ],
+      "outputs": []
+    }
+  },
+  {
+    "function_v0": {
       "name": "get_recurring",
       "inputs": [
         {
@@ -1505,6 +1645,24 @@
         {
           "udt": {
             "name": "JarStats"
+          }
+        }
+      ]
+    }
+  },
+  {
+    "function_v0": {
+      "name": "get_jar_info",
+      "inputs": [
+        {
+          "name": "jar_id",
+          "type_": "string"
+        }
+      ],
+      "outputs": [
+        {
+          "udt": {
+            "name": "JarInfo"
           }
         }
       ]
