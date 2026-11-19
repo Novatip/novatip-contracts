@@ -42,13 +42,23 @@ Quick reference for bounds enforced by the contract:
 | Maximum message length | `280` bytes | `MAX_MESSAGE_LEN` | `MessageTooLong` (8) |
 | Maximum batch tips | `10` | `MAX_BATCH_TIPS` | `BatchTooLarge` (38) |
 | Maximum jar id length | `33` bytes (`@` + 32) | `MAX_JAR_SLUG_LEN + 1` | `InvalidJarId` (9) |
+| Minimum jar id length | `4` bytes (`@` + 3) | `MIN_JAR_SLUG_LEN + 1` | `InvalidJarId` (9) |
+| Maximum protocol fee | `500` bps (5%) | `MAX_FEE_BPS` | `FeeTooHigh` (35) |
 
 ## Types
 
 ```rust
 struct Split    { to: Address, bps: u32 }
 struct Jar      { owner: Address, splits: Vec<Split>, locked: bool, paused: bool }
-struct Limits   { bps_denom: u32, max_recipients: u32, max_message_len: u32, max_batch_tips: u32 }
+struct Limits   {
+    bps_denom: u32, max_recipients: u32, max_message_len: u32, max_batch_tips: u32,
+    max_jar_id_len: u32, min_jar_id_len: u32, max_fee_bps: u32,
+}
+struct JarInfo {
+    owner: Address, splits: Vec<Split>, locked: bool, paused: bool,
+    min_tip_amount: Option<i128>, min_accepted_tip: i128,
+    tip_count: u64, total: i128, fee_bps: u32,
+}
 struct Recurring {
     supporter: Address, jar_id: String, amount: i128,
     period_ledgers: u32, message: String, next_due_ledger: u32,
@@ -93,7 +103,9 @@ one belongs to a jar, the other to a `(jar, supporter)` pair.
 | `get_held(recipient) -> i128` | — | How much the contract is holding for `recipient` because a past tip could not deliver their share. `0` when nothing is held. |
 | `withdraw_held(recipient)` | `recipient` | Pay a recipient their held balance once they can receive again. Rejected with `NothingHeld` when nothing is owed. Emits a `withdraw` event with `HeldWithdrawnEvent { version, amount }` data. |
 | `create_recurring(supporter, jar_id, amount, period_ledgers, message) -> u128` | `supporter` | Register a recurring-tip schedule. Validates the jar exists and the amount/message pass the same checks `tip` applies; `period_ledgers` must be non-zero. Assigns a fresh id, stores the entry with its first `next_due_ledger`, and emits a `recr_add` event. Returns the id. The schedule moves funds through `collect_recurring`: the supporter must have approved this contract as a token spender for at least `amount` per period. |
+| `cancel_recurring(caller, id)` | `caller`: the entry's `supporter` or the jar's `owner` | Remove a recurring-tip record. Either party may cancel (#324); anyone else gets `NotAuthorized`. Emits a `recr_del` event naming who cancelled. |
 | `cancel_recurring(id)` | the entry's `supporter` | Remove a recurring-tip record. Emits a `recr_del` event. |
+| `update_recurring(id, amount, message)` | the entry's `supporter` | Change a recurring tip's amount and message in place (#316). Keeps the id and `next_due_ledger`. Validated like `create_recurring` (`AmountZero` / `AmountNegative` → `MessageTooLong` / `InvalidMessage` → `JarNotFound` → `BelowMinTipAmount` → split arithmetic); `RecurringNotFound` for an unknown id. Emits a `recr_upd` event. |
 | `get_recurring(id) -> Recurring` | — | Read a stored recurring-tip entry. Panics with `RecurringNotFound` for an unknown id. |
 | `collect_recurring(id)` | — (any caller, typically a keeper) | Collect **one due period** of a recurring tip (#175). Pays the schedule's `amount` from the supporter's approved allowance with `transfer_from` (this contract is the spender), split by the same arithmetic as `tip`, and publishes the identical `tip` event. `next_due_ledger` advances by exactly `period_ledgers`. Too early — `NotDue`; allowance below `amount` (exhausted or expired) — `InsufficientAllowance`; supporter balance below `amount` — `InsufficientBalance`; all raised before any transfer, with zero state change. See [collecting recurring tips](#collecting-a-due-recurring-tip-175). |
 | `tip(from, jar_id, amount, message)` | `from` | Transfer `amount` of the **default token** from `from`, split across the jar's recipients. Emits a `tip` event carrying the per-recipient breakdown and the token paid in. Rejects amounts below the jar's minimum with `BelowMinTipAmount`. |
@@ -128,10 +140,14 @@ one belongs to a jar, the other to a `(jar, supporter)` pair.
 | `resume()` | contract `admin` | Lift a pause. Emits a `resume` event in the shared admin shape with `paused: false`. |
 | `is_paused() -> bool` | — | Whether tipping is currently paused. Reads instance storage. |
 | `upgrade(new_wasm_hash)` | contract `admin` | Replace the running contract Wasm while keeping the address and all stored state. Emits an `upgrade` event carrying the previous and new hashes. |
+| `migrate()` | contract `admin` | Bring stored state up to this build's schema after an `upgrade` (#325). Runs once per schema version and emits a `migrate` event; a call with nothing to do changes nothing. |
 | `get_limits() -> Limits` | — | The bounds this contract enforces: `bps_denom`, `max_recipients`, `max_message_len`, `max_batch_tips`. Reads no storage. |
 | `get_limits() -> Limits` | — | The bounds this contract enforces: `bps_denom`, `max_recipients`, `max_message_len`, `max_jar_id_len`. Reads no storage. |
+| `get_limits() -> Limits` | — | The bounds this contract enforces: `bps_denom`, `max_recipients`, `max_message_len`, `max_batch_tips`, `max_jar_id_len`, `min_jar_id_len`, `max_fee_bps`. Reads no storage. |
+| `get_limits() -> Limits` | — | The bounds this contract enforces: `bps_denom`, `max_recipients`, `max_message_len`, `max_batch_tips`, `max_jar_id_len`, `min_jar_id_len`, `max_fee_bps`. Reads no storage. |
 | `version() -> u32` | — | Which interface shape this deployment speaks. Reads no storage. See [detecting the interface version](#detecting-the-interface-version). |
 | `get_jar_stats(jar_id) -> JarStats` | — | A jar's on-chain tip count and total. Zeros for a jar nobody has tipped; `JarNotFound` if the slug is free. |
+| `get_jar_info(jar_id) -> JarInfo` | — | Everything a tip page needs in one call (#319): `owner`, `splits`, `locked`, `paused`, `min_tip_amount`, `min_accepted_tip`, `tip_count`, `total` and the current `fee_bps`. The same values as `get_jar`, `get_min_tip_amount`, `get_min_accepted_tip`, `get_jar_stats` and `get_fee_bps`; `JarNotFound` if the slug is free. |
 | `get_supporter_stats(jar_id, supporter) -> SupporterStats` | — | One address's tip count and total against one jar. Zeros for an address that has never tipped it; `JarNotFound` if the slug is free. |
 | `is_token_allowed(token) -> bool` | — | Whether the admin has put `token` on the tip allowlist. The default token is always allowed. |
 | `get_allowed_tokens() -> Vec<Address>` | — | Every allowed token, default first (#321). The list holds at most 10 tokens (`MAX_ALLOWED_TOKENS`); `allow_token` beyond that is rejected with `TooManyAllowedTokens`. |
@@ -164,8 +180,8 @@ written as raised only when every earlier check has passed.
 | `get_min_accepted_tip(jar_id) -> i128` | — | `JarNotFound` | The smallest tip this jar accepts: the larger of the truncation floor and the configured minimum. See [the smallest amount a jar accepts](#the-smallest-amount-a-jar-accepts-86). |
 | `get_token() -> Address` | — | `NotInitialized` | The USDC token address tips settle in. Reads instance storage; `NotInitialized` if the deploy-time token is absent. |
 | `get_admin() -> Address` | — | `NotInitialized` | The contract admin recorded at deploy time. Reads instance storage; `NotInitialized` if the deploy-time admin is absent. |
-| `get_limits() -> Limits` | — | — | The bounds this contract enforces: `bps_denom`, `max_recipients`, `max_message_len`, `max_batch_tips`. Reads no storage. |
-| `get_limits() -> Limits` | — | — | The bounds this contract enforces: `bps_denom`, `max_recipients`, `max_message_len`, `max_jar_id_len`. Reads no storage. |
+| `get_limits() -> Limits` | — | — | The bounds this contract enforces: `bps_denom`, `max_recipients`, `max_message_len`, `max_batch_tips`, `max_jar_id_len`, `min_jar_id_len`, `max_fee_bps`. Reads no storage. |
+| `get_limits() -> Limits` | — | — | The bounds this contract enforces: `bps_denom`, `max_recipients`, `max_message_len`, `max_batch_tips`, `max_jar_id_len`, `min_jar_id_len`, `max_fee_bps`. Reads no storage. |
 
 Two ordering notes that are easy to get wrong:
 
@@ -228,7 +244,7 @@ own number, the splits editor hardcoded the twenty recipient limit, the
 onboarding form hardcoded 64 for the jar id — and changing a bound here
 silently desynchronised the stack.
 
-`get_limits` returns all four:
+`get_limits` returns all seven:
 
 ```rust
 Limits {
@@ -237,10 +253,12 @@ Limits {
     max_message_len: 280,    // MAX_MESSAGE_LEN — longest tip message, in UTF-8 bytes
     max_batch_tips: 10,      // MAX_BATCH_TIPS — most jars one `tip_many` call may tip
     max_jar_id_len: 33,      // MAX_JAR_SLUG_LEN + 1 — longest canonical jar id ("@" + 32)
+    min_jar_id_len: 4,       // MIN_JAR_SLUG_LEN + 1 — shortest canonical jar id ("@" + 3)
+    max_fee_bps: 500,        // MAX_FEE_BPS — highest fee `set_fee_bps` accepts
 }
 ```
 
-All four are compile-time constants, so the view reads no storage and costs
+All of them are compile-time constants, so the view reads no storage and costs
 the same regardless of contract state. A client can fetch it once at startup
 and cache it for the session.
 
@@ -765,6 +783,7 @@ does not check the admin.
 | `transfer_admin(new_admin)` | Hand the role to another address. It takes effect immediately; there is no acceptance step. |
 | `pause()` / `resume()` | Stop and restart `tip`, `tip_with_ref` and `tip_in_token`. |
 | `upgrade(new_wasm_hash)` | Replace the running Wasm, keeping the address and all stored state. |
+| `migrate()` | Run the stored-state migration for the installed build, once per schema version. |
 
 The powers are configuration, not custody. The admin **cannot**:
 
@@ -851,6 +870,7 @@ exactly the way issue #87 found it had.
 | 40 | `TooManyAllowedTokens` | `allow_token` was given a new token while the allowlist already holds `MAX_ALLOWED_TOKENS` (10) tokens (#321). |
 | 41 | `AboveMaxTipAmount` | A tip in the default token, or a preview, exceeded the jar's maximum set with `set_max_tip_amount` (#323). Raised before any transfer. |
 | 42 | `InvalidMaximumAmount` | `set_max_tip_amount` was given a maximum that is zero, negative or below the jar's minimum, or `set_min_tip_amount` a minimum above the jar's maximum (#323). |
+| 40 | `NotAuthorized` | `cancel_recurring` was called by an address that is neither the schedule's supporter nor the owner of its jar (#324). |
 
 Error codes are part of the public interface: `@novatip/sdk` and the frontend
 both map these numbers to user-facing messages. New variants are **appended**
@@ -1084,6 +1104,9 @@ positional pair.
 ### `recr_add` / `recr_del` — recurring-tip registration and cancellation
 
 - **`recr_add` Topics:** `(symbol "recr_add", supporter: Address)`, **Data:** `id: u128`
+- **`recr_del` Topics:** `(symbol "recr_del", supporter: Address)`, **Data:** `(id: u128, cancelled_by: Address)`, where `cancelled_by` is the supporter or the jar owner (#324)
+- **`recr_add` Topics:** `(symbol "recr_add", supporter: Address, jar_id: String)`, **Data:** `RecurringAddedEvent { version: 1, id: u128, jar_id: String, amount: i128, period_ledgers: u32, next_due_ledger: u32 }` (#317). A creator filters on the third topic to list their recurring supporters without calling `get_recurring` per id. **SDK impact:** decoders that read the old bare `id` must read `.id`, and subscriptions matching the two-element topic must add the jar.
+- **`recr_upd` Topics:** `(symbol "recr_upd", supporter: Address)`, **Data:** `RecurringUpdatedEvent { version: 1, id: u128, amount: i128, message: String }` (#316)
 - **`recr_del` Topics:** `(symbol "recr_del", supporter: Address)`, **Data:** `id: u128`
 
 Publishes the assigned schedule id (and `recr_del` the id it removed).
@@ -1119,6 +1142,7 @@ events are:
 | `resume` | `PauseEvent` | `paused: false` |
 | `adm_xfer` | `AdminTransferredEvent` | `new_admin: Address` (`admin` is the outgoing key) |
 | `upgrade` | `UpgradedEvent` | `previous_hash: Option<BytesN<32>>`, `new_hash: BytesN<32>` |
+| `migrate` | `MigratedEvent` | `from_version: u32`, `to_version: u32` |
 
 `tip_hook` records who changed the post-tip hook configuration and to what
 (#176). `reg_set` records every installation or removal of the `create_jar`
@@ -1132,6 +1156,20 @@ upgrade reports the hash installed by the previous one. The new build's
 `INTERFACE_VERSION` cannot be read inside the upgrade transaction — the
 executing code is still the old build — so clients call `version()` after the
 ledger closes if they need it.
+
+### Upgrade, then migrate (#325)
+
+`upgrade` swaps the code but cannot transform stored state. A build that
+changes storage bumps `SCHEMA_VERSION` and adds a step to `migrate`, guarded
+by the stored schema version. The procedure is:
+
+1. Install and call `upgrade(new_wasm_hash)`.
+2. In a later transaction, once the new code is live, call `migrate()`.
+
+`migrate` is admin-only and idempotent: each step runs once, the new version
+is recorded, and a `migrate` event reports `from_version` and `to_version`.
+Calling it again does nothing. A deployment that has never migrated reads as
+schema version 0.
 
 ## Locking a jar's splits
 
@@ -1512,7 +1550,7 @@ changes. Do not bump it for an internal refactor, a new storage key, or a doc
 edit — none of those are visible to a consumer, and a version that changes when
 nothing observable did is a version consumers stop trusting.
 
-This build ships `version() == 7`. Version 7 gives every admin event one shape
+This build ships `version() == 8`. Version 8 adds `update_recurring`, `get_jar_info` and the `recr_upd` event, gives `recr_add` a `RecurringAddedEvent` payload with the jar in its topics, and adds `min_jar_id_len` and `max_fee_bps` to `get_limits`. Version 7 gives every admin event one shape
 (name-only topic, versioned data struct with `version` and `admin`), turns
 `lock`, `jar_pause`, `withdraw`, `adm_xfer` and `jar_rnm` into named, versioned
 structs, adds the jar id to the `jar_del` and `jar_rnm` topics, and adds
