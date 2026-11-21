@@ -57,6 +57,10 @@ set -a; source .env; set +a
 ./scripts/pause-jar.sh       # pause or resume tipping (PAUSED=true|false)
 ./scripts/lock-splits.sh     # lock splits, or print the multisigner unlock flow
 ./scripts/leave-jar.sh       # remove SOURCE from a jar's recipient splits
+./scripts/rename-jar.sh      # rename a jar (SLUG -> NEW_SLUG)
+./scripts/delete-jar.sh      # delete a jar after typing its slug to confirm
+./scripts/recurring.sh       # create, show, cancel or collect recurring tips
+./scripts/upgrade.sh         # upload a wasm and upgrade the deployed contract
 ./scripts/withdraw-held.sh   # release a recipient's escrowed share
 ./scripts/allowlist.sh       # allow, disallow or check a token (ACTION=...)
 ./scripts/pause-contract.sh  # pause, resume or inspect contract tipping
@@ -76,6 +80,10 @@ set -a; source .env; set +a
 | `pause-jar.sh` | `NETWORK`, `SOURCE` (the jar owner), `SLUG`, `PAUSED=true|false` | Pauses or resumes tipping and reads the resulting state back |
 | `lock-splits.sh` | `NETWORK`, `SOURCE` (the jar owner), `SLUG`, `ACTION=lock|unlock` | Locks splits and verifies the state. Unlock requires the owner and every current recipient to sign; `ACTION=unlock` prints build, signing, and submission instructions without submitting an incomplete transaction |
 | `leave-jar.sh` | `NETWORK`, `SOURCE` (the recipient), `SLUG`, and optionally `RECIPIENT` | Defaults `RECIPIENT` to the source identity address, checks membership, and prints splits before and after leaving |
+| `rename-jar.sh` | `NETWORK`, `SOURCE` (the jar owner), `SLUG`, `NEW_SLUG` | Validates `NEW_SLUG` with the contract's canonical slug rule, fails early if it is taken, and reads the jar back under the new slug |
+| `delete-jar.sh` | `NETWORK`, `SOURCE` (the jar owner), `SLUG`, and optionally `YES=1` | Prints the jar and its totals, requires typing the slug to confirm (skipped with `YES=1`), deletes it, and confirms `jar_exists` is false |
+| `recurring.sh` | `NETWORK`, `SOURCE`, and a subcommand: `create` (`SLUG`, `AMOUNT`, `PERIOD_LEDGERS`), `show` / `cancel` / `collect` (`ID`) | `create` prints the token `approve` command with the tip splitter as spender and an expiration ledger; `collect` explains `NotDue` with the schedule's next due ledger; every call validates input locally and reads the result back |
+| `upgrade.sh` | `NETWORK`, `SOURCE` (the contract admin), and optionally `WASM`, `CONFIRM_MAINNET=1` | Builds this checkout or takes `WASM`, uploads it, checks the returned hash, requires a typed confirmation on mainnet, calls `upgrade`, verifies the deployed wasm hash, and prints `version()` before and after |
 | `withdraw-held.sh` | `NETWORK`, `SOURCE` (the recipient), `RECIPIENT`, `USDC_TOKEN` | Prints `get_held`, exits cleanly when it is zero, reuses `trustline.sh --check` to warn on a missing trustline, and reads the balance back after withdrawing |
 | `allowlist.sh` | `NETWORK`, `SOURCE` (the contract admin), `TOKEN`, `ACTION=allow|disallow|check` | Refuses to disallow the default token locally (`CannotDisallowDefault`), and reads `is_token_allowed` back after allow/disallow |
 | `pause-contract.sh` | `NETWORK`, `SOURCE` (the contract admin), `ACTION=pause|resume|status` | Prints `is_paused` before and after the call and reminds the operator which tip entry points are blocked |
