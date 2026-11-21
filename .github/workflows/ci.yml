@@ -76,6 +76,9 @@ jobs:
 
   build-test:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write   # PR size comment (#306)
     env:
       STELLAR_VERSION: 27.1.0
     steps:
@@ -125,6 +128,78 @@ jobs:
 
       - name: Report wasm size
         run: ./scripts/check-wasm-size.sh
+
+      # Compare this PR's artifact with the base branch (#306). The base is built
+      # from its own checkout so the delta is measured, not estimated from a cache.
+      - name: Check out the base for the size comparison
+        if: github.event_name == 'pull_request'
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          path: base
+
+      - name: Build the base wasm
+        if: github.event_name == 'pull_request'
+        working-directory: base
+        run: stellar contract build
+
+      # Writes base, PR and delta to the job summary and the PR body text. Growth
+      # above MAX_WASM_GROWTH_BYTES fails the job in the next step unless the PR
+      # carries the `size-ok` label. Non-fatal on its own.
+      - name: Compare wasm size with the base
+        if: github.event_name == 'pull_request'
+        id: wasm-delta
+        env:
+          MAX_WASM_GROWTH_BYTES: '8192'
+          PR_HAS_SIZE_OK: ${{ contains(github.event.pull_request.labels.*.name, 'size-ok') }}
+        run: |
+          set -euo pipefail
+          BASE_WASM=base/target/wasm32v1-none/release/tip_splitter.wasm
+          PR_WASM=target/wasm32v1-none/release/tip_splitter.wasm
+          test -f "${BASE_WASM}" || { echo "error: ${BASE_WASM} was not built" >&2; exit 1; }
+          BASE_SIZE=$(wc -c < "${BASE_WASM}")
+          PR_SIZE=$(wc -c < "${PR_WASM}")
+          DELTA=$((PR_SIZE - BASE_SIZE))
+          OVER=false
+          if [ "${DELTA}" -gt "${MAX_WASM_GROWTH_BYTES}" ] && [ "${PR_HAS_SIZE_OK}" != "true" ]; then
+            OVER=true
+          fi
+          {
+            echo "### Wasm size vs base"
+            echo
+            echo "| Base (bytes) | PR (bytes) | Delta (bytes) | Growth limit (bytes) |"
+            echo "|-------------:|-----------:|--------------:|---------------------:|"
+            echo "| ${BASE_SIZE} | ${PR_SIZE} | ${DELTA} | ${MAX_WASM_GROWTH_BYTES} |"
+          } >> "${GITHUB_STEP_SUMMARY}"
+          {
+            echo "<!-- wasm-size-delta -->"
+            echo "### Wasm size vs base"
+            echo
+            echo "| Base (bytes) | PR (bytes) | Delta (bytes) | Growth limit (bytes) |"
+            echo "|-------------:|-----------:|--------------:|---------------------:|"
+            echo "| ${BASE_SIZE} | ${PR_SIZE} | ${DELTA} | ${MAX_WASM_GROWTH_BYTES} |"
+            echo
+            if [ "${OVER}" = "true" ]; then
+              echo "Growth is over the limit. Shrink the contract or add the \`size-ok\` label with a reason."
+            fi
+          } > wasm-size-comment.md
+          echo "over=${OVER}" >> "${GITHUB_OUTPUT}"
+
+      # A comment failure must not fail the build: fork pull requests get a
+      # read-only token, so this step is expected to be skipped with an error there.
+      - name: Post the wasm size delta as a pull request comment
+        if: github.event_name == 'pull_request'
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: gh pr comment "${PR_NUMBER}" --body-file wasm-size-comment.md --edit-last --create-if-none
+
+      - name: Fail on large growth without the size-ok label
+        if: github.event_name == 'pull_request' && steps.wasm-delta.outputs.over == 'true'
+        run: |
+          echo "::error::Wasm growth is over the per-PR limit. Add the size-ok label with a reason to override." >&2
+          exit 1
 
       # Fail here, not later, if the artifact the smoke tests import is absent.
       - name: Check the built wasm exists
