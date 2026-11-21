@@ -52,6 +52,8 @@ set -a; source .env; set +a
 ./scripts/transfer-jar.sh    # hand a jar to NEW_OWNER
 ./scripts/set-min-tip.sh     # set a jar's minimum tip, or clear it
 ./scripts/set-fee.sh         # set the protocol fee (default 100 bps = 1%)
+./scripts/set-hook.sh        # set or clear the post-tip hook contract
+./scripts/set-registrar.sh   # set or clear the jar-creation registrar
 ./scripts/pause-jar.sh       # pause or resume tipping (PAUSED=true|false)
 ./scripts/lock-splits.sh     # lock splits, or print the multisigner unlock flow
 ./scripts/leave-jar.sh       # remove SOURCE from a jar's recipient splits
@@ -61,10 +63,12 @@ set -a; source .env; set +a
 |--------|-------|-------|
 | `deploy.sh` | `NETWORK`, `SOURCE`, `ADMIN`, `USDC_TOKEN` | Prints and saves the deployed contract id to `.contract-id.<NETWORK>` |
 | `create-jar.sh` | `NETWORK`, `SOURCE`, `OWNER`, `SLUG`, and `RECIPIENT` or `SPLITS` | `SPLITS` is validated locally (1–20 recipients, bps summing to 10000) before any call |
-| `tip.sh` | `NETWORK`, `SOURCE`, `JAR_ID`, `AMOUNT`, and optionally `FROM` and `MESSAGE` | `tip` takes the tipper and the message text as arguments; `FROM` defaults to `SOURCE` (only the submitting identity can sign) and `MESSAGE` to a placeholder, since the CLI rejects an empty message |
+| `tip.sh` | `NETWORK`, `SOURCE`, `JAR_ID`, `AMOUNT`, and optionally `FROM`, `MESSAGE`, `REFERENCE`, `TOKEN` | `tip` takes the tipper and the message text as arguments; `FROM` defaults to `SOURCE` (only the submitting identity can sign) and `MESSAGE` to a placeholder, since the CLI rejects an empty message. `REFERENCE` (64 hex chars) routes via `tip_with_ref`, and `TOKEN` (`C...`) routes via `tip_in_token` |
 | `transfer-jar.sh` | `NETWORK`, `SOURCE`, `SLUG`, `NEW_OWNER` | Reads and prints the jar's current owner first, so a wrong `SOURCE` or contract is visible before the hand-over |
 | `set-min-tip.sh` | `NETWORK`, `SOURCE`, `SLUG`, and optionally `MIN_TIP` | `MIN_TIP` is a positive integer in the token's smallest unit. Unset or `none` **clears** the minimum — which means invoking without the `--min_amount` flag at all, the only way to send `Option::None`. Zero, negative and non-numeric values are rejected locally |
 | `set-fee.sh` | `NETWORK`, `SOURCE` (the contract admin), and optionally `FEE_BPS` | Sets the protocol fee taken from every tip before the split. `FEE_BPS` defaults to `100` (1%); `0` turns the fee off; above `500` (5%) is rejected locally and by the contract. Reads the value back |
+| `set-hook.sh` | `NETWORK`, `SOURCE` (the contract admin), and optionally `HOOK` | Sets the post-tip hook contract (`C...`) or clears it when `HOOK` is unset or `none` (omitting `--hook` to pass `Option::None`). Reads `get_tip_hook` back |
+| `set-registrar.sh` | `NETWORK`, `SOURCE` (the contract admin), and optionally `REGISTRAR` | Sets the jar registrar (`G...` or `C...`) or clears it when `REGISTRAR` is unset or `none` (omitting `--registrar` to pass `Option::None`). Reads `get_registrar` back |
 | `pause-jar.sh` | `NETWORK`, `SOURCE` (the jar owner), `SLUG`, `PAUSED=true|false` | Pauses or resumes tipping and reads the resulting state back |
 | `lock-splits.sh` | `NETWORK`, `SOURCE` (the jar owner), `SLUG`, `ACTION=lock|unlock` | Locks splits and verifies the state. Unlock requires the owner and every current recipient to sign; `ACTION=unlock` prints build, signing, and submission instructions without submitting an incomplete transaction |
 | `leave-jar.sh` | `NETWORK`, `SOURCE` (the recipient), `SLUG`, and optionally `RECIPIENT` | Defaults `RECIPIENT` to the source identity address, checks membership, and prints splits before and after leaving |
