@@ -9920,3 +9920,82 @@ fn migrate_runs_once_per_schema_version() {
         .count();
     assert_eq!(again, 0);
 }
+
+/// A jar flagged default-token-only (#313) rejects `tip_in_token` for any
+/// other allowed token before funds move, still takes the default token, and
+/// the flag survives a rename.
+#[test]
+fn default_token_only_jar_rejects_other_tokens() {
+    let s = setup();
+    let env = &s.env;
+    let client = TipSplitterClient::new(env, &s.contract);
+    let usdc = token::Client::new(env, &s.token);
+    let usdc_admin = token::StellarAssetClient::new(env, &s.token);
+
+    let eurc = second_asset(env, &s.admin);
+    let eurc_client = token::Client::new(env, &eurc);
+    let eurc_admin = token::StellarAssetClient::new(env, &eurc);
+
+    let owner = Address::generate(env);
+    let alice = Address::generate(env);
+    let tipper = Address::generate(env);
+    usdc_admin.mint(&tipper, &1_000);
+    eurc_admin.mint(&tipper, &1_000);
+    client.allow_token(&eurc);
+
+    let jar_id = String::from_str(env, "@defonly");
+    client.create_jar(
+        &owner,
+        &jar_id,
+        &vec![
+            env,
+            Split {
+                to: alice.clone(),
+                bps: 10000,
+            },
+        ],
+    );
+
+    // Off by default, and the owner can switch it on.
+    assert!(!client.get_jar_tokens_default_only(&jar_id));
+    client.set_jar_tokens_default_only(&jar_id, &true);
+    assert!(client.get_jar_tokens_default_only(&jar_id));
+
+    // Another allowed token is refused and no funds move.
+    let res = client.try_tip_in_token(
+        &tipper,
+        &jar_id,
+        &eurc,
+        &100,
+        &String::from_str(env, "eurc"),
+    );
+    assert_eq!(res, Err(Ok(Error::NonDefaultToken.into())));
+    assert_eq!(eurc_client.balance(&alice), 0);
+
+    // The default token still settles.
+    client.tip_in_token(
+        &tipper,
+        &jar_id,
+        &s.token,
+        &100,
+        &String::from_str(env, "usdc"),
+    );
+    assert_eq!(usdc.balance(&alice), 100);
+
+    // The flag follows the jar through a rename.
+    let new_id = String::from_str(env, "@defonly2");
+    client.rename_jar(&jar_id, &new_id);
+    assert!(client.get_jar_tokens_default_only(&new_id));
+    assert!(!client.get_jar_tokens_default_only(&jar_id));
+
+    // Clearing it lets the other token through again.
+    client.set_jar_tokens_default_only(&new_id, &false);
+    client.tip_in_token(
+        &tipper,
+        &new_id,
+        &eurc,
+        &100,
+        &String::from_str(env, "eurc again"),
+    );
+    assert_eq!(eurc_client.balance(&alice), 100);
+}
