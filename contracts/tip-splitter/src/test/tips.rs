@@ -2481,3 +2481,187 @@ fn tip_many_pays_in_an_allowed_token() {
     client.tip_many(&tipper, &batch, &Some(eurc.clone()));
     assert_eq!(eurc_client.balance(&recipient), 100);
 }
+
+// ---------------------------------------------------------------------------
+// #263 — `tip` reports the earlier of two failures, in the order
+// docs/CONTRACT.md documents: ContractPaused → NotInitialized →
+// AmountZero / AmountNegative → MessageTooLong → JarNotFound → JarPaused →
+// BelowMinTipAmount → InsufficientBalance → SplitAmountTooSmall /
+// AmountOverflow. Each test breaks two adjacent checks at once.
+//
+// JarNotFound → JarPaused has no test: a jar that does not exist cannot be
+// paused, so the two can never fail together.
+// ---------------------------------------------------------------------------
+
+fn remove_token_key(s: &Setup) {
+    s.env.as_contract(&s.contract, || {
+        s.env.storage().instance().remove(&DataKey::Token);
+    });
+}
+
+fn over_long_message(env: &Env) -> String {
+    String::from_bytes(env, &[b'a'; MAX_MESSAGE_LEN as usize + 1])
+}
+
+#[test]
+fn tip_error_order_contract_paused_before_not_initialized() {
+    let s = setup();
+    let env = &s.env;
+    let client = TipSplitterClient::new(env, &s.contract);
+    let (_, _, jar_id) = one_recipient_jar(env, &client, "@order");
+    client.pause();
+    remove_token_key(&s);
+
+    let res = client.try_tip(
+        &Address::generate(env),
+        &jar_id,
+        &100,
+        &String::from_str(env, ""),
+    );
+    assert_eq!(res, Err(Ok(Error::ContractPaused.into())));
+}
+
+#[test]
+fn tip_error_order_not_initialized_before_bad_amount() {
+    let s = setup();
+    let env = &s.env;
+    let client = TipSplitterClient::new(env, &s.contract);
+    let (_, _, jar_id) = one_recipient_jar(env, &client, "@order");
+    remove_token_key(&s);
+    let tipper = Address::generate(env);
+    let msg = String::from_str(env, "");
+
+    assert_eq!(
+        client.try_tip(&tipper, &jar_id, &0, &msg),
+        Err(Ok(Error::NotInitialized.into()))
+    );
+    assert_eq!(
+        client.try_tip(&tipper, &jar_id, &-1, &msg),
+        Err(Ok(Error::NotInitialized.into()))
+    );
+}
+
+#[test]
+fn tip_error_order_bad_amount_before_message_too_long() {
+    let s = setup();
+    let env = &s.env;
+    let client = TipSplitterClient::new(env, &s.contract);
+    let (_, _, jar_id) = one_recipient_jar(env, &client, "@order");
+    let tipper = Address::generate(env);
+    let msg = over_long_message(env);
+
+    assert_eq!(
+        client.try_tip(&tipper, &jar_id, &0, &msg),
+        Err(Ok(Error::AmountZero.into()))
+    );
+    assert_eq!(
+        client.try_tip(&tipper, &jar_id, &-1, &msg),
+        Err(Ok(Error::AmountNegative.into()))
+    );
+}
+
+#[test]
+fn tip_error_order_message_too_long_before_jar_not_found() {
+    let s = setup();
+    let env = &s.env;
+    let client = TipSplitterClient::new(env, &s.contract);
+
+    let res = client.try_tip(
+        &Address::generate(env),
+        &String::from_str(env, "@ghost"),
+        &100,
+        &over_long_message(env),
+    );
+    assert_eq!(res, Err(Ok(Error::MessageTooLong.into())));
+}
+
+#[test]
+fn tip_error_order_jar_paused_before_below_min_tip_amount() {
+    let s = setup();
+    let env = &s.env;
+    let client = TipSplitterClient::new(env, &s.contract);
+    let (_, _, jar_id) = one_recipient_jar(env, &client, "@order");
+    client.set_min_tip_amount(&jar_id, &Some(50));
+    client.set_jar_paused(&jar_id, &true);
+
+    let res = client.try_tip(
+        &Address::generate(env),
+        &jar_id,
+        &10,
+        &String::from_str(env, ""),
+    );
+    assert_eq!(res, Err(Ok(Error::JarPaused.into())));
+}
+
+#[test]
+fn tip_error_order_below_min_tip_amount_before_insufficient_balance() {
+    let s = setup();
+    let env = &s.env;
+    let client = TipSplitterClient::new(env, &s.contract);
+    let (_, _, jar_id) = one_recipient_jar(env, &client, "@order");
+    client.set_min_tip_amount(&jar_id, &Some(50));
+
+    // The tipper holds nothing, so the balance check would also fail.
+    let res = client.try_tip(
+        &Address::generate(env),
+        &jar_id,
+        &10,
+        &String::from_str(env, ""),
+    );
+    assert_eq!(res, Err(Ok(Error::BelowMinTipAmount.into())));
+}
+
+/// Not in the documented order for `tip`: the code checks the jar maximum
+/// (#323) between the minimum and the balance, as `tip_many`'s row says.
+#[test]
+fn tip_error_order_above_max_tip_amount_before_insufficient_balance() {
+    let s = setup();
+    let env = &s.env;
+    let client = TipSplitterClient::new(env, &s.contract);
+    let (_, _, jar_id) = one_recipient_jar(env, &client, "@order");
+    client.set_max_tip_amount(&jar_id, &Some(100));
+
+    let res = client.try_tip(
+        &Address::generate(env),
+        &jar_id,
+        &200,
+        &String::from_str(env, ""),
+    );
+    assert_eq!(res, Err(Ok(Error::AboveMaxTipAmount.into())));
+}
+
+#[test]
+fn tip_error_order_insufficient_balance_before_split_errors() {
+    let s = setup();
+    let env = &s.env;
+    let client = TipSplitterClient::new(env, &s.contract);
+    let jar_id = String::from_str(env, "@order");
+    client.create_jar(
+        &Address::generate(env),
+        &jar_id,
+        &vec![
+            env,
+            Split {
+                to: Address::generate(env),
+                bps: 9_999,
+            },
+            Split {
+                to: Address::generate(env),
+                bps: 1,
+            },
+        ],
+    );
+    let tipper = Address::generate(env);
+    let msg = String::from_str(env, "");
+
+    // A 1 bps share of 1 truncates to zero (SplitAmountTooSmall).
+    assert_eq!(
+        client.try_tip(&tipper, &jar_id, &1, &msg),
+        Err(Ok(Error::InsufficientBalance.into()))
+    );
+    // i128::MAX * 9_999 overflows (AmountOverflow).
+    assert_eq!(
+        client.try_tip(&tipper, &jar_id, &i128::MAX, &msg),
+        Err(Ok(Error::InsufficientBalance.into()))
+    );
+}
