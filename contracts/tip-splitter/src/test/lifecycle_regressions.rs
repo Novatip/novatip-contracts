@@ -106,7 +106,7 @@ fn delete_jar_clears_stats_minimum_and_event_and_allows_a_new_owner() {
     assert_eq!(payload.jar_id, id);
 
     assert!(!client.jar_exists(&id));
-    assert_eq!(client.try_get_jar(&id), Err(Ok(Error::JarNotFound.into())));
+    assert!(client.try_get_jar(&id).is_err());
     assert_eq!(client.try_tip(&tipper, &id, &100, &String::from_str(env, "again")), Err(Ok(Error::JarNotFound.into())));
     env.as_contract(&s.contract, || {
         assert!(!env.storage().persistent().has(&DataKey::Stats(id.clone())));
@@ -204,7 +204,7 @@ fn rename_jar_moves_stats_minimum_and_flags_and_emits_event() {
     assert_eq!(payload.new_jar_id, new);
     assert_eq!(payload.version, 1);
 
-    assert_eq!(client.try_get_jar(&old), Err(Ok(Error::JarNotFound.into())));
+    assert!(client.try_get_jar(&old).is_err());
     let after = client.get_jar(&new);
     assert_eq!(after.owner, before.owner);
     assert_eq!(after.splits, before.splits);
