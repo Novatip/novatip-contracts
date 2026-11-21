@@ -13,6 +13,7 @@ All notable changes to `novatip-contracts` are documented here.
 - Documented the split rounding rule with a worked example: the last recipient absorbs the remainder, so entry order matters (#60).
 
 ### Added
+- `version()` is now `10`: `change_recipient(jar_id, old, new)` lets a recipient replace their own address in a jar without the owner, keeping bps, position and any lock, and publishes a `splits` event (#310); `withdraw_held_to(recipient, to)` pays a held balance to another address with a `wd_to` event carrying both (#311); `set_fee_recipient(Option<Address>)` (admin only) and `get_fee_recipient()` send protocol fees to a configurable address, defaulting to the admin, with a `fee_rcpt` event, and the fee self-transfer rule now compares the tipper with the fee recipient (#312). No new error codes
 - `scripts/upgrade.sh` uploads a wasm, checks its hash, confirms on mainnet, calls `upgrade`, verifies the deployed wasm and prints `version()` before and after (#294)
 - `scripts/recurring.sh` creates, shows, cancels and collects recurring tips, printing the token `approve` command and explaining `NotDue` with the next due ledger (#290)
 - `scripts/delete-jar.sh` prints a jar and its totals, requires typing the slug to confirm, deletes it and checks `jar_exists` (#288)

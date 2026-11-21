@@ -586,6 +586,26 @@
   {
     "udt_struct_v0": {
       "lib": "",
+      "name": "HeldWithdrawnToEvent",
+      "fields": [
+        {
+          "name": "amount",
+          "type_": "i128"
+        },
+        {
+          "name": "to",
+          "type_": "address"
+        },
+        {
+          "name": "version",
+          "type_": "u32"
+        }
+      ]
+    }
+  },
+  {
+    "udt_struct_v0": {
+      "lib": "",
       "name": "JarRenamedEvent",
       "fields": [
         {
@@ -791,6 +811,30 @@
         {
           "name": "fee_bps",
           "type_": "u32"
+        },
+        {
+          "name": "version",
+          "type_": "u32"
+        }
+      ]
+    }
+  },
+  {
+    "udt_struct_v0": {
+      "lib": "",
+      "name": "FeeRecipientEvent",
+      "fields": [
+        {
+          "name": "admin",
+          "type_": "address"
+        },
+        {
+          "name": "recipient",
+          "type_": {
+            "option": {
+              "value_type": "address"
+            }
+          }
         },
         {
           "name": "version",
@@ -1042,6 +1086,26 @@
               }
             }
           }
+        }
+      ],
+      "outputs": []
+    }
+  },
+  {
+    "function_v0": {
+      "name": "change_recipient",
+      "inputs": [
+        {
+          "name": "jar_id",
+          "type_": "string"
+        },
+        {
+          "name": "old",
+          "type_": "address"
+        },
+        {
+          "name": "new",
+          "type_": "address"
         }
       ],
       "outputs": []
@@ -1502,6 +1566,31 @@
   },
   {
     "function_v0": {
+      "name": "set_fee_recipient",
+      "inputs": [
+        {
+          "name": "recipient",
+          "type_": {
+            "option": {
+              "value_type": "address"
+            }
+          }
+        }
+      ],
+      "outputs": []
+    }
+  },
+  {
+    "function_v0": {
+      "name": "get_fee_recipient",
+      "inputs": [],
+      "outputs": [
+        "address"
+      ]
+    }
+  },
+  {
+    "function_v0": {
       "name": "get_tip_count",
       "inputs": [],
       "outputs": [
@@ -1529,6 +1618,22 @@
       "inputs": [
         {
           "name": "recipient",
+          "type_": "address"
+        }
+      ],
+      "outputs": []
+    }
+  },
+  {
+    "function_v0": {
+      "name": "withdraw_held_to",
+      "inputs": [
+        {
+          "name": "recipient",
+          "type_": "address"
+        },
+        {
+          "name": "to",
           "type_": "address"
         }
       ],

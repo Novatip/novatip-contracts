@@ -150,7 +150,7 @@ const INSTANCE_TTL_THRESHOLD: u32 = JAR_TTL_THRESHOLD;
 ///
 /// This is a per-contract number for client feature detection. It complements
 /// the per-event schema version proposed in #83 rather than replacing it.
-const INTERFACE_VERSION: u32 = 9;
+const INTERFACE_VERSION: u32 = 10;
 
 /// Storage schema this build expects. Bump it together with a new step in
 /// `migrate` whenever stored state needs transforming after an upgrade (#325).
@@ -323,6 +323,9 @@ pub enum DataKey {
     /// Storage schema version recorded by `migrate` (#325). Instance storage;
     /// absent on a deployment that has never migrated, read as 0.
     SchemaVersion,
+    /// Optional fee recipient set by the admin (#312). Instance storage;
+    /// absence means fees go to the admin.
+    FeeRecipient,
 }
 
 #[contracterror]
@@ -445,6 +448,15 @@ pub struct HeldWithdrawnEvent {
     pub amount: i128,
 }
 
+// Data published by `wd_to` (#311); the topic carries the recipient.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct HeldWithdrawnToEvent {
+    pub version: u32,
+    pub amount: i128,
+    pub to: Address,
+}
+
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct JarRenamedEvent {
@@ -521,6 +533,15 @@ pub struct FeeEvent {
     pub version: u32,
     pub admin: Address,
     pub fee_bps: u32,
+}
+
+// Data published by `fee_rcpt` (#312).
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FeeRecipientEvent {
+    pub version: u32,
+    pub admin: Address,
+    pub recipient: Option<Address>,
 }
 
 // Data published by `pause` and `resume`.
@@ -781,6 +802,53 @@ impl TipSplitter {
                 }
             }
         }
+
+        let split_count = splits.len();
+        let new_splits = splits.clone();
+        Self::store_jar(
+            &env,
+            &jar_id,
+            &Jar {
+                owner: jar.owner,
+                splits,
+                locked: jar.locked,
+                paused: jar.paused,
+            },
+        );
+
+        env.events().publish(
+            (symbol_short!("splits"), jar_id),
+            SplitsUpdatedEvent {
+                version: 1,
+                count: split_count,
+                splits: new_splits,
+            },
+        );
+    }
+
+    /// Replace `old` with `new` in the jar's splits, keeping its bps and
+    /// position (#310). Authorized by `old` only, so it works on a locked jar
+    /// and without the owner; the lock is kept.
+    pub fn change_recipient(env: Env, jar_id: String, old: Address, new: Address) {
+        old.require_auth();
+        let jar = Self::load_jar(&env, &jar_id);
+        if new == env.current_contract_address() || new == Self::get_token(env.clone()) {
+            panic_with_error!(&env, Error::InvalidRecipient);
+        }
+        let mut splits = jar.splits.clone();
+        let mut index: Option<u32> = None;
+        for i in 0..splits.len() {
+            let s = splits.get(i).unwrap();
+            if s.to == new {
+                panic_with_error!(&env, Error::DuplicateRecipient);
+            }
+            if s.to == old {
+                index = Some(i);
+            }
+        }
+        let i = index.unwrap_or_else(|| panic_with_error!(&env, Error::NotRecipient));
+        let bps = splits.get(i).unwrap().bps;
+        splits.set(i, Split { to: new, bps });
 
         let split_count = splits.len();
         let new_splits = splits.clone();
@@ -1818,6 +1886,37 @@ impl TipSplitter {
         env.storage().instance().get(&DataKey::FeeBps).unwrap_or(0)
     }
 
+    /// Send protocol fees to `recipient` instead of the admin (#312); `None`
+    /// clears it so fees go to the admin again. Admin only.
+    pub fn set_fee_recipient(env: Env, recipient: Option<Address>) {
+        let admin = Self::require_admin(&env);
+        match &recipient {
+            Some(r) => {
+                if *r == env.current_contract_address() || *r == Self::get_token(env.clone()) {
+                    panic_with_error!(&env, Error::InvalidRecipient);
+                }
+                env.storage().instance().set(&DataKey::FeeRecipient, r);
+            }
+            None => env.storage().instance().remove(&DataKey::FeeRecipient),
+        }
+        env.events().publish(
+            (symbol_short!("fee_rcpt"),),
+            FeeRecipientEvent {
+                version: 1,
+                admin,
+                recipient,
+            },
+        );
+    }
+
+    /// Where protocol fees are paid: the configured recipient, or the admin.
+    pub fn get_fee_recipient(env: Env) -> Address {
+        env.storage()
+            .instance()
+            .get(&DataKey::FeeRecipient)
+            .unwrap_or_else(|| Self::get_admin(env.clone()))
+    }
+
     /// Split a gross tip into `(fee, net)` under the configured fee (#79).
     ///
     /// The fee truncates, so any rounding favours the tipper's recipients, and
@@ -1837,18 +1936,18 @@ impl TipSplitter {
     }
 
     /// Who a fee of `fee` should be transferred to, or `None` when nothing
-    /// moves: no fee, or the tipper is the admin. That second case is the
-    /// self-transfer rule applied to the fee, and the `tip` event then
-    /// reports a fee of 0 because nothing moved.
+    /// moves: no fee, or the tipper is the fee recipient (#312). That second
+    /// case is the self-transfer rule applied to the fee, and the `tip` event
+    /// then reports a fee of 0 because nothing moved.
     fn fee_payee(env: &Env, from: &Address, fee: i128) -> Option<Address> {
         if fee == 0 {
             return None;
         }
-        let admin = Self::get_admin(env.clone());
-        if admin == *from {
+        let payee = Self::get_fee_recipient(env.clone());
+        if payee == *from {
             None
         } else {
-            Some(admin)
+            Some(payee)
         }
     }
 
@@ -1959,6 +2058,34 @@ impl TipSplitter {
             HeldWithdrawnEvent {
                 version: 1,
                 amount: held,
+            },
+        );
+    }
+
+    /// Like `withdraw_held`, but pays `to` (#311), for a recipient account
+    /// that can no longer receive the token. Authorized by `recipient`.
+    pub fn withdraw_held_to(env: Env, recipient: Address, to: Address) {
+        recipient.require_auth();
+        let contract_addr = env.current_contract_address();
+        let token_addr: Address = Self::get_token(env.clone());
+        if to == contract_addr || to == token_addr {
+            panic_with_error!(&env, Error::InvalidRecipient);
+        }
+        let held_key = DataKey::Held(recipient.clone());
+        let held: i128 = env.storage().persistent().get(&held_key).unwrap_or(0);
+        if held <= 0 {
+            panic_with_error!(&env, Error::NothingHeld);
+        }
+
+        env.storage().persistent().remove(&held_key);
+        token::Client::new(&env, &token_addr).transfer(&contract_addr, &to, &held);
+
+        env.events().publish(
+            (symbol_short!("wd_to"), recipient),
+            HeldWithdrawnToEvent {
+                version: 1,
+                amount: held,
+                to,
             },
         );
     }
