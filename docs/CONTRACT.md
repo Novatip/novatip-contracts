@@ -1188,6 +1188,60 @@ whether an address is a recipient *now*, use
 > tip, so indexers that assumed all-or-nothing must treat `held = true` entries
 > as escrowed (claimable via `withdraw_held`) rather than as failures.
 
+#### `seq` — the tip's sequence number
+
+`seq` is a contract-wide counter, incremented once per successful tip, and is
+also the return value of `tip` / `tip_with_ref`. Numbers start at `1` and a
+reverted tip consumes none, so the sequence has no holes: an indexer that has
+stored `1..N` and reads `N` from `get_tip_count` has lost nothing, and a gap
+means its own scan is incomplete rather than that a tip never happened.
+
+This exists because consumers previously keyed on the transaction hash. The
+backend indexer upserts on `txHash` and the SDK's `TipEvent` tells callers to
+deduplicate on it — which holds only while there is one tip per transaction. A
+smart wallet batching two tips, or any client submitting tips from one account
+in a single transaction, puts several `tip` events in one transaction that all
+share that hash, and every tip after the first is dropped as a duplicate.
+`seq` is unique per tip by construction.
+
+`seq` is deliberately in the **data**, not the topics. The SDK's
+`tipTopicFilter` must have exactly one segment per published topic, so adding a
+third topic would make its existing two-segment filter match nothing — silently,
+for every consumer. `get_tip_count() -> u64` exposes the running total, `0` on a
+fresh deploy.
+
+#### `reference` — an optional client id
+
+`reference` lets the integration that started a tip recognise it when the event
+comes back through an indexer or a webhook. An embeddable button, a stream
+overlay, and a Discord/Telegram bot each create something off-chain first (a
+pending alert, a bot command, a checkout session) and then wait for the matching
+`tip` event. Sender, amount and message are none of them unique, and the message
+is visible to the creator, so it cannot carry an opaque id.
+
+The value is opaque to the contract and the contract's role stops at echoing it:
+
+- it is **not stored** — no key is written, and reading the jar or the tip count
+  is unaffected by whether a tip carried one;
+- it is **not checked for uniqueness** — two integrations may send the same
+  reference, and two tips in the same jar may carry it. Reconciling a collision
+  is the consumer's job; if a consumer needs uniqueness it must use `seq`, which
+  the contract does guarantee;
+- it **costs nothing when absent** — `tip` passes `None`, and an absent
+  reference still occupies position six.
+
+It is exactly 32 bytes (`Option<BytesN<32>>`): enough for a binary UUID, a
+`sha256` tag, or a big-endian primary key, and bounded so the payload cannot grow
+the way an unbounded string would. The entry point is `tip_with_ref`; `tip` is
+unchanged and remains the positional call the SDK and the web tip form use.
+
+> **Consumer impact.** SDK and backend decoders must switch from tuple
+> destructuring to named fields. Unknown fields can be ignored safely.
+>
+> An earlier change in the same section took the tuple from three elements to
+> four by appending `breakdown`; that wording describes the `breakdown` addition
+> and is kept for the migration note.
+
 ### `lock` — published on `lock_splits` and `unlock_splits`
 
 - **Topics:** `(symbol "lock", jar_id: String)`
@@ -1750,69 +1804,10 @@ shape is this record", this answers "what build is this deployment".
 
 ## Jar discovery — design decision
 
-The previous contract exposed a `get_jar_ids() -> Vec<String>` view backed by
-an instance-storage vector that grew by one entry on every `create_jar` call.
+Indexing needs a way to enumerate every registered jar. The previous contract
+design kept that list on-chain as a `get_jar_ids() -> Vec<String>` view backed
+by an instance-storage vector that grew by one entry on every `create_jar` call.
 This had two problems:
-#### `seq` — the tip's sequence number
-
-`seq` is a contract-wide counter, incremented once per successful tip, and is
-also the return value of `tip` / `tip_with_ref`. Numbers start at `1` and a
-reverted tip consumes none, so the sequence has no holes: an indexer that has
-stored `1..N` and reads `N` from `get_tip_count` has lost nothing, and a gap
-means its own scan is incomplete rather than that a tip never happened.
-
-This exists because consumers previously keyed on the transaction hash. The
-backend indexer upserts on `txHash` and the SDK's `TipEvent` tells callers to
-deduplicate on it — which holds only while there is one tip per transaction. A
-smart wallet batching two tips, or any client submitting tips from one account
-in a single transaction, puts several `tip` events in one transaction that all
-share that hash, and every tip after the first is dropped as a duplicate.
-`seq` is unique per tip by construction.
-
-`seq` is deliberately in the **data**, not the topics. The SDK's
-`tipTopicFilter` must have exactly one segment per published topic, so adding a
-third topic would make its existing two-segment filter match nothing — silently,
-for every consumer. `get_tip_count() -> u64` exposes the running total, `0` on a
-fresh deploy.
-
-#### `reference` — an optional client id
-
-`reference` lets the integration that started a tip recognise it when the event
-comes back through an indexer or a webhook. An embeddable button, a stream
-overlay, and a Discord/Telegram bot each create something off-chain first (a
-pending alert, a bot command, a checkout session) and then wait for the matching
-`tip` event. Sender, amount and message are none of them unique, and the message
-is visible to the creator, so it cannot carry an opaque id.
-
-The value is opaque to the contract and the contract's role stops at echoing it:
-
-- it is **not stored** — no key is written, and reading the jar or the tip count
-  is unaffected by whether a tip carried one;
-- it is **not checked for uniqueness** — two integrations may send the same
-  reference, and two tips in the same jar may carry it. Reconciling a collision
-  is the consumer's job; if a consumer needs uniqueness it must use `seq`, which
-  the contract does guarantee;
-- it **costs nothing when absent** — `tip` passes `None`, and an absent
-  reference still occupies position six.
-
-It is exactly 32 bytes (`Option<BytesN<32>>`): enough for a binary UUID, a
-`sha256` tag, or a big-endian primary key, and bounded so the payload cannot grow
-the way an unbounded string would. The entry point is `tip_with_ref`; `tip` is
-unchanged and remains the positional call the SDK and the web tip form use.
-
-> **Consumer impact.** SDK and backend decoders must switch from tuple
-> destructuring to named fields. Unknown fields can be ignored safely.
->
-> An earlier change in the same section took the tuple from three elements to
-> four by appending `breakdown`; that wording describes the `breakdown` addition
-> and is kept for the migration note.
-
-## Jar discovery — design note
-
-Indexing needs a way to enumerate every registered jar. An earlier design kept
-that list on-chain as a `get_jar_ids() -> Vec<String>` view backed by an
-instance-storage vector that grew by one entry on every `create_jar`. It had
-two problems:
 
 1. **Unbounded growth.** The vector had no removal path and no size cap, so it
    grew permanently with every jar ever created.

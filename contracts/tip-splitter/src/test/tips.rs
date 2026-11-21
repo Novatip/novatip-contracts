@@ -1780,6 +1780,101 @@ fn tip_cost_budget_1_recipient() {
     );
 }
 
+/// #267 — Guard the worst-case `tip_many` resource budget: `MAX_BATCH_TIPS` (10)
+/// distinct jars, each with `MAX_RECIPIENTS` (20) recipients (200 token transfers).
+///
+/// Measured figures (`env.cost_estimate()`):
+/// - CPU instructions: ~63,682,597
+/// - Memory bytes:     ~16,201,116
+/// - Read entries:     34
+/// - Write entries:    223 (200 recipient balances + 10 jar stats + 10 supporter stats
+///                          + tipper balance + token instance + splitter instance)
+/// - Read bytes:       20,488
+/// - Write bytes:      49,668
+#[test]
+fn tip_many_cost_budget_max_batch_with_full_jars() {
+    const MAX_BATCH_CPU_INSTRUCTIONS: u64 = 100_000_000;
+    const MAX_BATCH_MEMORY_BYTES: u64 = 40_000_000;
+    const MAX_BATCH_READ_ENTRIES: u32 = 40;
+    const MAX_BATCH_WRITE_ENTRIES: u32 = 230;
+    const MAX_BATCH_READ_BYTES: u32 = 30_000;
+    const MAX_BATCH_WRITE_BYTES: u32 = 65_536;
+
+    let s = setup();
+    let env = &s.env;
+    let client = TipSplitterClient::new(env, &s.contract);
+    let token_admin = token::StellarAssetClient::new(env, &s.token);
+    let owner = Address::generate(env);
+    let tipper = Address::generate(env);
+
+    token_admin.mint(&tipper, &10_000_000);
+
+    let mut batch: Vec<TipRequest> = Vec::new(env);
+    for j in 0..MAX_BATCH_TIPS {
+        let slug = std::format!("@batch20_{j:02}");
+        let jar_id = String::from_str(env, &slug);
+        let mut jar_splits: Vec<Split> = Vec::new(env);
+        for _ in 0..MAX_RECIPIENTS {
+            jar_splits.push_back(Split {
+                to: Address::generate(env),
+                bps: 500, // 500 * 20 = 10_000
+            });
+        }
+        client.create_jar(&owner, &jar_id, &jar_splits);
+        batch.push_back(TipRequest {
+            jar_id,
+            amount: 1_000,
+            message: String::from_str(env, "batch tip"),
+            reference: None,
+        });
+    }
+
+    env.cost_estimate().budget().reset_default();
+    let before_cpu = env.cost_estimate().budget().cpu_instruction_cost();
+    let before_mem = env.cost_estimate().budget().memory_bytes_cost();
+
+    let seqs = client.tip_many(&tipper, &batch, &None);
+    assert_eq!(seqs.len(), MAX_BATCH_TIPS);
+
+    let cpu_used = env.cost_estimate().budget().cpu_instruction_cost() - before_cpu;
+    let mem_used = env.cost_estimate().budget().memory_bytes_cost() - before_mem;
+    let res = env.cost_estimate().resources();
+
+    eprintln!(
+        "tip_many_10x20: cpu={cpu_used}, mem={mem_used}, read_entries={}, write_entries={}, read_bytes={}, write_bytes={}",
+        res.read_entries, res.write_entries, res.read_bytes, res.write_bytes
+    );
+
+    assert!(
+        cpu_used < MAX_BATCH_CPU_INSTRUCTIONS,
+        "worst-case tip_many CPU instructions exceeded ceiling: {cpu_used} >= {MAX_BATCH_CPU_INSTRUCTIONS}"
+    );
+    assert!(
+        mem_used < MAX_BATCH_MEMORY_BYTES,
+        "worst-case tip_many memory bytes exceeded ceiling: {mem_used} >= {MAX_BATCH_MEMORY_BYTES}"
+    );
+    assert!(
+        res.read_entries <= MAX_BATCH_READ_ENTRIES,
+        "worst-case tip_many read entries exceeded ceiling: {} > {MAX_BATCH_READ_ENTRIES}",
+        res.read_entries
+    );
+    assert!(
+        res.write_entries <= MAX_BATCH_WRITE_ENTRIES,
+        "worst-case tip_many write entries exceeded ceiling: {} > {MAX_BATCH_WRITE_ENTRIES}",
+        res.write_entries
+    );
+    assert!(
+        res.read_bytes <= MAX_BATCH_READ_BYTES,
+        "worst-case tip_many read bytes exceeded ceiling: {} > {MAX_BATCH_READ_BYTES}",
+        res.read_bytes
+    );
+    assert!(
+        res.write_bytes <= MAX_BATCH_WRITE_BYTES,
+        "worst-case tip_many write bytes exceeded ceiling: {} > {MAX_BATCH_WRITE_BYTES}",
+        res.write_bytes
+    );
+}
+
 /// `tip` is a router, not a custodian: every successful tip pays recipients
 /// directly, so the contract's token balance stays zero even when rounding
 /// dust exists or the tipper is also a recipient.
