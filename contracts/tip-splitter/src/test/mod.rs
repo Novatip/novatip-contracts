@@ -452,6 +452,7 @@ mod admin;
 mod escrow;
 mod fees;
 mod jars;
+mod lifecycle_regressions;
 mod properties;
 mod recurring;
 mod splits;

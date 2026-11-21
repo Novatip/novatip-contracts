@@ -727,6 +727,121 @@ fn admin_can_upgrade_contract() {
     // on testnet after deployment.
 }
 
+/// Issue #247: an upgrade must preserve the existing instance and persistent
+/// ledger data, including the jar, held credit, counters, and configured fee.
+/// Uploading a valid minimal WASM module exercises the Soroban host's actual
+/// code-update path; storage is inspected inside the contract context because
+/// that module intentionally exports no TipSplitter functions.
+#[test]
+fn upgrade_preserves_jar_held_totals_counter_and_fee() {
+    let s = setup();
+    let env = &s.env;
+    let client = TipSplitterClient::new(env, &s.contract);
+    let token_admin = token::StellarAssetClient::new(env, &s.token);
+    let owner = Address::generate(env);
+    let alice = Address::generate(env);
+    let tipper = Address::generate(env);
+    let jar_id = String::from_str(env, "@upgrade_state");
+    token_admin.mint(&tipper, &1_000);
+    client.create_jar(
+        &owner,
+        &jar_id,
+        &vec![env, Split { to: alice.clone(), bps: 10000 }],
+    );
+    client.set_min_tip_amount(&jar_id, &Some(50));
+    client.set_fee_bps(&100);
+    client.tip(&tipper, &jar_id, &100, &String::from_str(env, "state"));
+    let jar_before = client.get_jar(&jar_id);
+    let stats_before = client.get_jar_stats(&jar_id);
+    let counter_before = client.get_tip_count();
+    let fee_before = client.get_fee_bps();
+    let held_credit = 13_i128;
+    env.as_contract(&s.contract, || {
+        env.storage().persistent().set(&DataKey::Held(alice.clone()), &held_credit);
+    });
+
+    // Same Soroban-host-compatible WASM envelope as the existing upgrade
+    // event test: real upload followed by a real contract upgrade invocation.
+    let minimal_wasm = soroban_sdk::Bytes::from_slice(
+        env,
+        &[
+            0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00,
+            0x00, 0x1e,
+            0x11, b'c', b'o', b'n', b't', b'r', b'a', b'c', b't', b'e', b'n', b'v', b'm', b'e',
+            b't', b'a', b'v', b'0',
+            0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x16,
+            0x00, 0x00, 0x00, 0x00,
+        ],
+    );
+    let hash = env.deployer().upload_contract_wasm(minimal_wasm);
+    client.upgrade(&hash);
+
+    let expected_topics = vec![env, symbol_short!("upgrade").into_val(env)];
+    let events: std::vec::Vec<_> = env.events().all().iter()
+        .filter(|e| e.0 == s.contract && e.1 == expected_topics)
+        .collect();
+    assert_eq!(events.len(), 1);
+    let event: UpgradedEvent = TryFromVal::try_from_val(env, &events[0].2).unwrap();
+    assert_eq!(event.version, 1);
+    assert_eq!(event.admin, s.admin);
+    assert_eq!(event.new_hash, hash);
+    assert_eq!(event.previous_hash, None);
+
+    env.as_contract(&s.contract, || {
+        let stored_jar: Jar = env.storage().persistent()
+            .get(&DataKey::Jar(jar_id.clone())).unwrap();
+        assert_eq!(stored_jar.owner, jar_before.owner);
+        assert_eq!(stored_jar.splits, jar_before.splits);
+        assert_eq!(stored_jar.locked, jar_before.locked);
+        assert_eq!(stored_jar.paused, jar_before.paused);
+        let stats: JarStats = env.storage().persistent()
+            .get(&DataKey::Stats(jar_id.clone())).unwrap();
+        assert_eq!(stats, stats_before);
+        let min: i128 = env.storage().persistent()
+            .get(&DataKey::MinTip(jar_id.clone())).unwrap();
+        assert_eq!(min, 50);
+        let held: i128 = env.storage().persistent()
+            .get(&DataKey::Held(alice.clone())).unwrap();
+        assert_eq!(held, held_credit);
+        let counter: u64 = env.storage().instance()
+            .get(&DataKey::TipCount).unwrap();
+        assert_eq!(counter, counter_before);
+        let fee: u32 = env.storage().instance().get(&DataKey::FeeBps).unwrap();
+        assert_eq!(fee, fee_before);
+        let recorded_hash: BytesN<32> = env.storage().instance()
+            .get(&DataKey::WasmHash).unwrap();
+        assert_eq!(recorded_hash, hash);
+    });
+}
+
+#[test]
+fn upgrade_rejects_non_admin_and_keeps_previous_hash() {
+    let s = setup();
+    let env = &s.env;
+    let client = TipSplitterClient::new(env, &s.contract);
+    let attacker = Address::generate(env);
+    let hash = BytesN::<32>::from_array(env, &[9_u8; 32]);
+    let previous = BytesN::<32>::from_array(env, &[7_u8; 32]);
+    env.as_contract(&s.contract, || {
+        env.storage().instance().set(&DataKey::WasmHash, &previous);
+    });
+    env.mock_auths(&[MockAuth {
+        address: &attacker,
+        invoke: &MockAuthInvoke {
+            contract: &s.contract,
+            fn_name: "upgrade",
+            args: (hash.clone(),).into_val(env),
+            sub_invokes: &[],
+        },
+    }]);
+    assert!(client.try_upgrade(&hash).is_err());
+    env.as_contract(&s.contract, || {
+        let kept: BytesN<32> = env.storage().instance().get(&DataKey::WasmHash).unwrap();
+        assert_eq!(kept, previous);
+    });
+}
+
 /// The upgrade event carries the version, the authorising admin, the hash the
 /// contract was running before, and the hash it now runs (#334).
 #[test]
