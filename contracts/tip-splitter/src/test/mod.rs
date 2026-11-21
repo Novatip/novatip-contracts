@@ -46,6 +46,7 @@ pub enum TestTokenError {
 enum TestTokenKey {
     Balance(Address),
     Blocked,
+    Allowance(Address, Address),
 }
 
 /// A minimal token used only by the #171 tests. `block` makes every `transfer`
@@ -69,6 +70,27 @@ impl TestToken {
             .persistent()
             .get(&TestTokenKey::Balance(id))
             .unwrap_or(0)
+    }
+
+    /// A controllable allowance for recurring payout regression tests.
+    pub fn approve(env: Env, from: Address, spender: Address, amount: i128, _expiration_ledger: u32) {
+        env.storage().persistent().set(&TestTokenKey::Allowance(from, spender), &amount);
+    }
+
+    pub fn allowance(env: Env, from: Address, spender: Address) -> i128 {
+        env.storage().persistent().get(&TestTokenKey::Allowance(from, spender)).unwrap_or(0)
+    }
+
+    pub fn transfer_from(env: Env, spender: Address, from: Address, to: Address, amount: i128) {
+        let key = TestTokenKey::Allowance(from.clone(), spender);
+        let remaining: i128 = env.storage().persistent().get(&key).unwrap_or(0);
+        if remaining < amount {
+            panic_with_error!(&env, TestTokenError::InsufficientBalance);
+        }
+        // Reverts atomically if the recipient cannot receive, so allowance
+        // cannot be debited for a transfer that never settled.
+        Self::transfer(env.clone(), from, to, amount);
+        env.storage().persistent().set(&key, &(remaining - amount));
     }
 
     pub fn block(env: Env, to: Address) {
@@ -452,6 +474,7 @@ mod admin;
 mod escrow;
 mod fees;
 mod jars;
+mod interaction_regressions;
 mod lifecycle_regressions;
 mod properties;
 mod recurring;
