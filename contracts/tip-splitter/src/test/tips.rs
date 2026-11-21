@@ -1555,30 +1555,6 @@ fn tip_event_names_the_token_paid_in() {
     assert_eq!(decoded.breakdown.get(0).unwrap(), (recipient, 400, false));
 }
 
-/// A single-recipient jar plus a funded tipper, the fixture the hook tests
-/// share.
-fn hook_jar<'a>(env: &'a Env, s: &'a Setup) -> (TipSplitterClient<'a>, Address, Address, String) {
-    let client = TipSplitterClient::new(env, &s.contract);
-    let token_admin = token::StellarAssetClient::new(env, &s.token);
-    let owner = Address::generate(env);
-    let alice = Address::generate(env);
-    let tipper = Address::generate(env);
-    token_admin.mint(&tipper, &1_000);
-    let jar_id = String::from_str(env, "@hook");
-    client.create_jar(
-        &owner,
-        &jar_id,
-        &vec![
-            env,
-            Split {
-                to: alice.clone(),
-                bps: 10000,
-            },
-        ],
-    );
-    (client, tipper, alice, jar_id)
-}
-
 /// With a hook set, `tip` calls `on_tip(jar_id, from, amount)` on it exactly
 /// once, and the call is *recorded* only after the tip itself settled: the
 /// hook sees the same jar id, sender, and amount the event carries.

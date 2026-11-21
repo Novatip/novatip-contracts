@@ -364,6 +364,90 @@ fn single_recipient_jar(
     jar_id
 }
 
+// ---------------------------------------------------------------------------
+// #260 — hostile post-tip hooks (panic, error return, re-entrant tip)
+// ---------------------------------------------------------------------------
+
+mod erroring_hook {
+    use super::*;
+
+    #[contracterror]
+    #[derive(Copy, Clone, Debug, Eq, PartialEq)]
+    #[repr(u32)]
+    pub enum HookErr {
+        Rejected = 1,
+    }
+
+    #[contract]
+    pub struct ErroringHook;
+
+    #[contractimpl]
+    impl ErroringHook {
+        pub fn on_tip(
+            _env: Env,
+            _jar_id: String,
+            _from: Address,
+            _amount: i128,
+        ) -> Result<(), HookErr> {
+            Err(HookErr::Rejected)
+        }
+    }
+}
+
+mod reentrant_hook {
+    use super::*;
+
+    #[contracttype]
+    #[derive(Clone)]
+    enum ReentrantKey {
+        Target,
+    }
+
+    #[contract]
+    pub struct ReentrantHook;
+
+    #[contractimpl]
+    impl ReentrantHook {
+        pub fn __constructor(env: Env, target: Address) {
+            env.storage().instance().set(&ReentrantKey::Target, &target);
+        }
+
+        pub fn on_tip(env: Env, jar_id: String, from: Address, amount: i128) {
+            let target: Address = env
+                .storage()
+                .instance()
+                .get(&ReentrantKey::Target)
+                .expect("target set");
+            let splitter = TipSplitterClient::new(&env, &target);
+            splitter.tip(&from, &jar_id, &amount, &String::from_str(&env, "reenter"));
+        }
+    }
+}
+
+/// A single-recipient jar plus a funded tipper, the fixture the hook tests
+/// share.
+fn hook_jar<'a>(env: &'a Env, s: &'a Setup) -> (TipSplitterClient<'a>, Address, Address, String) {
+    let client = TipSplitterClient::new(env, &s.contract);
+    let token_admin = token::StellarAssetClient::new(env, &s.token);
+    let owner = Address::generate(env);
+    let alice = Address::generate(env);
+    let tipper = Address::generate(env);
+    token_admin.mint(&tipper, &1_000);
+    let jar_id = String::from_str(env, "@hook");
+    client.create_jar(
+        &owner,
+        &jar_id,
+        &vec![
+            env,
+            Split {
+                to: alice.clone(),
+                bps: 10000,
+            },
+        ],
+    );
+    (client, tipper, alice, jar_id)
+}
+
 mod admin;
 mod escrow;
 mod fees;

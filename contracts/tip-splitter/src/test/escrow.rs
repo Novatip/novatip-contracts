@@ -143,3 +143,100 @@ fn withdraw_held_requires_the_recipients_own_authorisation() {
     assert!(client.try_withdraw_held(&bob).is_err());
     assert_eq!(client.get_held(&bob), 100);
 }
+
+// ---------------------------------------------------------------------------
+// #261 — withdraw_held edge cases
+// ---------------------------------------------------------------------------
+
+#[test]
+fn withdraw_held_edge_cases_accumulate_retry_pause_and_double_withdraw() {
+    let s = setup_hostile();
+    let env = &s.env;
+    let client = TipSplitterClient::new(env, &s.contract);
+    let token = TestTokenClient::new(env, &s.token);
+
+    let owner = Address::generate(env);
+    let alice = Address::generate(env);
+    let bob = Address::generate(env);
+    let tipper = Address::generate(env);
+    token.mint(&tipper, &1_000);
+
+    let jar_one = String::from_str(env, "@held_one");
+    let jar_two = String::from_str(env, "@held_two");
+
+    client.create_jar(
+        &owner,
+        &jar_one,
+        &vec![
+            env,
+            Split {
+                to: alice.clone(),
+                bps: 5_000,
+            },
+            Split {
+                to: bob.clone(),
+                bps: 5_000,
+            },
+        ],
+    );
+    client.create_jar(
+        &owner,
+        &jar_two,
+        &vec![
+            env,
+            Split {
+                to: bob.clone(),
+                bps: 10_000,
+            },
+        ],
+    );
+
+    // Block Bob and accumulate held credit across multiple tips and jars.
+    token.block(&bob);
+    client.tip(&tipper, &jar_one, &100, &String::from_str(env, "t1")); // +50 held
+    client.tip(&tipper, &jar_one, &200, &String::from_str(env, "t2")); // +100 held
+    client.tip(&tipper, &jar_two, &75, &String::from_str(env, "t3")); // +75 held
+
+    assert_eq!(token.balance(&alice), 150);
+    assert_eq!(client.get_held(&bob), 225);
+    assert_eq!(token.balance(&s.contract), 225);
+
+    // Withdrawing while Bob still cannot receive fails and leaves `get_held` intact.
+    assert!(client.try_withdraw_held(&bob).is_err());
+    assert_eq!(client.get_held(&bob), 225);
+    assert_eq!(token.balance(&bob), 0);
+
+    // Pause the contract: per docs/CONTRACT.md, admin cannot stop `withdraw_held` by pausing.
+    client.pause();
+    assert!(client.is_paused());
+
+    // Unblock Bob and withdraw while paused; assert the `withdraw` event.
+    token.unblock();
+    client.withdraw_held(&bob);
+    let expected_topics = vec![
+        env,
+        symbol_short!("withdraw").into_val(env),
+        bob.clone().into_val(env),
+    ];
+    let evs: std::vec::Vec<_> = env
+        .events()
+        .all()
+        .iter()
+        .filter(|e| e.0 == s.contract && e.1 == expected_topics)
+        .collect();
+    assert_eq!(evs.len(), 1);
+    let decoded: HeldWithdrawnEvent =
+        TryFromVal::try_from_val(env, &evs[0].2).expect("withdraw event data");
+    assert_eq!(decoded.version, 1);
+    assert_eq!(decoded.amount, 225);
+
+    assert_eq!(token.balance(&bob), 225);
+    assert_eq!(token.balance(&s.contract), 0);
+    assert_eq!(client.get_held(&bob), 0);
+
+    // Withdrawing a second time fails with `NothingHeld`.
+    assert_eq!(
+        client.try_withdraw_held(&bob),
+        Err(Ok(Error::NothingHeld.into()))
+    );
+}

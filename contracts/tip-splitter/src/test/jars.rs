@@ -1766,6 +1766,142 @@ fn default_token_only_jar_rejects_other_tokens() {
     assert_eq!(eurc_client.balance(&alice), 100);
 }
 
+// ---------------------------------------------------------------------------
+// #262 — every jar-taking public function rejects non-canonical jar IDs
+// ---------------------------------------------------------------------------
+
+#[test]
+fn every_public_function_rejects_non_canonical_jar_ids_consistently() {
+    let s = setup();
+    let env = &s.env;
+    let client = TipSplitterClient::new(env, &s.contract);
+    let token_admin = token::StellarAssetClient::new(env, &s.token);
+
+    let owner = Address::generate(env);
+    let new_owner = Address::generate(env);
+    let recipient = Address::generate(env);
+    let tipper = Address::generate(env);
+    token_admin.mint(&tipper, &10_000);
+
+    let splits = vec![
+        env,
+        Split {
+            to: recipient.clone(),
+            bps: 10_000,
+        },
+    ];
+
+    // One valid jar so `rename_jar(valid, bad)` exercises `new_jar_id` validation.
+    let valid_jar = String::from_str(env, "@valid");
+    let valid_new = String::from_str(env, "@valid_new");
+    client.create_jar(&owner, &valid_jar, &splits);
+
+    let invalid_ids = [
+        "",                                   // empty
+        "@Alice",                             // uppercase
+        "@ali ce",                            // embedded whitespace
+        " @alice",                            // leading whitespace
+        "@alice ",                            // trailing whitespace
+        "alice",                              // missing leading @
+        "@ab",                                // too short (< 3 chars after @)
+        "@aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", // too long (33 chars after @)
+    ];
+
+    let msg = String::from_str(env, "hi");
+    let invalid_jar_id = Err(Ok(Error::InvalidJarId.into()));
+    let jar_not_found = Err(Ok(Error::JarNotFound.into()));
+
+    for raw in invalid_ids {
+        let bad = String::from_str(env, raw);
+
+        // Creation and rename target validate format explicitly -> InvalidJarId.
+        assert_eq!(
+            client.try_create_jar(&owner, &bad, &splits),
+            invalid_jar_id,
+            "create_jar({raw:?})"
+        );
+        assert_eq!(
+            client.try_rename_jar(&valid_jar, &bad),
+            invalid_jar_id,
+            "rename_jar(valid, {raw:?})"
+        );
+
+        // Boolean existence / default-only queries return false without panicking.
+        assert!(!client.jar_exists(&bad), "jar_exists({raw:?})");
+        assert!(
+            !client.get_jar_tokens_default_only(&bad),
+            "get_jar_tokens_default_only({raw:?})"
+        );
+
+        // All other jar-taking entry points fail with JarNotFound.
+        assert_eq!(client.try_update_splits(&bad, &splits), jar_not_found);
+        assert_eq!(client.try_lock_splits(&bad), jar_not_found);
+        assert_eq!(client.try_unlock_splits(&bad), jar_not_found);
+        assert_eq!(client.try_is_splits_locked(&bad), jar_not_found);
+        assert_eq!(client.try_set_jar_paused(&bad, &true), jar_not_found);
+        assert_eq!(client.try_is_jar_paused(&bad), jar_not_found);
+        assert_eq!(client.try_leave_jar(&bad, &recipient), jar_not_found);
+        assert_eq!(
+            client.try_transfer_jar_ownership(&bad, &new_owner),
+            jar_not_found
+        );
+        assert_eq!(
+            client.try_admin_recover_jar(&bad, &new_owner),
+            jar_not_found
+        );
+        assert_eq!(client.try_delete_jar(&bad), jar_not_found);
+        assert_eq!(client.try_rename_jar(&bad, &valid_new), jar_not_found);
+        assert_eq!(
+            client.try_set_min_tip_amount(&bad, &Some(10)),
+            jar_not_found
+        );
+        assert_eq!(
+            client.try_set_max_tip_amount(&bad, &Some(100)),
+            jar_not_found
+        );
+        assert_eq!(
+            client.try_set_jar_tokens_default_only(&bad, &true),
+            jar_not_found
+        );
+        assert_eq!(client.try_tip(&tipper, &bad, &100, &msg), jar_not_found);
+        assert_eq!(
+            client.try_tip_with_ref(&tipper, &bad, &100, &msg, &None),
+            jar_not_found
+        );
+        let batch = vec![
+            env,
+            TipRequest {
+                jar_id: bad.clone(),
+                amount: 100,
+                message: msg.clone(),
+                reference: None,
+            },
+        ];
+        assert_eq!(client.try_tip_many(&tipper, &None, &batch), jar_not_found);
+        assert_eq!(
+            client.try_tip_in_token(&tipper, &bad, &s.token, &100, &msg),
+            jar_not_found
+        );
+        assert_eq!(
+            client.try_create_recurring(&tipper, &bad, &100, &86_400, &msg),
+            jar_not_found
+        );
+        assert_eq!(client.try_get_jar(&bad), jar_not_found);
+        assert_eq!(client.try_get_jar_owner(&bad), jar_not_found);
+        assert_eq!(client.try_get_split_count(&bad), jar_not_found);
+        assert_eq!(client.try_preview_split(&bad, &100), jar_not_found);
+        assert_eq!(client.try_preview_split_details(&bad, &100), jar_not_found);
+        assert_eq!(client.try_preview_tip(&bad, &tipper, &100), jar_not_found);
+        assert_eq!(client.try_get_max_tip_amount(&bad), jar_not_found);
+        assert_eq!(client.try_get_min_tip_amount(&bad), jar_not_found);
+        assert_eq!(client.try_get_min_accepted_tip(&bad), jar_not_found);
+        assert_eq!(client.try_get_jar_stats(&bad), jar_not_found);
+        assert_eq!(client.try_get_jar_info(&bad), jar_not_found);
+        assert_eq!(client.try_get_supporter_stats(&bad, &tipper), jar_not_found);
+        assert_eq!(client.try_is_recipient(&bad, &recipient), jar_not_found);
+    }
+}
+
 /// #323: owner-set maximum is validated against the minimum and rejects
 /// larger tips and previews with a typed error.
 #[test]

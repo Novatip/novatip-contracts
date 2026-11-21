@@ -939,3 +939,230 @@ fn migrate_runs_once_per_schema_version() {
         .count();
     assert_eq!(again, 0);
 }
+
+// ---------------------------------------------------------------------------
+// #259 — registrar co-signature argument binding and clear/set events
+// ---------------------------------------------------------------------------
+
+#[test]
+fn registrar_cosignature_is_bound_to_exact_jar_id_and_owner() {
+    let s = setup();
+    let env = &s.env;
+    let client = TipSplitterClient::new(env, &s.contract);
+    let owner_a = Address::generate(env);
+    let owner_b = Address::generate(env);
+    let recipient = Address::generate(env);
+    let registrar = Address::generate(env);
+
+    let splits = vec![
+        env,
+        Split {
+            to: recipient.clone(),
+            bps: 10_000,
+        },
+    ];
+    let jar_alice = String::from_str(env, "@alice");
+    let jar_bob = String::from_str(env, "@bob");
+
+    // Installing the registrar emits `reg_set` with the new address.
+    client.set_registrar(&Some(registrar.clone()));
+    let reg_topics = vec![env, symbol_short!("reg_set").into_val(env)];
+    let set_evs: std::vec::Vec<_> = env
+        .events()
+        .all()
+        .iter()
+        .filter(|e| e.0 == s.contract && e.1 == reg_topics)
+        .collect();
+    assert_eq!(set_evs.len(), 1);
+    let set_ev: RegistrarEvent =
+        TryFromVal::try_from_val(env, &set_evs[0].2).expect("reg_set event data");
+    assert_eq!(set_ev.version, 1);
+    assert_eq!(set_ev.admin, s.admin);
+    assert_eq!(set_ev.registrar, Some(registrar.clone()));
+
+    // Mismatched slug: registrar co-signed ("@alice", owner_a), caller tries ("@bob", owner_a).
+    env.mock_auths(&[
+        MockAuth {
+            address: &owner_a,
+            invoke: &MockAuthInvoke {
+                contract: &s.contract,
+                fn_name: "create_jar",
+                args: (owner_a.clone(), jar_bob.clone(), splits.clone()).into_val(env),
+                sub_invokes: &[],
+            },
+        },
+        MockAuth {
+            address: &registrar,
+            invoke: &MockAuthInvoke {
+                contract: &s.contract,
+                fn_name: "create_jar",
+                args: (jar_alice.clone(), owner_a.clone()).into_val(env),
+                sub_invokes: &[],
+            },
+        },
+    ]);
+    assert!(
+        client.try_create_jar(&owner_a, &jar_bob, &splits).is_err(),
+        "co-signature for (@alice, owner_a) must not authorise (@bob, owner_a)"
+    );
+
+    // Mismatched owner: registrar co-signed ("@alice", owner_a), caller tries ("@alice", owner_b).
+    env.mock_auths(&[
+        MockAuth {
+            address: &owner_b,
+            invoke: &MockAuthInvoke {
+                contract: &s.contract,
+                fn_name: "create_jar",
+                args: (owner_b.clone(), jar_alice.clone(), splits.clone()).into_val(env),
+                sub_invokes: &[],
+            },
+        },
+        MockAuth {
+            address: &registrar,
+            invoke: &MockAuthInvoke {
+                contract: &s.contract,
+                fn_name: "create_jar",
+                args: (jar_alice.clone(), owner_a.clone()).into_val(env),
+                sub_invokes: &[],
+            },
+        },
+    ]);
+    assert!(
+        client
+            .try_create_jar(&owner_b, &jar_alice, &splits)
+            .is_err(),
+        "co-signature for (@alice, owner_a) must not authorise (@alice, owner_b)"
+    );
+
+    assert!(!client.jar_exists(&jar_alice));
+    assert!(!client.jar_exists(&jar_bob));
+
+    // Exact match: ("@alice", owner_a) succeeds.
+    env.mock_auths(&[
+        MockAuth {
+            address: &owner_a,
+            invoke: &MockAuthInvoke {
+                contract: &s.contract,
+                fn_name: "create_jar",
+                args: (owner_a.clone(), jar_alice.clone(), splits.clone()).into_val(env),
+                sub_invokes: &[],
+            },
+        },
+        MockAuth {
+            address: &registrar,
+            invoke: &MockAuthInvoke {
+                contract: &s.contract,
+                fn_name: "create_jar",
+                args: (jar_alice.clone(), owner_a.clone()).into_val(env),
+                sub_invokes: &[],
+            },
+        },
+    ]);
+    client.create_jar(&owner_a, &jar_alice, &splits);
+    assert!(client.jar_exists(&jar_alice));
+
+    // Clearing the registrar emits `reg_set` with `None` and restores owner-only creation.
+    env.mock_all_auths();
+    client.set_registrar(&None);
+    let clear_evs: std::vec::Vec<_> = env
+        .events()
+        .all()
+        .iter()
+        .filter(|e| e.0 == s.contract && e.1 == reg_topics)
+        .collect();
+    assert_eq!(clear_evs.len(), 1);
+    let clear_ev: RegistrarEvent =
+        TryFromVal::try_from_val(env, &clear_evs[0].2).expect("reg_set clear event data");
+    assert_eq!(clear_ev.version, 1);
+    assert_eq!(clear_ev.admin, s.admin);
+    assert_eq!(clear_ev.registrar, None);
+
+    env.mock_auths(&[MockAuth {
+        address: &owner_b,
+        invoke: &MockAuthInvoke {
+            contract: &s.contract,
+            fn_name: "create_jar",
+            args: (owner_b.clone(), jar_bob.clone(), splits.clone()).into_val(env),
+            sub_invokes: &[],
+        },
+    }]);
+    client.create_jar(&owner_b, &jar_bob, &splits);
+    assert!(client.jar_exists(&jar_bob));
+}
+
+fn assert_tip_settles_once_despite_hook(
+    s: &Setup,
+    client: &TipSplitterClient,
+    tipper: &Address,
+    alice: &Address,
+    jar_id: &String,
+    hook: Address,
+) {
+    let env = &s.env;
+    let token = token::Client::new(env, &s.token);
+
+    client.set_tip_hook(&Some(hook));
+    let seq = client.tip(tipper, jar_id, &100, &String::from_str(env, "hi"));
+
+    // Snapshot events before any subsequent client call clears the test buffer.
+    let tip_evs: std::vec::Vec<_> = env
+        .events()
+        .all()
+        .iter()
+        .filter(|e| e.0 == s.contract && topic_is_symbol(env, &e.1, 0, symbol_short!("tip")))
+        .collect();
+    assert_eq!(tip_evs.len(), 1, "tip event must be published exactly once");
+    let decoded: TipEvent =
+        TryFromVal::try_from_val(env, &tip_evs[0].2).expect("tip event data shape");
+    assert_eq!(decoded.from, *tipper);
+    assert_eq!(decoded.amount, 100);
+    assert_eq!(decoded.seq, 1);
+
+    assert_eq!(seq, 1);
+    assert_eq!(client.get_tip_count(), 1);
+    assert_eq!(token.balance(alice), 100);
+    assert_eq!(token.balance(tipper), 900);
+    assert_eq!(
+        client.get_jar_stats(jar_id),
+        JarStats {
+            tip_count: 1,
+            total: 100,
+        }
+    );
+    assert_eq!(
+        client.get_supporter_stats(jar_id, tipper),
+        SupporterStats {
+            tip_count: 1,
+            total: 100,
+        }
+    );
+}
+
+#[test]
+fn hostile_hooks_panic_error_and_reentry_do_not_disrupt_tip() {
+    // (a) Hook that panics.
+    {
+        let s = setup();
+        let hook = s.env.register(PanickyHook, ());
+        let (client, tipper, alice, jar_id) = hook_jar(&s.env, &s);
+        assert_tip_settles_once_despite_hook(&s, &client, &tipper, &alice, &jar_id, hook);
+    }
+
+    // (b) Hook that returns a contract error.
+    {
+        let s = setup();
+        let hook = s.env.register(erroring_hook::ErroringHook, ());
+        let (client, tipper, alice, jar_id) = hook_jar(&s.env, &s);
+        assert_tip_settles_once_despite_hook(&s, &client, &tipper, &alice, &jar_id, hook);
+    }
+
+    // (c) Hook that tries to re-enter TipSplitter::tip.
+    {
+        let s = setup();
+        let hook = s
+            .env
+            .register(reentrant_hook::ReentrantHook, (s.contract.clone(),));
+        let (client, tipper, alice, jar_id) = hook_jar(&s.env, &s);
+        assert_tip_settles_once_despite_hook(&s, &client, &tipper, &alice, &jar_id, hook);
+    }
+}
