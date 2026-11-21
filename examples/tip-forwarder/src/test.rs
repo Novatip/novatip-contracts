@@ -191,3 +191,122 @@ fn forwarder_keeps_its_own_share_when_it_is_a_recipient() {
     assert_eq!(token.balance(&bob), 200);
     assert_eq!(token.balance(&s.forwarder), 200);
 }
+
+#[contracterror]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
+#[repr(u32)]
+pub enum HostileTokenError {
+    NotAuthorized = 1,
+    InsufficientBalance = 2,
+}
+
+#[contracttype]
+#[derive(Clone)]
+enum HostileTokenKey {
+    Balance(Address),
+    Blocked,
+}
+
+/// Minimal token contract whose `block` entry point makes transfers to one
+/// recipient fail, triggering `tip_splitter`'s held-share escrow fallback
+/// (`transfer(from, splitter, share)`).
+#[contract]
+pub struct HostileToken;
+
+#[contractimpl]
+impl HostileToken {
+    pub fn mint(env: Env, to: Address, amount: i128) {
+        let k = HostileTokenKey::Balance(to);
+        let b: i128 = env.storage().persistent().get(&k).unwrap_or(0);
+        env.storage().persistent().set(&k, &(b + amount));
+    }
+
+    pub fn balance(env: Env, id: Address) -> i128 {
+        env.storage()
+            .persistent()
+            .get(&HostileTokenKey::Balance(id))
+            .unwrap_or(0)
+    }
+
+    pub fn block(env: Env, to: Address) {
+        env.storage()
+            .persistent()
+            .set(&HostileTokenKey::Blocked, &to);
+    }
+
+    pub fn transfer(env: Env, from: Address, to: Address, amount: i128) {
+        from.require_auth();
+        if let Some(b) = env
+            .storage()
+            .persistent()
+            .get::<HostileTokenKey, Address>(&HostileTokenKey::Blocked)
+        {
+            if b == to {
+                panic_with_error!(&env, HostileTokenError::NotAuthorized);
+            }
+        }
+        let fk = HostileTokenKey::Balance(from.clone());
+        let fb: i128 = env.storage().persistent().get(&fk).unwrap_or(0);
+        if fb < amount {
+            panic_with_error!(&env, HostileTokenError::InsufficientBalance);
+        }
+        env.storage().persistent().set(&fk, &(fb - amount));
+        let tk = HostileTokenKey::Balance(to.clone());
+        let tb: i128 = env.storage().persistent().get(&tk).unwrap_or(0);
+        env.storage().persistent().set(&tk, &(tb + amount));
+    }
+}
+
+#[test]
+fn forwarded_tip_fails_when_a_recipients_share_must_be_held() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let admin = Address::generate(&env);
+    let token = env.register(HostileToken, ());
+    let splitter = env.register(TipSplitter, (admin.clone(), token.clone()));
+    let owner = Address::generate(&env);
+    let forwarder = env.register(TipForwarder, (owner.clone(), splitter.clone()));
+
+    let token_client = HostileTokenClient::new(&env, &token);
+    token_client.mint(&forwarder, &1_000);
+
+    let s = Setup {
+        env,
+        owner,
+        admin,
+        token,
+        splitter,
+        forwarder,
+    };
+    let env = &s.env;
+    let alice = Address::generate(env);
+    let bob = Address::generate(env);
+    create_jar(&s, "@band", &[(alice.clone(), 7000), (bob.clone(), 3000)]);
+
+    // Deauthorize Bob so `pay_out` falls back to `transfer(forwarder, splitter, 30)`
+    // to escrow his share (#171). Because `forward_tip` only pre-authorized
+    // `transfer(forwarder, bob, 30)`, the escrow transfer lacks contract auth
+    // and the forwarded tip fails cleanly with no funds moved.
+    HostileTokenClient::new(env, &s.token).block(&bob);
+
+    let message = String::from_str(env, "bob is frozen");
+    mock_owner_auth(&s, "forward_tip", "@band", 100, &message);
+
+    let res = TipForwarderClient::new(env, &s.forwarder).try_forward_tip(
+        &String::from_str(env, "@band"),
+        &100,
+        &message,
+    );
+    assert!(
+        res.is_err(),
+        "forward_tip must fail when a share falls back to an un-authorized escrow transfer to the splitter"
+    );
+
+    let token_client = HostileTokenClient::new(env, &s.token);
+    assert_eq!(token_client.balance(&alice), 0);
+    assert_eq!(token_client.balance(&bob), 0);
+    assert_eq!(token_client.balance(&s.splitter), 0);
+    assert_eq!(token_client.balance(&s.forwarder), 1_000);
+    assert_eq!(TipSplitterClient::new(env, &s.splitter).get_held(&bob), 0);
+}

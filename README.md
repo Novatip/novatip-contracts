@@ -136,17 +136,16 @@ created jar. The contract validates the 10,000-bps total when creating the jar.
 | Testnet | [`CCKPD2MPAYQYCL7QJKUMJHTEJWNHSIP7BZYIZBRO3C4DM4VHZKL6VBRL`](https://stellar.expert/explorer/testnet/contract/CCKPD2MPAYQYCL7QJKUMJHTEJWNHSIP7BZYIZBRO3C4DM4VHZKL6VBRL) | pre-`main` (older interface) | live, behind `main` |
 | Mainnet | coming soon | — | pending audit |
 
-> **Testnet deployment is behind `main`.** The deployed contract exposes only
-> 9 of the 16 functions documented in [`docs/CONTRACT.md`](./docs/CONTRACT.md):
-> `__constructor`, `create_jar`, `update_splits`, `transfer_jar_ownership`,
-> `tip`, `get_jar`, `jar_exists`, `get_admin`, `get_token`.
+> **Testnet deployment is behind `main`.** Its deployed interface predates most
+> of the functions and event payloads documented in
+> [`docs/CONTRACT.md`](./docs/CONTRACT.md), including `version()` (calling
+> `version()` against the testnet contract fails because the function does not
+> exist on that deployment).
 >
-> **Missing from the current testnet deployment:** `get_jar_owner`,
-> `get_split_count`, `preview_split`, `is_recipient`, `get_limits`,
-> `set_min_tip_amount`, `get_min_tip_amount`. Its `tip` and `jar_xfer` events
-> also predate the payload changes listed as breaking in the changelog.
->
-> To check the live interface yourself:
+> Instead of relying on a static function count or missing-function list, compare
+> the live testnet contract with [`docs/CONTRACT.md`](./docs/CONTRACT.md) (or a
+> local build's [`contracts/tip-splitter/interface.json`](./contracts/tip-splitter/interface.json))
+> directly:
 > ```bash
 > stellar contract info interface --id CCKPD2MPAYQYCL7QJKUMJHTEJWNHSIP7BZYIZBRO3C4DM4VHZKL6VBRL --network testnet
 > stellar contract info meta --id CCKPD2MPAYQYCL7QJKUMJHTEJWNHSIP7BZYIZBRO3C4DM4VHZKL6VBRL --network testnet
