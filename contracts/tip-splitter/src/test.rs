@@ -108,6 +108,19 @@ struct SetupHostile {
     token: Address,
 }
 
+fn setup_hostile() -> SetupHostile {
+    let env = Env::default();
+    env.mock_all_auths();
+    let admin = Address::generate(&env);
+    let token = env.register(TestToken, ());
+    let contract = env.register(TipSplitter, (admin.clone(), token.clone()));
+    SetupHostile {
+        env,
+        contract,
+        token,
+    }
+}
+
 /// The `tip` event's data, decoded in its published positional order:
 /// `from`, `amount`, `message`, `breakdown`, then the appended fields — the
 /// token the tip was paid in (#170), the tip's sequence number, and its

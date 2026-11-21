@@ -472,3 +472,91 @@ proptest! {
         prop_assert_eq!(token.balance(&tipper), 0);
     }
 }
+
+// ---------------------------------------------------------------------------
+// #266 — with escrow (#171) the contract keeps exactly the held balances
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, Debug)]
+enum EscrowOp {
+    Tip {
+        tipper: usize,
+        jar: usize,
+        amount: i128,
+    },
+    Block {
+        recipient: usize,
+    },
+    Unblock,
+    Withdraw {
+        recipient: usize,
+    },
+}
+
+fn escrow_op_strategy() -> impl Strategy<Value = EscrowOp> {
+    prop_oneof![
+        4 => (0..2usize, 0..2usize, 1i128..=50_000).prop_map(|(tipper, jar, amount)| EscrowOp::Tip { tipper, jar, amount }),
+        2 => (0..4usize).prop_map(|recipient| EscrowOp::Block { recipient }),
+        1 => Just(EscrowOp::Unblock),
+        2 => (0..4usize).prop_map(|recipient| EscrowOp::Withdraw { recipient }),
+    ]
+}
+
+proptest! {
+    #![proptest_config(snapshot_stable(32))]
+
+    /// After every step of a random mix of tips, recipient deauthorisations
+    /// (the token refuses transfers to one recipient), recoveries and
+    /// withdrawals, the contract's token balance equals the sum of every
+    /// recipient's `get_held`. Rejected calls must leave both sides as they
+    /// were. One token only: escrow is not tracked per token yet.
+    #[test]
+    fn contract_holds_exactly_the_escrowed_total(ops in proptest::collection::vec(escrow_op_strategy(), 1..40)) {
+        let s = setup_hostile();
+        let env = &s.env;
+        let client = TipSplitterClient::new(env, &s.contract);
+        let token = TestTokenClient::new(env, &s.token);
+
+        let recipients: std::vec::Vec<Address> = (0..4).map(|_| Address::generate(env)).collect();
+        let tippers: std::vec::Vec<Address> = (0..2).map(|_| Address::generate(env)).collect();
+        for t in &tippers {
+            token.mint(t, &10_000_000);
+        }
+        let jars = [String::from_str(env, "@trio"), String::from_str(env, "@duo")];
+        client.create_jar(
+            &Address::generate(env),
+            &jars[0],
+            &vec![
+                env,
+                Split { to: recipients[0].clone(), bps: 5_000 },
+                Split { to: recipients[1].clone(), bps: 3_000 },
+                Split { to: recipients[2].clone(), bps: 2_000 },
+            ],
+        );
+        client.create_jar(
+            &Address::generate(env),
+            &jars[1],
+            &vec![
+                env,
+                Split { to: recipients[2].clone(), bps: 6_000 },
+                Split { to: recipients[3].clone(), bps: 4_000 },
+            ],
+        );
+        let msg = String::from_str(env, "");
+
+        for op in ops {
+            match op {
+                EscrowOp::Tip { tipper, jar, amount } => {
+                    let _ = client.try_tip(&tippers[tipper], &jars[jar], &amount, &msg);
+                }
+                EscrowOp::Block { recipient } => token.block(&recipients[recipient]),
+                EscrowOp::Unblock => token.unblock(),
+                EscrowOp::Withdraw { recipient } => {
+                    let _ = client.try_withdraw_held(&recipients[recipient]);
+                }
+            }
+            let held: i128 = recipients.iter().map(|r| client.get_held(r)).sum();
+            prop_assert_eq!(token.balance(&s.contract), held);
+        }
+    }
+}

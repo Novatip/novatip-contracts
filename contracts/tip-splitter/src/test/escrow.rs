@@ -3,19 +3,6 @@
 use super::*;
 use soroban_sdk::vec;
 
-fn setup_hostile() -> SetupHostile {
-    let env = Env::default();
-    env.mock_all_auths();
-    let admin = Address::generate(&env);
-    let token = env.register(TestToken, ());
-    let contract = env.register(TipSplitter, (admin.clone(), token.clone()));
-    SetupHostile {
-        env,
-        contract,
-        token,
-    }
-}
-
 // ===========================================================================
 // #171 hold undeliverable shares · #172 leave_jar · #173 lock_splits · #174 recurring
 // ===========================================================================
