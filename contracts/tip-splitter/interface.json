@@ -423,6 +423,8 @@
         {
           "name": "InvalidMaximumAmount",
           "value": 42
+        },
+        {
           "name": "NotAuthorized",
           "value": 40
         }
@@ -478,6 +480,30 @@
       "lib": "",
       "name": "JarTransferredEvent",
       "fields": [
+        {
+          "name": "new_owner",
+          "type_": "address"
+        },
+        {
+          "name": "previous_owner",
+          "type_": "address"
+        },
+        {
+          "name": "version",
+          "type_": "u32"
+        }
+      ]
+    }
+  },
+  {
+    "udt_struct_v0": {
+      "lib": "",
+      "name": "JarAdminRecoveredEvent",
+      "fields": [
+        {
+          "name": "admin",
+          "type_": "address"
+        },
         {
           "name": "new_owner",
           "type_": "address"
@@ -864,6 +890,18 @@
         },
         {
           "name": "to_version",
+          "type_": "u32"
+        },
+        {
+          "name": "version",
+          "type_": "u32"
+        }
+      ]
+    }
+  },
+  {
+    "udt_struct_v0": {
+      "lib": "",
       "name": "RecurringAddedEvent",
       "fields": [
         {
@@ -1096,6 +1134,22 @@
   {
     "function_v0": {
       "name": "transfer_jar_ownership",
+      "inputs": [
+        {
+          "name": "jar_id",
+          "type_": "string"
+        },
+        {
+          "name": "new_owner",
+          "type_": "address"
+        }
+      ],
+      "outputs": []
+    }
+  },
+  {
+    "function_v0": {
+      "name": "admin_recover_jar",
       "inputs": [
         {
           "name": "jar_id",

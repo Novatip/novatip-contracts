@@ -3154,6 +3154,93 @@ fn transfer_jar_ownership_emits_jar_xfer_event_with_both_owners() {
     assert_eq!(client.get_jar(&jar_id).owner, new_owner);
 }
 
+#[test]
+fn admin_recover_jar_reassigns_owner_and_emits_a_distinct_event() {
+    let s = setup();
+    let env = &s.env;
+    let client = TipSplitterClient::new(env, &s.contract);
+    let owner = Address::generate(env);
+    let new_owner = Address::generate(env);
+    let recipient = Address::generate(env);
+    let jar_id = String::from_str(env, "@recover");
+    let splits = vec![
+        env,
+        Split {
+            to: recipient.clone(),
+            bps: 10_000,
+        },
+    ];
+    client.create_jar(&owner, &jar_id, &splits);
+
+    env.mock_auths(&[MockAuth {
+        address: &s.admin,
+        invoke: &MockAuthInvoke {
+            contract: &s.contract,
+            fn_name: "admin_recover_jar",
+            args: (jar_id.clone(), new_owner.clone()).into_val(env),
+            sub_invokes: &[],
+        },
+    }]);
+    client.admin_recover_jar(&jar_id, &new_owner);
+
+    let jar = client.get_jar(&jar_id);
+    assert_eq!(jar.owner, new_owner);
+    assert_eq!(jar.splits, splits);
+    let expected_topics = vec![
+        env,
+        symbol_short!("jar_recov").into_val(env),
+        jar_id.into_val(env),
+    ];
+    let events: std::vec::Vec<_> = env
+        .events()
+        .all()
+        .iter()
+        .filter(|event| event.0 == s.contract && event.1 == expected_topics)
+        .collect();
+    assert_eq!(events.len(), 1);
+    let (_, _, data) = events.first().unwrap();
+    let event: JarAdminRecoveredEvent =
+        TryFromVal::try_from_val(env, data).expect("admin recovery event data shape");
+    assert_eq!(event.admin, s.admin);
+    assert_eq!(event.previous_owner, owner);
+    assert_eq!(event.new_owner, new_owner);
+}
+
+#[test]
+fn admin_recover_jar_rejects_non_admin_without_changing_owner() {
+    let s = setup();
+    let env = &s.env;
+    let client = TipSplitterClient::new(env, &s.contract);
+    let owner = Address::generate(env);
+    let attacker = Address::generate(env);
+    let recipient = Address::generate(env);
+    let jar_id = String::from_str(env, "@recovery");
+    client.create_jar(
+        &owner,
+        &jar_id,
+        &vec![
+            env,
+            Split {
+                to: recipient,
+                bps: 10_000,
+            },
+        ],
+    );
+
+    env.mock_auths(&[MockAuth {
+        address: &attacker,
+        invoke: &MockAuthInvoke {
+            contract: &s.contract,
+            fn_name: "admin_recover_jar",
+            args: (jar_id.clone(), attacker.clone()).into_val(env),
+            sub_invokes: &[],
+        },
+    }]);
+    let result = client.try_admin_recover_jar(&jar_id, &attacker);
+    assert!(result.is_err());
+    assert_eq!(client.get_jar(&jar_id).owner, owner);
+}
+
 /// A second hand-off reports the first recipient as the outgoing owner, so a
 /// consumer can chain the events into a complete ownership history rather than
 /// seeing two disconnected arrivals.
@@ -9919,4 +10006,83 @@ fn migrate_runs_once_per_schema_version() {
         .filter(|e| e.0 == s.contract && topic_is_symbol(env, &e.1, 0, symbol_short!("migrate")))
         .count();
     assert_eq!(again, 0);
+}
+
+/// A jar flagged default-token-only (#313) rejects `tip_in_token` for any
+/// other allowed token before funds move, still takes the default token, and
+/// the flag survives a rename.
+#[test]
+fn default_token_only_jar_rejects_other_tokens() {
+    let s = setup();
+    let env = &s.env;
+    let client = TipSplitterClient::new(env, &s.contract);
+    let usdc = token::Client::new(env, &s.token);
+    let usdc_admin = token::StellarAssetClient::new(env, &s.token);
+
+    let eurc = second_asset(env, &s.admin);
+    let eurc_client = token::Client::new(env, &eurc);
+    let eurc_admin = token::StellarAssetClient::new(env, &eurc);
+
+    let owner = Address::generate(env);
+    let alice = Address::generate(env);
+    let tipper = Address::generate(env);
+    usdc_admin.mint(&tipper, &1_000);
+    eurc_admin.mint(&tipper, &1_000);
+    client.allow_token(&eurc);
+
+    let jar_id = String::from_str(env, "@defonly");
+    client.create_jar(
+        &owner,
+        &jar_id,
+        &vec![
+            env,
+            Split {
+                to: alice.clone(),
+                bps: 10000,
+            },
+        ],
+    );
+
+    // Off by default, and the owner can switch it on.
+    assert!(!client.get_jar_tokens_default_only(&jar_id));
+    client.set_jar_tokens_default_only(&jar_id, &true);
+    assert!(client.get_jar_tokens_default_only(&jar_id));
+
+    // Another allowed token is refused and no funds move.
+    let res = client.try_tip_in_token(
+        &tipper,
+        &jar_id,
+        &eurc,
+        &100,
+        &String::from_str(env, "eurc"),
+    );
+    assert_eq!(res, Err(Ok(Error::NonDefaultToken.into())));
+    assert_eq!(eurc_client.balance(&alice), 0);
+
+    // The default token still settles.
+    client.tip_in_token(
+        &tipper,
+        &jar_id,
+        &s.token,
+        &100,
+        &String::from_str(env, "usdc"),
+    );
+    assert_eq!(usdc.balance(&alice), 100);
+
+    // The flag follows the jar through a rename.
+    let new_id = String::from_str(env, "@defonly2");
+    client.rename_jar(&jar_id, &new_id);
+    assert!(client.get_jar_tokens_default_only(&new_id));
+    assert!(!client.get_jar_tokens_default_only(&jar_id));
+
+    // Clearing it lets the other token through again.
+    client.set_jar_tokens_default_only(&new_id, &false);
+    client.tip_in_token(
+        &tipper,
+        &new_id,
+        &eurc,
+        &100,
+        &String::from_str(env, "eurc again"),
+    );
+    assert_eq!(eurc_client.balance(&alice), 100);
 }

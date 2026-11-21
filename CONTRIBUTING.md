@@ -60,3 +60,10 @@ Do not open a public issue. See
 | Dependency audit (#132) | `cargo deny check` (`cargo install cargo-deny`) — advisories, licenses, bans. See `deny.toml`. |
 | Contract size (#131) | `make build && ./scripts/check-wasm-size.sh` — measures the `stellar contract build` artifact. |
 | Public interface (#134) | `make interface` to regenerate `contracts/tip-splitter/interface.json`, then `./scripts/check-interface.sh`. **When it changes:** regenerate, add a CHANGELOG entry, and never renumber existing `Error` variants — append only. |
+
+## Required CI checks & PR safety check
+
+`main` only accepts a pull request when both required checks pass:
+
+- **`build-test`**: runs formatting (`cargo fmt --all -- --check`), clippy (`cargo clippy --all-targets -- -D warnings`), unit tests (`cargo test`), wasm build & size check, MSRV sync, doc checks, and interface checks.
+- **`PR safety check`**: flags risky changes for extra maintainer review — including changes under `.github/`, `build.rs`, `scripts/`, new binaries, hidden Unicode characters, very long lines, and commits credited to someone else. A flagged change is not necessarily wrong; it simply requires a maintainer to review and approve the exception before merge.
