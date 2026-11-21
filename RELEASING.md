@@ -43,14 +43,25 @@ The crate version lives in `contracts/tip-splitter/Cargo.toml` (currently
 
 1. **Bump the crate version** in `contracts/tip-splitter/Cargo.toml`
    per the rule above.
-2. **Cut the changelog section**: rename the `## [Unreleased]` heading in
+2. **Bump `INTERFACE_VERSION` and regenerate `interface.json`** if any public
+   function, error code, event, or storage type changed:
+   - Increment `const INTERFACE_VERSION: u32` in
+     `contracts/tip-splitter/src/lib.rs`.
+   - Regenerate `contracts/tip-splitter/interface.json` and verify it matches
+     the compiled contract:
+     ```bash
+     make interface
+     ./scripts/check-interface.sh
+     ```
+3. **Cut the changelog section**: rename the `## [Unreleased]` heading in
    `CHANGELOG.md` to `## [X.Y.Z] - YYYY-MM-DD` and start a fresh empty
    `## [Unreleased]` above it.
-3. **Run `make ci`** and commit the bump, the changelog and any code.
-4. **Tag and push**: `git tag vX.Y.Z && git push origin main --tags`.
+4. **Run `make ci`** and commit the bump, `interface.json`, the changelog and
+   any code.
+5. **Tag and push**: `git tag vX.Y.Z && git push origin main --tags`.
    The tag must equal the crate version — the release workflow fails
    otherwise.
-5. **Let the release workflow build the artifact.** Pushing the `v*` tag
+6. **Let the release workflow build the artifact.** Pushing the `v*` tag
    triggers `.github/workflows/release.yml`, which checks the tag against
    the crate version, builds with the pinned toolchain (**Rust 1.84.0**,
    per `rust-toolchain.toml`) and the pinned Stellar CLI
@@ -63,10 +74,10 @@ The crate version lives in `contracts/tip-splitter/Cargo.toml` (currently
    - the changelog section for that version as the release notes,
    plus a build provenance attestation. Building the same tag twice
    produces the same hash (pinned toolchain + CLI + `Cargo.lock`).
-6. **Record the hash**: the released SHA-256 lives in the GitHub release
+7. **Record the hash**: the released SHA-256 lives in the GitHub release
    — both as the `.sha256` asset and in the release notes. Do not paste
    hashes into the README; the release page is the source of truth.
-7. **Deploy to testnet from the published artifact** — never from a local
+8. **Deploy to testnet from the published artifact** — never from a local
    build:
    ```bash
    gh release download vX.Y.Z --pattern 'tip_splitter.optimized.wasm*'
@@ -74,9 +85,14 @@ The crate version lives in `contracts/tip-splitter/Cargo.toml` (currently
    stellar contract deploy --wasm tip_splitter.optimized.wasm \
      --source "$SOURCE" --network testnet -- --admin "$ADMIN" --token "$USDC_TOKEN"
    ```
-8. **Update the README deployment table** with the new contract id, and
-   open the consumer updates that need the new id (`novatip-sdk`,
-   `novatip-backend`, `novatip-web`).
+9. **Update the `Network Deployments` table in `README.md`** with the new
+   testnet contract id, source commit/tag, and status, verify the live
+   deployment against the release, and open the consumer updates that need the
+   new id (`novatip-sdk`, `novatip-backend`, `novatip-web`):
+   ```bash
+   ./scripts/verify-deployment.sh
+   stellar contract info interface --id <CONTRACT_ID> --network testnet
+   ```
 
 ## Checking a deployment against the release
 

@@ -5,17 +5,34 @@ basis-point shares, in one transaction. A recipient who cannot receive the token
 no longer blocks the others: their share is escrowed by the contract for later
 withdrawal.
 
+## Glossary
+
+- <a id="glossary-jar"></a>**jar** — a creator's tip target, registered under a unique slug with an `owner` and a list of recipient splits.
+- <a id="glossary-slug"></a>**slug** — a jar's canonical public identifier (`jar_id`), formatted as `@` followed by 3–32 lowercase ASCII letters, digits, `_`, or `-`.
+- <a id="glossary-split"></a>**split** — a `(to, bps)` entry mapping a recipient `Address` to its percentage share of each tip.
+- <a id="glossary-bps"></a>**bps** — basis points (`1/100` of a percent, so `10_000 bps = 100%`).
+- <a id="glossary-share"></a>**share** — the portion of a net tip allocated to one recipient according to their `bps`.
+- <a id="glossary-held"></a>**held** — funds owed to a recipient that could not be transferred during a tip and are stored by the contract for later withdrawal.
+- <a id="glossary-escrow"></a>**escrow** — the contract's internal holding mechanism (`DataKey::Held`) that retains undeliverable recipient shares until `withdraw_held` succeeds.
+- <a id="glossary-keeper"></a>**keeper** — any off-chain caller or automation service that triggers permissionless `collect_recurring` executions when a schedule is due.
+- <a id="glossary-registrar"></a>**registrar** — an optional address configured by the admin whose co-signature is required to register new jars via `create_jar`.
+- <a id="glossary-hook"></a>**hook** — an optional post-tip contract (`set_tip_hook`) invoked after a tip settles, without blocking or reverting the tip.
+- <a id="glossary-net"></a>**net** — the tip amount remaining after subtracting the protocol fee, distributed across recipients.
+- <a id="glossary-gross"></a>**gross** — the total tip amount paid by the supporter before deducting the protocol fee.
+- <a id="glossary-dust"></a>**dust** — the integer-division remainder left over from splitting `net` by `bps`, always assigned to the last recipient.
+- <a id="glossary-sequence-number"></a>**sequence number** — a monotonically increasing contract-wide `u64` assigned to each successful tip and emitted in the `tip` event.
+
 ## Concepts
 
-- **Jar** — a creator's tip target, identified by a public slug (e.g. `@alice`).
-  Holds an `owner` and a list of `Split`s. A slug (`jar_id`) is canonical: a
+- **Jar** — a creator's tip target ([jar](#glossary-jar)), identified by a public [slug](#glossary-slug) (e.g. `@alice`).
+  Holds an `owner` and a list of `Split`s ([split](#glossary-split)). A slug (`jar_id`) is canonical: a
   leading `@` followed by 3–32 lower-case ASCII letters, digits, `_` or `-`
   — exactly the backend's `SLUG_REGEX`. Anything else (upper case, whitespace,
   control bytes, a missing `@`, or a length outside that range) is rejected with
   `InvalidJarId`, so lookalikes cannot exist next to a real creator's slug.
   The storage bound is also `MAX_JAR_ID_LEN` (64 bytes) — it doubles as a
   storage key, an event topic, and a public URL slug.
-- **Split** — a recipient `Address` and its share in basis points (`bps`).
+- **Split** — a recipient `Address` and its [share](#glossary-share) in basis points ([`bps`](#glossary-bps)).
   Every split must have `bps >= 1`, all splits in a jar must sum to exactly
   `10_000` (= 100%), and no address may appear more than once.
 - **USDC token** — the Stellar Asset Contract id is fixed at deploy time; every
@@ -23,7 +40,7 @@ withdrawal.
 - **Message** — the free-text note a supporter attaches to a tip. Capped at
   `280` bytes (`MAX_MESSAGE_LEN`), must be valid UTF-8, and may not contain
   control characters other than newline; echoed into the `tip` event.
-- **Sequence number** — a contract-wide `u64`, incremented once per successful
+- **Sequence number** — a contract-wide `u64` ([sequence number](#glossary-sequence-number)), incremented once per successful
   tip, returned by `tip` and published in the `tip` event. Gives each tip an
   identifier of its own where the transaction hash does not.
 - **Reference** — an optional 32-byte opaque id a tipper attaches with
@@ -85,7 +102,7 @@ one belongs to a jar, the other to a `(jar, supporter)` pair.
 | Function | Auth | Description |
 |----------|------|-------------|
 | `__constructor(admin, token)` | — | Deploy-time init. Stores the admin and USDC token address, and puts that token on the tip allowlist as its first entry. |
-| `create_jar(owner, jar_id, splits)` | `owner`, plus the `registrar`'s co-signature over `(jar_id, owner)` while one is registered | Register a new jar. Fails if the slug is not a canonical `@`-prefixed `[a-z0-9_-]{3,32}` slug, already exists, or splits are invalid. Emits a `jar_crtd` event. See [the registrar gate](#the-jar-registrar-and-its-trust-model-178). |
+| `create_jar(owner, jar_id, splits)` | `owner`, plus the [`registrar`](#glossary-registrar)'s co-signature over `(jar_id, owner)` while one is registered | Register a new jar. Fails if the slug is not a canonical `@`-prefixed `[a-z0-9_-]{3,32}` slug, already exists, or splits are invalid. Emits a `jar_crtd` event. See [the registrar gate](#the-jar-registrar-and-its-trust-model-178). |
 | `update_splits(jar_id, splits)` | jar `owner`, plus every current recipient whose share **decreases or is removed** when the jar is locked | Replace a jar's splits. Subject to the same validation as `create_jar`. On a locked jar the owner alone cannot cut a collaborator — see [`lock_splits`](#locking-a-jars-splits). Emits a `splits` event. |
 | `lock_splits(jar_id)` | jar `owner` | Lock a jar so `update_splits` needs each reduced/removed recipient's consent. Emits a `lock` event with `JarLockEvent { version, locked: true }` data. |
 | `unlock_splits(jar_id)` | jar `owner` **and every current recipient** | Remove the lock. Consent mirrors a reduction: all recipients must sign, or the owner could disarm the lock and then cut shares. Emits a `lock` event with `JarLockEvent { version, locked: false }` data. |
@@ -100,19 +117,19 @@ one belongs to a jar, the other to a `(jar, supporter)` pair.
 | `delete_jar(jar_id)` | current jar `owner` | Delete a registered jar and free its slug so it can be recreated. Removes the jar, its stats, and any minimum-tip value for that slug. Emits a `jar_del` event with the jar id as a topic. |
 | `rename_jar(jar_id, new_jar_id)` | jar `owner` | Move a jar, its stats and its minimum to a new slug. The old slug stops resolving immediately; `new_jar_id` must be free and pass the same length checks as `create_jar`. Emits a `jar_rnm` event with the old jar id as a topic and `JarRenamedEvent { version, jar_id, new_jar_id }` data. |
 | `tip(from, jar_id, amount, message)` | `from` | Move `amount` USDC out of `from` and route it across the jar's recipients. A recipient who cannot receive the token has their share **escrowed in the contract** (see `get_held`/`withdraw_held`) instead of reverting the tip. Emits a `tip` event carrying the per-recipient breakdown. Rejects amounts below the jar's minimum with `BelowMinTipAmount`. |
-| `get_held(recipient) -> i128` | — | How much the contract is holding for `recipient` because a past tip could not deliver their share. `0` when nothing is held. |
+| `get_held(recipient) -> i128` | — | How much the contract is holding ([held](#glossary-held)) for `recipient` because a past tip could not deliver their share. `0` when nothing is held. |
 | `withdraw_held(recipient)` | `recipient` | Pay a recipient their held balance once they can receive again. Rejected with `NothingHeld` when nothing is owed. Emits a `withdraw` event with `HeldWithdrawnEvent { version, amount }` data. |
 | `create_recurring(supporter, jar_id, amount, period_ledgers, message) -> u128` | `supporter` | Register a recurring-tip schedule. Validates the jar exists and the amount/message pass the same checks `tip` applies; `period_ledgers` must be non-zero. Assigns a fresh id, stores the entry with its first `next_due_ledger`, and emits a `recr_add` event. Returns the id. The schedule moves funds through `collect_recurring`: the supporter must have approved this contract as a token spender for at least `amount` per period. |
 | `cancel_recurring(caller, id)` | `caller`: the entry's `supporter` or the jar's `owner` | Remove a recurring-tip record. Either party may cancel (#324); anyone else gets `NotAuthorized`. Emits a `recr_del` event naming who cancelled. |
 | `cancel_recurring(id)` | the entry's `supporter` | Remove a recurring-tip record. Emits a `recr_del` event. |
 | `update_recurring(id, amount, message)` | the entry's `supporter` | Change a recurring tip's amount and message in place (#316). Keeps the id and `next_due_ledger`. Validated like `create_recurring` (`AmountZero` / `AmountNegative` → `MessageTooLong` / `InvalidMessage` → `JarNotFound` → `BelowMinTipAmount` → split arithmetic); `RecurringNotFound` for an unknown id. Emits a `recr_upd` event. |
 | `get_recurring(id) -> Recurring` | — | Read a stored recurring-tip entry. Panics with `RecurringNotFound` for an unknown id. |
-| `collect_recurring(id)` | — (any caller, typically a keeper) | Collect **one due period** of a recurring tip (#175). Pays the schedule's `amount` from the supporter's approved allowance with `transfer_from` (this contract is the spender), split by the same arithmetic as `tip`, and publishes the identical `tip` event. `next_due_ledger` advances by exactly `period_ledgers`. Too early — `NotDue`; allowance below `amount` (exhausted or expired) — `InsufficientAllowance`; supporter balance below `amount` — `InsufficientBalance`; all raised before any transfer, with zero state change. See [collecting recurring tips](#collecting-a-due-recurring-tip-175). |
+| `collect_recurring(id)` | — (any caller, typically a [keeper](#glossary-keeper)) | Collect **one due period** of a recurring tip (#175). Pays the schedule's `amount` from the supporter's approved allowance with `transfer_from` (this contract is the spender), split by the same arithmetic as `tip`, and publishes the identical `tip` event. `next_due_ledger` advances by exactly `period_ledgers`. Too early — `NotDue`; allowance below `amount` (exhausted or expired) — `InsufficientAllowance`; supporter balance below `amount` — `InsufficientBalance`; all raised before any transfer, with zero state change. See [collecting recurring tips](#collecting-a-due-recurring-tip-175). |
 | `tip(from, jar_id, amount, message)` | `from` | Transfer `amount` of the **default token** from `from`, split across the jar's recipients. Emits a `tip` event carrying the per-recipient breakdown and the token paid in. Rejects amounts below the jar's minimum with `BelowMinTipAmount`. |
 | `tip_in_token(from, jar_id, token, amount, message)` | `from` | Same split, paid in `token`, which must be on the allowlist — otherwise `TokenNotAllowed`, raised before any transfer. The jar minimum applies only when `token` is the default token. Emits the same `tip` event. |
 | `allow_token(token)` | contract `admin` | Add `token` to the allowlist. Idempotent. Emits a `tk_allow` event in the shared admin shape, carrying the admin and the allowed token. |
 | `disallow_token(token)` | contract `admin` | Remove `token` from the allowlist. Refuses the default token with `CannotDisallowDefault`. Emits a `tk_dis` event in the shared admin shape, carrying the admin and the token. |
-| `set_tip_hook(hook)` | contract `admin` | Register or clear (`None`) the post-tip hook contract (#176). Emits a `tip_hook` event carrying the admin who made the change. See [the post-tip hook](#the-post-tip-hook-176). |
+| `set_tip_hook(hook)` | contract `admin` | Register or clear (`None`) the post-tip [hook](#glossary-hook) contract (#176). Emits a `tip_hook` event carrying the admin who made the change. See [the post-tip hook](#the-post-tip-hook-176). |
 | `get_tip_hook() -> Option<Address>` | — | The registered hook, or `None` when tips settle without one. |
 | `set_registrar(registrar)` | contract `admin` | Register or clear (`None`) the registrar whose co-signature `create_jar` requires (#178). Emits a `reg_set` event carrying the admin. See [the registrar gate](#the-jar-registrar-and-its-trust-model-178). |
 | `get_registrar() -> Option<Address>` | — | The registrar `create_jar` currently requires, or `None` when jar creation is permissionless. |
@@ -391,7 +408,7 @@ preview_split(jar_id, 101) -> [70, 31]
 ```
 
 Alice's share truncates from 70.7 to 70 and Bob absorbs the leftover 1 on top
-of his 30 — the dust goes to the **last** recipient, so a UI that rounds evenly
+of his 30 — the [dust](#glossary-dust) goes to the **last** recipient, so a UI that rounds evenly
 would show Bob the wrong number.
 
 The shares always sum to exactly `amount` minus the
@@ -479,7 +496,7 @@ jar's effective minimum is the larger of the two, and
 
 **1. The truncation floor.** A recipient on `bps` receives
 `amount * bps / 10_000` with integer division, so their share is zero unless
-`net * bps >= 10_000`, where `net` is what is left after the
+`net * bps >= 10_000`, where [`net`](#glossary-net) is what is left after the
 [protocol fee](#the-protocol-fee-79). The smallest net that pays everyone is
 
 ```
@@ -491,7 +508,7 @@ absorbs the rounding remainder, the guard runs before any share is computed.
 
 **2. The fee gross-up.** The fee comes off the top, so the signed amount must
 be large enough that `net_min` survives it. Since `net = amount -
-floor(amount * fee_bps / 10_000)`, the first gross amount that leaves a net of
+floor(amount * fee_bps / 10_000)`, the first [gross](#glossary-gross) amount that leaves a net of
 at least `net_min` is
 
 ```
@@ -631,7 +648,7 @@ the code, so flipping that profile setting cannot turn it into a bypass.
   `try_transfer`; a recipient who cannot receive the token (a dropped trustline
   or a deauthorised account) has their share moved from the tipper into the
   contract and credited under `DataKey::Held(recipient)`. Everyone else is paid
-  normally and the tip still succeeds. `withdraw_held` releases the escrow once
+  normally and the tip still succeeds. `withdraw_held` releases the [escrow](#glossary-escrow) once
   the recipient can receive again.
 - `preview_split(jar_id, amount)` runs this same calculation as a view, so a
   client can show the exact per-recipient amounts before the supporter signs.
