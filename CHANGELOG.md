@@ -13,6 +13,10 @@ All notable changes to `novatip-contracts` are documented here.
 - Documented the split rounding rule with a worked example: the last recipient absorbs the remainder, so entry order matters (#60).
 
 ### Added
+- `scripts/upgrade.sh` uploads a wasm, checks its hash, confirms on mainnet, calls `upgrade`, verifies the deployed wasm and prints `version()` before and after (#294)
+- `scripts/recurring.sh` creates, shows, cancels and collects recurring tips, printing the token `approve` command and explaining `NotDue` with the next due ledger (#290)
+- `scripts/delete-jar.sh` prints a jar and its totals, requires typing the slug to confirm, deletes it and checks `jar_exists` (#288)
+- `scripts/rename-jar.sh` validates the new canonical slug, rejects a taken one and reads the jar back under its new id (#287)
 - Added admin-authorized `admin_recover_jar` for lost owner keys and the distinct `jar_recov` audit event. This can reassign any jar without old/new-owner consent; splits and jar flags are preserved. `version()` is now `9` (#52).
 - `tip_many(from, tips, token)` takes an optional `token` for the whole batch, checked against the allowlist like `tip_in_token`; the jar minimum applies only to the default token (#322). `TipRequest` gains `reference: Option<BytesN<32>>`, echoed in each entry's `tip` event (#318)
 - `get_allowed_tokens() -> Vec<Address>` lists the allowlist, default first, capped at `MAX_ALLOWED_TOKENS` (10) with the appended error `TooManyAllowedTokens` (40) (#321)
