@@ -65,14 +65,25 @@ jobs:
       - name: rust-toolchain vs workspace rust-version (#133)
         run: ./scripts/check-msrv.sh
 
+  # Runs cargo-deny from a normal step, not EmbarkStudios/cargo-deny-action: that
+  # action runs in a container which cannot install the toolchain pinned in
+  # rust-toolchain.toml, so every run logged "override toolchain ... is not
+  # installed" (#307). A plain step lets rustup install the pinned channel.
   dependency-audit:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: EmbarkStudios/cargo-deny-action@v2
+
+      - name: Show toolchain
+        run: rustup show
+
+      - name: Install cargo-deny
+        uses: taiki-e/install-action@v2
         with:
-          command: check
-          arguments: --all-features
+          tool: cargo-deny
+
+      - name: Run cargo deny
+        run: cargo deny check --all-features
 
   build-test:
     runs-on: ubuntu-latest
