@@ -58,6 +58,11 @@ check-docs:
 	./scripts/check-docs.sh
 # Run everything CI checks, in the same order with the same flags,
 # including the wasm build and size check.
+#
+# Every job in .github/workflows/ci.yml runs its command here too. Tools that CI
+# installs itself (shellcheck, the Stellar CLI with jq, cargo-deny) are skipped
+# with a printed notice when they are not installed locally, so the rest still
+# runs; CI always runs them.
 ci:
 	cargo fmt --all -- --check
 	cargo clippy --locked --all-targets -- -D warnings
@@ -65,6 +70,22 @@ ci:
 	cargo build --locked --target wasm32-unknown-unknown --release
 	stellar contract build
 	./scripts/check-wasm-size.sh
+	./scripts/check-msrv.sh
+	@if command -v shellcheck >/dev/null 2>&1; then \
+		shellcheck scripts/*.sh scripts/lib/*.sh; \
+	else \
+		echo "ci: SKIPPED shellcheck (not installed; CI runs it)"; \
+	fi
+	@if command -v stellar >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then \
+		./scripts/check-docs.sh && ./scripts/check-interface.sh; \
+	else \
+		echo "ci: SKIPPED check-docs and check-interface (needs stellar and jq; CI runs them)"; \
+	fi
+	@if command -v cargo-deny >/dev/null 2>&1; then \
+		cargo deny check --all-features; \
+	else \
+		echo "ci: SKIPPED cargo deny check (cargo-deny not installed; CI runs it)"; \
+	fi
 
 # Regenerate the committed public interface snapshot (#134).
 interface:
