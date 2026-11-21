@@ -1766,6 +1766,55 @@ fn default_token_only_jar_rejects_other_tokens() {
     assert_eq!(eurc_client.balance(&alice), 100);
 }
 
+// ===========================================================================
+// #310 change_recipient, #311 withdraw_held_to, #312 fee recipient
+// ===========================================================================
+
+#[test]
+fn change_recipient_needs_only_old_and_keeps_bps_position_and_lock() {
+    let s = setup();
+    let env = &s.env;
+    let client = TipSplitterClient::new(env, &s.contract);
+    let (jar_id, alice, bob, _) = fee_jar(&s, "@chg_rcpt", 0);
+    client.lock_splits(&jar_id);
+    let carol = Address::generate(env);
+
+    client.change_recipient(&jar_id, &alice, &carol);
+    let auths = env.auths();
+    assert_eq!(auths.len(), 1);
+    assert_eq!(auths[0].0, alice);
+
+    let jar = client.get_jar(&jar_id);
+    let first = jar.splits.get(0).unwrap();
+    assert_eq!((first.to, first.bps), (carol, 7000));
+    let second = jar.splits.get(1).unwrap();
+    assert_eq!((second.to, second.bps), (bob, 3000));
+    assert!(client.is_splits_locked(&jar_id));
+}
+
+#[test]
+fn change_recipient_rejects_duplicate_invalid_and_non_recipient() {
+    let s = setup();
+    let env = &s.env;
+    let client = TipSplitterClient::new(env, &s.contract);
+    let (jar_id, alice, bob, _) = fee_jar(&s, "@chg_bad", 0);
+    let stranger = Address::generate(env);
+
+    assert_eq!(
+        client.try_change_recipient(&jar_id, &alice, &bob),
+        Err(Ok(Error::DuplicateRecipient.into()))
+    );
+    assert_eq!(
+        client.try_change_recipient(&jar_id, &alice, &s.contract),
+        Err(Ok(Error::InvalidRecipient.into()))
+    );
+    assert_eq!(
+        client.try_change_recipient(&jar_id, &alice, &s.token),
+        Err(Ok(Error::InvalidRecipient.into()))
+    );
+    assert_eq!(
+        client.try_change_recipient(&jar_id, &stranger, &Address::generate(env)),
+        Err(Ok(Error::NotRecipient.into()))
 // ---------------------------------------------------------------------------
 // #262 — every jar-taking public function rejects non-canonical jar IDs
 // ---------------------------------------------------------------------------

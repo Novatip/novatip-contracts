@@ -159,6 +159,12 @@ fn withdraw_held_edge_cases_accumulate_retry_pause_and_double_withdraw() {
     let alice = Address::generate(env);
     let bob = Address::generate(env);
     let tipper = Address::generate(env);
+    let rescue = Address::generate(env);
+    token.mint(&tipper, &1_000);
+    let jar_id = String::from_str(env, "@held_to");
+    client.create_jar(
+        &owner,
+        &jar_id,
     token.mint(&tipper, &1_000);
 
     let jar_one = String::from_str(env, "@held_one");
@@ -171,6 +177,31 @@ fn withdraw_held_edge_cases_accumulate_retry_pause_and_double_withdraw() {
             env,
             Split {
                 to: alice.clone(),
+                bps: 7000,
+            },
+            Split {
+                to: bob.clone(),
+                bps: 3000,
+            },
+        ],
+    );
+    token.block(&bob);
+    client.tip(&tipper, &jar_id, &100, &String::from_str(env, "hi"));
+    assert_eq!(client.get_held(&bob), 30);
+
+    assert_eq!(
+        client.try_withdraw_held_to(&bob, &s.contract),
+        Err(Ok(Error::InvalidRecipient.into()))
+    );
+    assert_eq!(
+        client.try_withdraw_held_to(&bob, &s.token),
+        Err(Ok(Error::InvalidRecipient.into()))
+    );
+
+    client.withdraw_held_to(&bob, &rescue);
+    let expected_topics = vec![
+        env,
+        symbol_short!("wd_to").into_val(env),
                 bps: 5_000,
             },
             Split {
@@ -225,6 +256,50 @@ fn withdraw_held_edge_cases_accumulate_retry_pause_and_double_withdraw() {
         .filter(|e| e.0 == s.contract && e.1 == expected_topics)
         .collect();
     assert_eq!(evs.len(), 1);
+    let decoded: HeldWithdrawnToEvent =
+        TryFromVal::try_from_val(env, &evs[0].2).expect("wd_to event data shape");
+    assert_eq!(decoded.amount, 30);
+    assert_eq!(decoded.to, rescue);
+    assert_eq!(token.balance(&rescue), 30);
+    assert_eq!(client.get_held(&bob), 0);
+    assert!(client.try_withdraw_held_to(&bob, &rescue).is_err());
+}
+
+#[test]
+fn fee_recipient_set_clear_and_self_transfer_rule() {
+    let s = setup();
+    let env = &s.env;
+    let client = TipSplitterClient::new(env, &s.contract);
+    let token = token::Client::new(env, &s.token);
+    let token_admin = token::StellarAssetClient::new(env, &s.token);
+    let (jar_id, _, _, tipper) = fee_jar(&s, "@fee_rcpt", 10_000);
+    let treasury = Address::generate(env);
+    client.set_fee_bps(&100);
+
+    assert_eq!(client.get_fee_recipient(), s.admin);
+    client.set_fee_recipient(&Some(treasury.clone()));
+    assert_eq!(client.get_fee_recipient(), treasury);
+    client.tip(&tipper, &jar_id, &10_000, &String::from_str(env, "fee"));
+    assert_eq!(token.balance(&treasury), 100);
+    assert_eq!(token.balance(&s.admin), 0);
+
+    // A tip from the fee recipient moves no fee.
+    token_admin.mint(&treasury, &10_000);
+    client.tip(&treasury, &jar_id, &10_000, &String::from_str(env, "own"));
+    assert_eq!(last_tip_event(env, &s.contract, &jar_id).fee, 0);
+    assert_eq!(token.balance(&treasury), 100);
+
+    // Clearing sends fees back to the admin.
+    client.set_fee_recipient(&None);
+    assert_eq!(client.get_fee_recipient(), s.admin);
+    token_admin.mint(&tipper, &10_000);
+    client.tip(&tipper, &jar_id, &10_000, &String::from_str(env, "back"));
+    assert_eq!(token.balance(&s.admin), 100);
+
+    assert_eq!(
+        client.try_set_fee_recipient(&Some(s.contract.clone())),
+        Err(Ok(Error::InvalidRecipient.into()))
+    );
     let decoded: HeldWithdrawnEvent =
         TryFromVal::try_from_val(env, &evs[0].2).expect("withdraw event data");
     assert_eq!(decoded.version, 1);

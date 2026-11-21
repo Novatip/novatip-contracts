@@ -140,6 +140,7 @@ one belongs to a jar, the other to a `(jar, supporter)` pair.
 | `__constructor(admin, token)` | — | Deploy-time init. Stores the admin and USDC token address, and puts that token on the tip allowlist as its first entry. |
 | `create_jar(owner, jar_id, splits)` | `owner`, plus the [`registrar`](#glossary-registrar)'s co-signature over `(jar_id, owner)` while one is registered | Register a new jar. Fails if the slug is not a canonical `@`-prefixed `[a-z0-9_-]{3,32}` slug, already exists, or splits are invalid. Emits a `jar_crtd` event. See [the registrar gate](#the-jar-registrar-and-its-trust-model-178). |
 | `update_splits(jar_id, splits)` | jar `owner`, plus every current recipient whose share **decreases or is removed** when the jar is locked | Replace a jar's splits. Subject to the same validation as `create_jar`. On a locked jar the owner alone cannot cut a collaborator — see [`lock_splits`](#locking-a-jars-splits). Emits a `splits` event. |
+| `change_recipient(jar_id, old, new)` | `old` | Replace `old` with `new` in the jar's splits, keeping the same bps and position (#310). The owner is not needed, and it works on a locked jar (the lock is kept). Rejects a `new` already in the jar (`DuplicateRecipient`), the contract or token address (`InvalidRecipient`), and an `old` that is not a recipient (`NotRecipient`). Emits a `splits` event. |
 | `lock_splits(jar_id)` | jar `owner` | Lock a jar so `update_splits` needs each reduced/removed recipient's consent. Emits a `lock` event with `JarLockEvent { version, locked: true }` data. |
 | `unlock_splits(jar_id)` | jar `owner` **and every current recipient** | Remove the lock. Consent mirrors a reduction: all recipients must sign, or the owner could disarm the lock and then cut shares. Emits a `lock` event with `JarLockEvent { version, locked: false }` data. |
 | `is_splits_locked(jar_id) -> bool` | — | Whether the jar's splits are locked. Panics with `JarNotFound` if the slug is free. |
@@ -156,6 +157,7 @@ one belongs to a jar, the other to a `(jar, supporter)` pair.
 | `tip(from, jar_id, amount, message)` | `from` | Move `amount` USDC out of `from` and route it across the jar's recipients. A recipient who cannot receive the token has their share **escrowed in the contract** (see `get_held`/`withdraw_held`) instead of reverting the tip. Emits a `tip` event carrying the per-recipient breakdown. Rejects amounts below the jar's minimum with `BelowMinTipAmount`. |
 | `get_held(recipient) -> i128` | — | How much the contract is holding ([held](#glossary-held)) for `recipient` because a past tip could not deliver their share. `0` when nothing is held. |
 | `withdraw_held(recipient)` | `recipient` | Pay a recipient their held balance once they can receive again. Rejected with `NothingHeld` when nothing is owed. Emits a `withdraw` event with `HeldWithdrawnEvent { version, amount }` data. |
+| `withdraw_held_to(recipient, to)` | `recipient` | Pay `recipient`'s held balance to `to` instead (#311), for an account that can no longer receive the token. Rejects `to` equal to the contract or the token (`InvalidRecipient`) and `NothingHeld` when nothing is owed. Emits a `wd_to` event with topics `(wd_to, recipient)` and `HeldWithdrawnToEvent { version, amount, to }` data. |
 | `create_recurring(supporter, jar_id, amount, period_ledgers, message) -> u128` | `supporter` | Register a recurring-tip schedule. Validates the jar exists and the amount/message pass the same checks `tip` applies; `period_ledgers` must be non-zero. Assigns a fresh id, stores the entry with its first `next_due_ledger`, and emits a `recr_add` event. Returns the id. The schedule moves funds through `collect_recurring`: the supporter must have approved this contract as a token spender for at least `amount` per period. |
 | `cancel_recurring(caller, id)` | `caller`: the entry's `supporter` or the jar's `owner` | Remove a recurring-tip record. Either party may cancel (#324); anyone else gets `NotAuthorized`. Emits a `recr_del` event naming who cancelled. |
 | `cancel_recurring(id)` | the entry's `supporter` | Remove a recurring-tip record. Emits a `recr_del` event. |
@@ -170,8 +172,10 @@ one belongs to a jar, the other to a `(jar, supporter)` pair.
 | `get_tip_hook() -> Option<Address>` | — | The registered hook, or `None` when tips settle without one. |
 | `set_registrar(registrar)` | contract `admin` | Register or clear (`None`) the registrar whose co-signature `create_jar` requires (#178). Emits a `reg_set` event carrying the admin. See [the registrar gate](#the-jar-registrar-and-its-trust-model-178). |
 | `get_registrar() -> Option<Address>` | — | The registrar `create_jar` currently requires, or `None` when jar creation is permissionless. |
-| `set_fee_bps(fee_bps)` | contract `admin` | Set the protocol fee taken from every tip before the split, in basis points (#79). Defaults to `0`; above `500` (5%) is rejected with `FeeTooHigh`. The fee is paid to the admin. Emits a `fee_set` event. See [the protocol fee](#the-protocol-fee-79). |
+| `set_fee_bps(fee_bps)` | contract `admin` | Set the protocol fee taken from every tip before the split, in basis points (#79). Defaults to `0`; above `500` (5%) is rejected with `FeeTooHigh`. The fee is paid to the fee recipient (the admin unless `set_fee_recipient` set one). Emits a `fee_set` event. See [the protocol fee](#the-protocol-fee-79). |
 | `get_fee_bps() -> u32` | — | The protocol fee currently taken from every tip, in basis points. `0` until the admin sets one. |
+| `set_fee_recipient(recipient)` | contract `admin` | Send protocol fees to `recipient` instead of the admin, or `None` to go back to the admin (#312). Rejects the contract or token address (`InvalidRecipient`). A tip from the fee recipient moves no fee (the self-transfer rule). Emits a `fee_rcpt` event in the shared admin shape. |
+| `get_fee_recipient() -> Address` | — | Where protocol fees are paid: the configured recipient, or the admin when none is set. |
 | `tip(from, jar_id, amount, message) -> u64` | `from` | Transfer `amount` USDC from `from`, split across the jar's recipients. Emits a `tip` event carrying the per-recipient breakdown and this tip's sequence number, and returns that number. Rejects amounts below the jar's minimum with `BelowMinTipAmount`. |
 | `tip_with_ref(from, jar_id, amount, message, reference) -> u64` | `from` | Identical to `tip`, plus an optional 32-byte opaque `reference` echoed in the `tip` event. Same transfers, same validation, same counter — both entry points call one internal implementation. |
 | `tip_many(from, tips, token) -> Vec<u64>` | `from` | Tip several jars in one transaction, each with its own amount, message and optional reference. `token` is `None` for the default token, or one allowed token for the whole batch (#322), checked like `tip_in_token` before any transfer (`TokenNotAllowed`); the jar minimum applies only to the default token. `from` authorises once for the whole batch, and every entry settles exactly as a single `tip` would — same validation, same minimum-tip check, same protocol fee, same self-transfer skip — and publishes its own `tip` event. The batch is bounded by `MAX_BATCH_TIPS` (`BatchTooLarge`); an empty batch is `BatchEmpty`. **All-or-nothing**: a failure in any jar reverts the whole call, leaving the earlier jars untouched. Returns one sequence number per entry, in order. See [tipping many jars at once](#tipping-many-jars-at-once-84). |
@@ -891,7 +895,8 @@ does not check the admin.
 | `disallow_token(token)` | Remove one, except the deploy-time token (`CannotDisallowDefault`). |
 | `set_tip_hook(hook)` | Point the post-tip callback at a contract, or clear it. |
 | `set_registrar(registrar)` | Require a registrar co-signature for new jars, or clear it. |
-| `set_fee_bps(fee_bps)` | Set the protocol fee in `0..=500` bps; the fee is paid to the admin. |
+| `set_fee_bps(fee_bps)` | Set the protocol fee in `0..=500` bps; the fee is paid to the fee recipient (the admin by default). |
+| `set_fee_recipient(recipient)` | Send fees to another address, or `None` for the admin. |
 | `transfer_admin(new_admin)` | Hand the role to another address. It takes effect immediately; there is no acceptance step. |
 | `pause()` / `resume()` | Stop and restart `tip`, `tip_with_ref` and `tip_in_token`. |
 | `upgrade(new_wasm_hash)` | Replace the running Wasm, keeping the address and all stored state. |
@@ -1267,6 +1272,7 @@ events are:
 | `tip_hook` | `TipHookEvent` | `hook: Option<Address>` (`None` clears it) |
 | `reg_set` | `RegistrarEvent` | `registrar: Option<Address>` (`None` clears it) |
 | `fee_set` | `FeeEvent` | `fee_bps: u32` |
+| `fee_rcpt` | `FeeRecipientEvent` | `recipient: Option<Address>` (`None` clears it) |
 | `pause` | `PauseEvent` | `paused: true` |
 | `resume` | `PauseEvent` | `paused: false` |
 | `adm_xfer` | `AdminTransferredEvent` | `new_admin: Address` (`admin` is the outgoing key) |
@@ -2164,6 +2170,7 @@ the same as a quiet contract.
 | `max_tip` | `(sym, jar_id)` | `MaxTipEvent { version, amount }` |
 | `tip` | `(sym, jar_id)` | `TipEvent { version, from, amount, fee, message, breakdown, token, seq, reference }` |
 | `withdraw` | `(sym, recipient)` | `HeldWithdrawnEvent { version, amount }` |
+| `wd_to` | `(sym, recipient)` | `HeldWithdrawnToEvent { version, amount, to }` |
 | `recr_add` | `(sym, supporter, jar_id)` | `RecurringAddedEvent { version, id, jar_id, amount, period_ledgers, next_due_ledger }` |
 | `recr_upd` | `(sym, supporter)` | `RecurringUpdatedEvent { version, id, amount, message }` |
 | `recr_del` | `(sym, supporter)` | tuple `(id, cancelled_by)` |

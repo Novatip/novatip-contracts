@@ -1139,6 +1139,7 @@ fn assert_tip_settles_once_despite_hook(
 }
 
 #[test]
+fn withdraw_held_to_pays_another_address_and_records_both() {
 fn hostile_hooks_panic_error_and_reentry_do_not_disrupt_tip() {
     // (a) Hook that panics.
     {
