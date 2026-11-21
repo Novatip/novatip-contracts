@@ -1289,6 +1289,14 @@ does a supporter who has not tipped a given jar. A **free slug** is
 `JarNotFound`, not zeros — a typo'd handle must not look like a jar nobody has
 tipped.
 
+**Units.** `total` is the raw sum of amounts in the token's smallest unit. It
+does not normalize or convert different tokens. For example, adding 1 USDC and
+1 EURC (both with six decimal places) produces `2_000_000`, which is not a
+meaningful currency total. Consumers that need per-token totals should index
+`tip` events, which include the token, and group amounts by token. The planned
+[per-token stats enhancement (#314)](https://github.com/Novatip/novatip-contracts/issues/314)
+will add on-chain per-token totals.
+
 **Storage.** `DataKey::Stats(jar_id)` and `DataKey::Supporter(jar_id,
 supporter)` are persistent entries under the same TTL policy as the jar itself
 (`JAR_TTL_LEDGERS`, bumped at the same threshold), and both views bump on read.
