@@ -39,6 +39,26 @@ fee is `amount - sum(preview_split(jar_id, amount))`.
 `forward_tip_naive` skips step 2. It exists only so the tests can show the
 failure mode; production callers should use `forward_tip`.
 
+## Held-share limitation (#268)
+
+When a recipient cannot receive the token (for example, their trustline was
+removed or deauthorized), `tip_splitter` falls back to
+`transfer(from=forwarder, to=tip_splitter, share)` so the share is escrowed in
+the splitter under `Held(recipient)` (#171). Because `forward_tip` only
+pre-authorizes `transfer(from=forwarder, to=recipient, share)` for each
+recipient reported by `preview_tip`, that fallback transfer to `tip_splitter`
+is **not** pre-authorized, and `forward_tip` reverts with an authorization
+error (moving no funds).
+
+Pre-authorizing both transfers per recipient is not a general fix either:
+Soroban consumes authorized `InvokerContractAuthEntry` trees as sub-invocations
+run, and when the direct transfer to `recipient` fails inside `try_transfer`
+after checking `from.require_auth()`, or when multiple recipients fall back to
+escrow, the static auth list predicted from `preview_tip` no longer matches the
+transfers actually executed. Contract callers should ensure all jar recipients
+can receive the settlement token before forwarding a tip (for example, with
+`scripts/trustline.sh --check`).
+
 ## Tests
 
 ```bash
