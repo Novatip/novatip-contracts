@@ -6,6 +6,10 @@ All notable changes to `novatip-contracts` are documented here.
 
 ### Documentation
 
+- Rewrote "Detecting the interface version" as a table with one row per interface version from 1 to 10 (#271).
+- Added Events sections for `pause`, `resume`, `upgrade`, `tk_allow`, `tk_dis` and `fee_set`, example payloads for `adm_xfer` and `jar_rnm`, and `jar_rnm` support in `scripts/events.sh` (#272).
+- Added a table of which state-changing entry points the contract pause and the jar pause block; `pause` now names `tip_many` (#273).
+- Added "When a share is held", covering the cause, check, fix, withdrawal and single-token limit of held shares (#274).
 - Added a multi-recipient jar creation and read-back example for the deployed testnet contract (#54).
 - Documented all storage keys, their readers, writers, TTL renewal, and archive behavior (#283).
 - Documented `tip_many` preflight and failure-isolation guidance (#282).

@@ -18,11 +18,16 @@ set -euo pipefail
 #   CONTRACT_ID  optional; defaults to .contract-id.<NETWORK>
 #
 # Optional env:
-#   EVENT          one of jar_crtd | splits | jar_xfer | min_tip | tip |
-#                  tk_allow | tk_dis | tip_hook | reg_set | fee_set | pause |
-#                  resume | adm_xfer | upgrade | all (default: all)
+#   EVENT          one of jar_crtd | splits | jar_xfer | jar_rnm | min_tip |
+#                  tip | tk_allow | tk_dis | tip_hook | reg_set | fee_set |
+#                  pause | resume | adm_xfer | upgrade | all (default: all).
+#                  docs/CONTRACT.md has a section per event under "Events" with
+#                  its topics and data fields; the admin events (tk_allow to
+#                  upgrade) share the shape in "Admin events — one shape".
 #   SLUG           jar id to filter on, e.g. "@demo". Ignored for admin events,
-#                  which have no jar id topic. Unset lists every jar.
+#                  which have no jar id topic. Unset lists every jar. For
+#                  jar_rnm the jar id topic is the old id, so SLUG is the name
+#                  the jar had before the rename.
 #   START_LEDGER   first ledger to scan. Default: WINDOW ledgers before the
 #                  network's current ledger.
 #   END_LEDGER     last ledger to scan. Default: the current ledger.
@@ -65,7 +70,7 @@ command -v jq >/dev/null 2>&1 || {
 
 # Events published with the jar id as their second topic. Admin events carry
 # only the event-name topic, so SLUG must not be appended for them.
-JAR_EVENTS=(jar_crtd splits jar_xfer min_tip tip)
+JAR_EVENTS=(jar_crtd splits jar_xfer jar_rnm min_tip tip)
 ADMIN_EVENTS=(tk_allow tk_dis tip_hook reg_set fee_set pause resume adm_xfer upgrade)
 VALID_EVENTS=("${JAR_EVENTS[@]}" "${ADMIN_EVENTS[@]}")
 
