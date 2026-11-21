@@ -18,7 +18,7 @@ jobs:
   shellcheck:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install shellcheck
         run: sudo apt-get update && sudo apt-get install -y shellcheck
@@ -36,7 +36,7 @@ jobs:
     env:
       STELLAR_VERSION: 27.1.0
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install pinned Stellar CLI
         run: |
@@ -61,14 +61,14 @@ jobs:
   msrv-sync:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: rust-toolchain vs workspace rust-version (#133)
         run: ./scripts/check-msrv.sh
 
   dependency-audit:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: EmbarkStudios/cargo-deny-action@v2
         with:
           command: check
@@ -79,7 +79,7 @@ jobs:
     env:
       STELLAR_VERSION: 27.1.0
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # rustup reads rust-toolchain.toml and installs the pinned channel,
       # rustfmt, clippy, and wasm32v1-none automatically.
@@ -96,7 +96,7 @@ jobs:
           stellar --version
 
       - name: Cache cargo
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/registry
@@ -125,3 +125,15 @@ jobs:
 
       - name: Report wasm size
         run: ./scripts/check-wasm-size.sh
+
+      # Fail here, not later, if the artifact the smoke tests import is absent.
+      - name: Check the built wasm exists
+        run: |
+          set -euo pipefail
+          WASM=target/wasm32v1-none/release/tip_splitter.wasm
+          test -f "${WASM}" || { echo "error: ${WASM} was not built" >&2; exit 1; }
+
+      # The wasm smoke tests (#143) import the artifact built above through
+      # contractimport!, so they test the file deployments ship, not the native build.
+      - name: Wasm smoke tests against the built contract
+        run: cargo test --locked -p tip-splitter --features wasm-test wasm_
