@@ -194,7 +194,7 @@ one belongs to a jar, the other to a `(jar, supporter)` pair.
 | `get_token() -> Address` | — | The USDC token address tips settle in. |
 | `get_admin() -> Address` | — | The contract admin recorded at deploy time. |
 | `transfer_admin(new_admin)` | contract `admin` | Hand admin control to `new_admin`. Rejected with `AdminExists` when it is already the current admin. Emits an `adm_xfer` event with `AdminTransferredEvent { version, admin, new_admin }` data. |
-| `pause()` | contract `admin` | Pause tipping: `tip`, `tip_with_ref` and `tip_in_token` reject with `ContractPaused`. Emits a `pause` event in the shared admin shape with `paused: true`. |
+| `pause()` | contract `admin` | Pause tipping: `tip`, `tip_with_ref`, `tip_in_token` and `tip_many` reject with `ContractPaused`; see [what each pause blocks](#what-each-pause-blocks). Emits a `pause` event in the shared admin shape with `paused: true`. |
 | `resume()` | contract `admin` | Lift a pause. Emits a `resume` event in the shared admin shape with `paused: false`. |
 | `is_paused() -> bool` | — | Whether tipping is currently paused. Reads instance storage. |
 | `upgrade(new_wasm_hash)` | contract `admin` | Replace the running contract Wasm while keeping the address and all stored state. Emits an `upgrade` event carrying the previous and new hashes. |
@@ -218,7 +218,7 @@ Every privileged entry point requires the contract `admin` signature (`transfer_
 
 | Admin function | What it can affect | What it can never do |
 | -------------- | ------------------ | -------------------- |
-| `pause()` / `resume()` | Halts or resumes `tip`, `tip_with_ref`, `tip_in_token`, and `collect_recurring` | Cannot move funds out of any jar or alter existing splits |
+| `pause()` / `resume()` | Halts or resumes `tip`, `tip_with_ref`, `tip_in_token` and `tip_many`. `collect_recurring` is not halted ([#220](https://github.com/Novatip/novatip-contracts/issues/220)) | Cannot move funds out of any jar or alter existing splits |
 | `set_fee_bps(fee_bps)` | Sets the protocol fee taken off the top of tips (capped at 5% / `500` bps) | Cannot exceed `500` bps or take funds retroactively |
 | `allow_token(token)` / `disallow_token(token)` | Controls which tokens (besides the default USDC token) can be tipped | Cannot disallow the default token or seize held balances |
 | `set_tip_hook(hook)` | Registers or clears a post-tip hook contract called after tip transfers | Cannot intercept or revert funds already sent to recipients before the hook runs (hook failure reverts the whole tx) |
@@ -928,7 +928,7 @@ The admin **cannot**:
 - change the compiled-in bounds: 20 recipients, a 280-byte message, 10 000 bps
   for the whole split. They ship with the code, so changing one means shipping
   new code.
-- stop scheduled collection. `pause` gates the three tip entry points only;
+- stop scheduled collection. `pause` gates the four tip entry points only;
   `collect_recurring` and `withdraw_held` keep working while paused.
 
 `upgrade` is the widest power on the list and it is deliberately in the admin's
@@ -1279,6 +1279,8 @@ Publishes both ends of the admin handover, so an indexer can track who held the
 role without replaying every prior transfer. The data is a named struct rather
 than a positional tuple, so fields can be added without breaking decoders.
 
+- **Example (decoded data):** `{ "version": 1, "admin": "GOLD…ADMN", "new_admin": "GNEW…ADMN" }`
+
 ### `jar_rnm` — published on every successful `rename_jar`
 
 - **Topics:** `(symbol "jar_rnm", jar_id: String)` — the **old** jar id
@@ -1288,6 +1290,9 @@ Lets an indexer move a jar in its cache immediately. The old id is a topic so a
 subscription for that jar sees the rename, and the data carries both ids so the
 event is self-describing. The payload is a named struct rather than a
 positional pair.
+
+- **Example:** topics `["jar_rnm", "@old-name"]`, data
+  `{ "version": 1, "jar_id": "@old-name", "new_jar_id": "@new-name" }`
 
 ### `recr_add` / `recr_del` — recurring-tip registration and cancellation
 
@@ -1345,6 +1350,76 @@ upgrade reports the hash installed by the previous one. The new build's
 `INTERFACE_VERSION` cannot be read inside the upgrade transaction — the
 executing code is still the old build — so clients call `version()` after the
 ledger closes if they need it.
+
+The per-event sections below give the topics, data and an example decoded
+value for each admin event that has no section of its own elsewhere in this
+chapter. Addresses and hashes are shortened with `…`. Decode the data by field
+name, as for every other event.
+
+### `pause` — published on every `pause`
+
+- **Topics:** `(symbol "pause")`
+- **Data:** `PauseEvent { version: u32, admin: Address, paused: bool }` (`paused` is always `true`)
+- **Example (decoded data):** `{ "version": 1, "admin": "GADM…ADMN", "paused": true }`
+
+Published each time the admin calls `pause`, including when the contract is
+already paused. From then on the tip entry points reject with `ContractPaused`;
+see [what each pause blocks](#what-each-pause-blocks).
+
+### `resume` — published on every `resume`
+
+- **Topics:** `(symbol "resume")`
+- **Data:** `PauseEvent { version: u32, admin: Address, paused: bool }` (`paused` is always `false`)
+- **Example (decoded data):** `{ "version": 1, "admin": "GADM…ADMN", "paused": false }`
+
+Published each time the admin calls `resume`, including when the contract was
+not paused. `pause` and `resume` share one data struct, so an indexer can keep
+the current state from the `paused` field of the latest of either event.
+
+### `upgrade` — published on every successful `upgrade`
+
+- **Topics:** `(symbol "upgrade")`
+- **Data:** `UpgradedEvent { version: u32, admin: Address, previous_hash: Option<BytesN<32>>, new_hash: BytesN<32> }`
+- **Example (decoded data):** `{ "version": 1, "admin": "GADM…ADMN", "previous_hash": "9f2c…41ab", "new_hash": "c07e…5d10" }`
+
+Published after the contract code has been replaced. `previous_hash` is `None`
+on the first upgrade of a deployment that has never upgraded since the field was
+added (see above). Call `version()` after the ledger closes to learn the new
+build's interface version, then `migrate()` if the release notes say the schema
+changed ([upgrade, then migrate](#upgrade-then-migrate-325)).
+
+### `tk_allow` — published on every successful `allow_token`
+
+- **Topics:** `(symbol "tk_allow")`
+- **Data:** `TokenAllowlistEvent { version: u32, admin: Address, token: Address, allowed: bool }` (`allowed` is always `true`)
+- **Example (decoded data):** `{ "version": 1, "admin": "GADM…ADMN", "token": "CDLZ…XLMC", "allowed": true }`
+
+Published whenever `allow_token` succeeds, including for a token that was
+already allowed. After it, `tip_in_token` and `tip_many` accept `token`.
+`allow_token` fails with `TooManyAllowedTokens` and publishes nothing when the
+list is full.
+
+### `tk_dis` — published on every successful `disallow_token`
+
+- **Topics:** `(symbol "tk_dis")`
+- **Data:** `TokenAllowlistEvent { version: u32, admin: Address, token: Address, allowed: bool }` (`allowed` is always `false`)
+- **Example (decoded data):** `{ "version": 1, "admin": "GADM…ADMN", "token": "CDLZ…XLMC", "allowed": false }`
+
+Published whenever `disallow_token` succeeds, including for a token that was
+not on the list. Trying to disallow the default token fails with
+`CannotDisallowDefault` and publishes nothing. `tk_allow` and `tk_dis` share
+one struct, so the latest event for a token gives its state in `allowed`.
+
+### `fee_set` — published on every successful `set_fee_bps`
+
+- **Topics:** `(symbol "fee_set")`
+- **Data:** `FeeEvent { version: u32, admin: Address, fee_bps: u32 }`
+- **Example (decoded data):** `{ "version": 1, "admin": "GADM…ADMN", "fee_bps": 100 }`
+
+Published whenever `set_fee_bps` stores a new fee, including `0` and the
+current value. A fee above `MAX_FEE_BPS` (500) fails with `FeeTooHigh` and
+publishes nothing. The fee applies to tips settled after this event; each
+`tip` event reports the fee it actually moved in its `fee` field.
 
 ### Upgrade, then migrate (#325)
 
@@ -1417,6 +1492,151 @@ sees only the tip's own envelope.
 > a consumer that ignores trailing elements is unaffected; a consumer that
 > validates the element count rejects them all, which is why this shape change
 > also bumps [`version()`](#detecting-the-interface-version).
+
+### What each pause blocks
+
+Two switches refuse tips: the contract-wide `pause()` (admin) and the per-jar
+`set_jar_paused(jar_id, true)` (jar owner). Either one is enough. This table
+lists every state-changing entry point and whether each switch blocks it, as
+the code behaves today. "Yes" means the call fails with the error shown and
+moves nothing.
+
+| Entry point | Blocked by contract pause | Blocked by jar pause |
+|-------------|---------------------------|----------------------|
+| `tip`, `tip_with_ref` | Yes, `ContractPaused` | Yes, `JarPaused` |
+| `tip_in_token` | Yes, `ContractPaused` | Yes, `JarPaused` |
+| `tip_many` | Yes, `ContractPaused`, before any entry | Yes, `JarPaused` for a paused jar in the batch; the whole batch reverts |
+| `collect_recurring` | No, see [#220](https://github.com/Novatip/novatip-contracts/issues/220) | No, see [#220](https://github.com/Novatip/novatip-contracts/issues/220) |
+| `create_recurring`, `update_recurring`, `cancel_recurring` | No | No |
+| `withdraw_held`, `withdraw_held_to` | No | No |
+| `create_jar`, `rename_jar`, `delete_jar` | No | No |
+| `update_splits`, `change_recipient`, `leave_jar` | No | No |
+| `lock_splits`, `unlock_splits` | No | No |
+| `set_jar_paused` | No | No (it is the switch) |
+| `set_min_tip_amount`, `set_max_tip_amount`, `set_jar_tokens_default_only` | No | No |
+| `transfer_jar_ownership`, `admin_recover_jar` | No | No |
+| `pause`, `resume` | No (it is the switch) | No |
+| `allow_token`, `disallow_token`, `set_fee_bps`, `set_fee_recipient`, `set_tip_hook`, `set_registrar` | No | No |
+| `transfer_admin`, `upgrade`, `migrate` | No | No |
+
+Reads and previews (`preview_split`, `preview_split_details`, `preview_tip`,
+`get_held`, `get_jar` and the other getters) are never blocked, so a tip page
+can still show a paused jar and explain why it is closed. Some reads extend
+storage TTLs, but none moves funds.
+
+Neither switch holds back recipients or owners: a recipient can still withdraw
+a held share, and an owner can still edit, rename, transfer or delete a jar
+while either pause is on. `collect_recurring` should honour both switches like
+the tip entry points; until #220 is fixed, a keeper can still collect a due
+period while the contract or the jar is paused.
+
+## When a share is held (#171)
+
+A tip pays each recipient in its own token transfer. If one recipient cannot
+receive the token, the tip does not fail. The contract keeps that recipient's
+share for them instead, and they withdraw it later. This section follows one
+held share from the tip to the withdrawal.
+
+### Cause
+
+The contract tries each recipient's transfer. When the token refuses it, the
+contract moves the share to its own address and credits it to the recipient.
+The usual reasons are:
+
+- the recipient's account has no trustline for the token (for classic USDC,
+  every `G…` account needs one), or the trustline was removed;
+- the token issuer has not authorised the account, or has revoked it.
+
+The tipper pays the full amount either way, and the other recipients are paid
+as normal. In the `tip` event, the recipient's `breakdown` entry has
+`held: true`, and `moved` is the amount the contract took into custody. This
+`held: true` is what a dashboard shows.
+
+### Where the money is
+
+The tokens are in the contract's own token balance. The amount owed is
+recorded in persistent storage under `Held(recipient)`. There is one balance per
+recipient address, and it adds up every held share from every jar and every
+tip. Nobody else can withdraw it. The admin has no sweep, and the jar owner
+cannot redirect it.
+
+### Worked example
+
+Jar `@band` has two recipients: Alice at 7000 bps and Bob at 3000 bps. The
+protocol fee is 0. Bob has no USDC trustline. A supporter tips 10 USDC
+(`100000000` in the token's 7-decimal units):
+
+- Alice receives `70000000` directly.
+- Bob's `30000000` goes to the contract and is credited to `Held(Bob)`.
+- The `tip` event's breakdown is
+  `[[Alice, 70000000, false], [Bob, 30000000, true]]`.
+- `get_held(Bob)` now returns `30000000`.
+
+Bob adds the trustline and calls `withdraw_held(Bob)`. He receives
+`30000000`, the contract publishes `withdraw` with topics `["withdraw", Bob]`
+and data `{ "version": 1, "amount": 30000000 }`, and `get_held(Bob)` returns
+`0` again.
+
+### Check
+
+`get_held(recipient)` returns the amount owed in the token's smallest units,
+or `0`. Anyone can call it, and no signature is needed:
+
+```bash
+stellar contract invoke --id "$CONTRACT_ID" --network testnet --source "$SOURCE" \
+  -- get_held --recipient G...RECIPIENT
+```
+
+To find out which tips caused the balance, filter the `tip` events for
+breakdown entries with `held: true` for that address
+(`EVENT=tip SLUG=@band ./scripts/events.sh`).
+
+### Fix
+
+Make the account able to receive the token before withdrawing. Otherwise the
+withdrawal fails the same way the original transfer did.
+
+- **Missing trustline:** `IDENTITIES=G...RECIPIENT ./scripts/trustline.sh`
+  adds it, and `./scripts/trustline.sh --check` reports it. See
+  [USDC trustlines](#usdc-trustlines).
+- **Not authorised by the issuer:** ask the issuer to authorise the account.
+  The contract cannot do this.
+
+### Withdraw
+
+The recipient signs `withdraw_held(recipient)`, which pays the whole balance in
+one transfer and publishes a `withdraw` event:
+
+```bash
+stellar contract invoke --id "$CONTRACT_ID" --network testnet --source recipient \
+  -- withdraw_held --recipient G...RECIPIENT
+```
+
+`scripts/withdraw-held.sh` does the same in one step. It reads `get_held`,
+checks the trustline, withdraws, and reads the balance back. It fails with
+`NothingHeld` (18) when nothing is owed. If the recipient's own account can
+never receive the token (a lost key, or an account the issuer will not
+authorise), the recipient can sign `withdraw_held_to(recipient, to)` to send
+the balance to another address. That publishes `wd_to` instead.
+
+### If it is never withdrawn
+
+The balance does not expire, and nobody else can claim it. The funds stay in
+the contract until the recipient withdraws. The storage entry has a TTL,
+though. Each new held share and each `get_held` call with a positive balance
+extends it, but if it lapses, the entry is archived. Restore it before
+withdrawing; see [Storage model and idle jars](#storage-model-and-idle-jars-56).
+The event log alone cannot recreate a spendable balance.
+
+### Limitation: one token
+
+`Held(recipient)` is a single number with no token attached, and
+`withdraw_held` always pays the contract's default token (`get_token()`). A
+share held from `tip_in_token` in another token is added to the same number
+and would be paid out in the default token. Until per-token escrow lands in
+[#219](https://github.com/Novatip/novatip-contracts/issues/219), only held
+shares from default-token tips are reliably withdrawable as the asset that
+was tipped.
 
 ## Reading tip totals
 
@@ -1769,28 +1989,22 @@ changes. Do not bump it for an internal refactor, a new storage key, or a doc
 edit — none of those are visible to a consumer, and a version that changes when
 nothing observable did is a version consumers stop trusting.
 
-This build ships `version() == 9`. Version 9 adds admin-only `admin_recover_jar` and the distinct `jar_recov` event. Version 8 adds `update_recurring`, `get_jar_info` and the `recr_upd` event, gives `recr_add` a `RecurringAddedEvent` payload with the jar in its topics, and adds `min_jar_id_len` and `max_fee_bps` to `get_limits`. Version 7 gives every admin event one shape
-(name-only topic, versioned data struct with `version` and `admin`), turns
-`lock`, `jar_pause`, `withdraw`, `adm_xfer` and `jar_rnm` into named, versioned
-structs, adds the jar id to the `jar_del` and `jar_rnm` topics, and adds
-`previous_hash` to the `upgrade` event. Version 6 changes the `leave_jar`
-`splits` event from a bare count to the same `SplitsUpdatedEvent` that
-`update_splits` publishes. Version 5 adds `set_jar_paused` / `is_jar_paused`,
-`delete_jar` and the `JarPaused` error (39). Version 4 adds `tip_many` (#84).
-Version 3 adds `set_fee_bps` /
-`get_fee_bps`, the `fee_set` event, the `FeeTooHigh` error (35), and the `fee`
-field in the `tip` event (#79); it also changes what a tipper who is a
-recipient pays (#78), which `preview_tip` already reports.
+This build ships `version() == 10`. Every bump since `version()` was added:
 
-Version 2 Version 1 covered the escrow/`held`
-breakdown, the token allowlist, the totals views, and the sequence-numbered
-`tip` event. This PR adds four functions and one view beyond that point —
-`collect_recurring`, `preview_tip`, `set_tip_hook`/`get_tip_hook`,
-`set_registrar`/`get_registrar` — plus the `tip_hook` and `reg_set` events,
-the single canonical seven-element `tip` event data, and the repair of the
-14/15/16 error-code collision by renumbering the affected codes to 19–22.
-Every one of those is a function, event-shape, or error-code change, so the
-constant moves up under the rule above.
+| Version | What it added or changed | Issues |
+|---------|--------------------------|--------|
+| 1 | First numbered interface. Covers the escrow (`held`) breakdown in the `tip` event and `get_held` / `withdraw_held`, the token allowlist (`allow_token`, `disallow_token`, `is_token_allowed`, `tip_in_token`), the totals views (`get_jar_stats`, `get_supporter_stats`), the sequence-numbered `tip` event with `get_tip_count`, and `version()` itself. | #167, #168, #169, #170, #171 |
+| 2 | Adds `collect_recurring`, `preview_tip`, `set_tip_hook` / `get_tip_hook`, `set_registrar` / `get_registrar`, and the `tip_hook` and `reg_set` events. Makes the `tip` event data one canonical struct for every settle path. Renumbers the colliding error codes 14/15/16 to 19–22. | #175, #176, #177, #178 |
+| 3 | Adds the protocol fee: `set_fee_bps` / `get_fee_bps`, the `fee_set` event, the `FeeTooHigh` error (35) and the `fee` field in the `tip` event. A tipper who is also a recipient now keeps their own share, which `preview_tip` reports. | #78, #79 |
+| 4 | Adds `tip_many`, the `TipRequest` type and the `BatchEmpty` (37) / `BatchTooLarge` (38) errors. No existing function, error or event changed. | #84 |
+| 5 | Adds `set_jar_paused` / `is_jar_paused`, `delete_jar` and the `JarPaused` error (39). | #45 |
+| 6 | The `splits` event from `leave_jar` uses the same `SplitsUpdatedEvent` as `update_splits` instead of a bare count. | follow-up to #172 |
+| 7 | Every admin event gets one shape: a name-only topic and a versioned data struct starting with `version` and `admin`. `lock`, `jar_pause`, `withdraw`, `adm_xfer` and `jar_rnm` publish named, versioned structs. The jar id is added to the `jar_del` and `jar_rnm` topics. The `upgrade` event gains `previous_hash`. | #330, #331, #332, #333, #334 |
+| 8 | Adds `update_recurring` and the `recr_upd` event, `get_jar_info`, `get_allowed_tokens` with the `TooManyAllowedTokens` error (40), `set_max_tip_amount` / `get_max_tip_amount` with the `max_tip` event and errors 41 and 42, and `migrate` with the `migrate` event. `recr_add` publishes `RecurringAddedEvent` with the jar in its topics. `cancel_recurring` takes the caller, which may be the jar owner, and `recr_del` reports who cancelled. `tip_many` takes a batch `token` and `TipRequest` gains `reference`. `get_limits` reports `min_jar_id_len` and `max_fee_bps`. | #316, #317, #318, #319, #320, #321, #322, #323, #324, #325 |
+| 9 | Adds admin-only `admin_recover_jar` and the `jar_recov` event. | #52 |
+| 10 | Adds `change_recipient` (publishes `splits`), `withdraw_held_to` with the `wd_to` event, and `set_fee_recipient` / `get_fee_recipient` with the `fee_rcpt` event. No new error codes. | #310, #311, #312 |
+
+`CHANGELOG.md` has the full entry for each change.
 
 **How a client should use it.** Treat an unrecognised number as "newer than I
 was built for", not as an error. Every field a lower version documented still
@@ -1914,9 +2128,12 @@ EVENT=tip SLUG=@demo ./scripts/events.sh   # tips to one jar
 EVENT=all ./scripts/events.sh              # every event type, recent window
 ```
 
-It lists each of the five event types (`jar_crtd`, `splits`, `jar_xfer`,
-`min_tip`, `tip`), one line per event with ledger, name, jar id and decoded
-payload, defaulting to a recent ledger window; a `START_LEDGER` outside the
+It lists the jar events `jar_crtd`, `splits`, `jar_xfer`, `jar_rnm`, `min_tip`
+and `tip`, and the admin events `tk_allow`, `tk_dis`, `tip_hook`, `reg_set`,
+`fee_set`, `pause`, `resume`, `adm_xfer` and `upgrade`, one line per event with
+ledger, name, jar id and decoded payload, defaulting to a recent ledger window.
+The [Events](#events) chapter has a section per event with its topics and data
+fields, which is how to read the decoded payload. A `START_LEDGER` outside the
 RPC's retention window gets an explanatory error. Sample output is in the
 script's usage comment.
 

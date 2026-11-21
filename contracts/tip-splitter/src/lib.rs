@@ -1140,6 +1140,10 @@ impl TipSplitter {
         );
     }
 
+    /// Stop tipping contract-wide (admin only): `tip`, `tip_with_ref`,
+    /// `tip_in_token` and `tip_many` reject with `ContractPaused` until
+    /// `resume`. Other calls, including `withdraw_held` and owner edits, keep
+    /// working; `collect_recurring` is not gated yet (#220).
     pub fn pause(env: Env) {
         let admin = Self::require_admin(&env);
         env.storage().instance().set(&DataKey::Paused, &true);
@@ -2911,7 +2915,8 @@ pub mod examples {
     //! assert_eq!(client.get_admin(), bob);
     //! ```
     //!
-    //! `pause()` and `resume()` (admin) stop and restart all tipping;
+    //! `pause()` and `resume()` (admin) stop and restart `tip`, `tip_with_ref`,
+    //! `tip_in_token` and `tip_many`;
     //! `is_paused()` reports the flag.
     //!
     //! ```ignore
