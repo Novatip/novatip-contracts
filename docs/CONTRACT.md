@@ -350,7 +350,7 @@ existing function, error code or event changed shape.
 must count UTF-8 bytes against this number, not `message.length`.
 
 A test asserts the returned values equal the constants (`get_limits_matches_
-contract_constants` in `test.rs`), so the view and the enforcement cannot drift
+contract_constants` in `src/test/views.rs`), so the view and the enforcement cannot drift
 apart. The current values are also asserted literally, which means changing a
 bound fails the suite until the constants are updated with it. The document
 you are reading is checked too: `scripts/check-docs.sh` (`make check-docs`,
