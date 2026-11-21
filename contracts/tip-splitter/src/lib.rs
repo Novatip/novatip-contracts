@@ -150,7 +150,7 @@ const INSTANCE_TTL_THRESHOLD: u32 = JAR_TTL_THRESHOLD;
 ///
 /// This is a per-contract number for client feature detection. It complements
 /// the per-event schema version proposed in #83 rather than replacing it.
-const INTERFACE_VERSION: u32 = 8;
+const INTERFACE_VERSION: u32 = 9;
 
 /// Storage schema this build expects. Bump it together with a new step in
 /// `migrate` whenever stored state needs transforming after an upgrade (#325).
@@ -254,12 +254,12 @@ pub struct Recurring {
     pub next_due_ledger: u32,
 }
 
+/// Contract storage keys. See the [storage-key reference](../../../docs/CONTRACT.md#storage-keys-and-lifetimes)
+/// for each key's storage class, access paths, TTL renewal and archive behavior.
 #[contracttype(export = false)]
 pub enum DataKey {
-    /// Contract admin: the address that gates the nine configuration entry
-    /// points listed under "Admin-only functions" in `docs/CONTRACT.md`.
-    /// Written by the constructor and by `transfer_admin`; grants nothing
-    /// beyond that list.
+    /// Contract admin: gates the functions listed under "Admin-only functions"
+    /// in `docs/CONTRACT.md`. Written by the constructor and `transfer_admin`.
     Admin,
     /// Address of the USDC Stellar Asset Contract used for all tips.
     Token,
@@ -397,6 +397,15 @@ pub struct SplitsUpdatedEvent {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct JarTransferredEvent {
     pub version: u32,
+    pub previous_owner: Address,
+    pub new_owner: Address,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct JarAdminRecoveredEvent {
+    pub version: u32,
+    pub admin: Address,
     pub previous_owner: Address,
     pub new_owner: Address,
 }
@@ -974,6 +983,39 @@ impl TipSplitter {
             JarTransferredEvent {
                 version: 1,
                 previous_owner: prev_owner,
+                new_owner,
+            },
+        );
+    }
+
+    /// Reassign a jar after its owner key is lost. This deliberately trusts
+    /// the contract admin; neither the old nor new owner needs to authorize.
+    pub fn admin_recover_jar(env: Env, jar_id: String, new_owner: Address) {
+        let admin = Self::require_admin(&env);
+        let jar = Self::load_jar(&env, &jar_id);
+        let contract_addr = env.current_contract_address();
+        let token_addr: Address = Self::get_token(env.clone());
+        if new_owner == contract_addr || new_owner == token_addr || new_owner == jar.owner {
+            panic_with_error!(&env, Error::InvalidRecipient);
+        }
+
+        let previous_owner = jar.owner;
+        Self::store_jar(
+            &env,
+            &jar_id,
+            &Jar {
+                owner: new_owner.clone(),
+                splits: jar.splits,
+                locked: jar.locked,
+                paused: jar.paused,
+            },
+        );
+        env.events().publish(
+            (symbol_short!("jar_recov"), jar_id),
+            JarAdminRecoveredEvent {
+                version: 1,
+                admin,
+                previous_owner,
                 new_owner,
             },
         );

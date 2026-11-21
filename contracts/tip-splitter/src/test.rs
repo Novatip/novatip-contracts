@@ -3154,6 +3154,93 @@ fn transfer_jar_ownership_emits_jar_xfer_event_with_both_owners() {
     assert_eq!(client.get_jar(&jar_id).owner, new_owner);
 }
 
+#[test]
+fn admin_recover_jar_reassigns_owner_and_emits_a_distinct_event() {
+    let s = setup();
+    let env = &s.env;
+    let client = TipSplitterClient::new(env, &s.contract);
+    let owner = Address::generate(env);
+    let new_owner = Address::generate(env);
+    let recipient = Address::generate(env);
+    let jar_id = String::from_str(env, "@recover");
+    let splits = vec![
+        env,
+        Split {
+            to: recipient.clone(),
+            bps: 10_000,
+        },
+    ];
+    client.create_jar(&owner, &jar_id, &splits);
+
+    env.mock_auths(&[MockAuth {
+        address: &s.admin,
+        invoke: &MockAuthInvoke {
+            contract: &s.contract,
+            fn_name: "admin_recover_jar",
+            args: (jar_id.clone(), new_owner.clone()).into_val(env),
+            sub_invokes: &[],
+        },
+    }]);
+    client.admin_recover_jar(&jar_id, &new_owner);
+
+    let jar = client.get_jar(&jar_id);
+    assert_eq!(jar.owner, new_owner);
+    assert_eq!(jar.splits, splits);
+    let expected_topics = vec![
+        env,
+        symbol_short!("jar_recov").into_val(env),
+        jar_id.into_val(env),
+    ];
+    let events: std::vec::Vec<_> = env
+        .events()
+        .all()
+        .iter()
+        .filter(|event| event.0 == s.contract && event.1 == expected_topics)
+        .collect();
+    assert_eq!(events.len(), 1);
+    let (_, _, data) = events.first().unwrap();
+    let event: JarAdminRecoveredEvent =
+        TryFromVal::try_from_val(env, data).expect("admin recovery event data shape");
+    assert_eq!(event.admin, s.admin);
+    assert_eq!(event.previous_owner, owner);
+    assert_eq!(event.new_owner, new_owner);
+}
+
+#[test]
+fn admin_recover_jar_rejects_non_admin_without_changing_owner() {
+    let s = setup();
+    let env = &s.env;
+    let client = TipSplitterClient::new(env, &s.contract);
+    let owner = Address::generate(env);
+    let attacker = Address::generate(env);
+    let recipient = Address::generate(env);
+    let jar_id = String::from_str(env, "@recovery");
+    client.create_jar(
+        &owner,
+        &jar_id,
+        &vec![
+            env,
+            Split {
+                to: recipient,
+                bps: 10_000,
+            },
+        ],
+    );
+
+    env.mock_auths(&[MockAuth {
+        address: &attacker,
+        invoke: &MockAuthInvoke {
+            contract: &s.contract,
+            fn_name: "admin_recover_jar",
+            args: (jar_id.clone(), attacker.clone()).into_val(env),
+            sub_invokes: &[],
+        },
+    }]);
+    let result = client.try_admin_recover_jar(&jar_id, &attacker);
+    assert!(result.is_err());
+    assert_eq!(client.get_jar(&jar_id).owner, owner);
+}
+
 /// A second hand-off reports the first recipient as the outgoing owner, so a
 /// consumer can chain the events into a complete ownership history rather than
 /// seeing two disconnected arrivals.
