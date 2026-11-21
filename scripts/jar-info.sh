@@ -60,8 +60,18 @@ else
   echo "  minimum tip: ${MIN_TIP} stroops"
 fi
 
-echo "  recipients:"
+echo "  recipients ($(jq -r '.splits | length' <<<"${JAR}}"):"
 jq -r '.splits[] | "    - \(.to)  (\(.bps / 100)%)"' <<<"${JAR}"
+echo "  total percentage: $(jq -r '[.splits[].bps] | add / 100' <<<"${JAR}")%"
+
+if ! JAR_STATE=$(invoke get_jar_state --jar_id "${SLUG}" 2>&1); then
+  echo "error: reading the jar state failed:" >&2
+  echo "${JAR_STATE}" >&2
+  exit 1
+fi
+LOCKED=$(jq -r '.locked' <<<"${JAR_STATE}")
+PAUSED=$(jq -r '.paused' <<<"${JAR_STATE}")
+echo "  state: locked=$([ "${LOCKED}" = "true" ] && echo "yes" || echo "no"), paused=$([ "${PAUSED}" = "true" ] && echo "yes" || echo "no")"
 
 if [ -n "${AMOUNT:-}" ]; then
   if ! PREVIEW=$(invoke preview_split --jar_id "${SLUG}" --amount "${AMOUNT}" 2>&1); then
