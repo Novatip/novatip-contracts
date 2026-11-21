@@ -170,6 +170,21 @@ one belongs to a jar, the other to a `(jar, supporter)` pair.
 | `get_allowed_tokens() -> Vec<Address>` | — | Every allowed token, default first (#321). The list holds at most 10 tokens (`MAX_ALLOWED_TOKENS`); `allow_token` beyond that is rejected with `TooManyAllowedTokens`. |
 The **Errors** column lists the `tip_splitter` error codes a call can return,
 **in the order the contract checks them** — only the first failure a call hits
+
+### Admin powers and blast radius
+
+Every privileged entry point requires the contract `admin` signature (`transfer_admin` hands that role to a new address):
+
+| Admin function | What it can affect | What it can never do |
+| -------------- | ------------------ | -------------------- |
+| `pause()` / `resume()` | Halts or resumes `tip`, `tip_with_ref`, `tip_in_token`, and `collect_recurring` | Cannot move funds out of any jar or alter existing splits |
+| `set_fee_bps(fee_bps)` | Sets the protocol fee taken off the top of tips (capped at 5% / `500` bps) | Cannot exceed `500` bps or take funds retroactively |
+| `allow_token(token)` / `disallow_token(token)` | Controls which tokens (besides the default USDC token) can be tipped | Cannot disallow the default token or seize held balances |
+| `set_tip_hook(hook)` | Registers or clears a post-tip hook contract called after tip transfers | Cannot intercept or revert funds already sent to recipients before the hook runs (hook failure reverts the whole tx) |
+| `set_registrar(registrar)` | Registers or clears a co-signer required for new jar creation | Cannot modify, pause, or delete already-registered jars |
+| `transfer_admin(new_admin)` | Transfers the `admin` role to `new_admin` | Cannot bypass any per-function bounds by itself |
+| `migrate()` | Runs once per schema version after an upgrade to migrate stored state | Cannot run arbitrarily without a preceding `upgrade` |
+| `upgrade(new_wasm_hash)` | **Replaces the contract Wasm code** while keeping the address and all stored state | **Overrides every other guarantee above** — new code is not bound by the old contract's caps or invariants |
 is reported, so the order tells a client what it will actually see. An error is
 written as raised only when every earlier check has passed.
 
@@ -1452,6 +1467,28 @@ collection: a minimum raised later must not silently strand schedules already
 registered under the old floor. A supporter who wants the new floor honoured
 cancels and re-registers.
 
+### Running a keeper
+
+Anyone can call `collect_recurring(id)` once a schedule is due; the caller (keeper) pays the Stellar transaction fee, and no supporter signature is required.
+
+- **Discovering due schedules:** Index `recr_add` and `recr_del` contract events to maintain the active set of schedule IDs, and query `get_recurring(id)` to read each schedule's `next_due_ledger` and `period_ledgers`.
+- **Polling cadence:** Poll at an interval shorter than `period_ledgers` (for example every few minutes on 5-second ledgers) and invoke `collect_recurring(id)` once `latest_ledger >= next_due_ledger`.
+
+| Error | Meaning | Keeper action |
+| ----- | ------- | ------------- |
+| `NotDue` | `latest_ledger < next_due_ledger` | **Retryable** — wait until `next_due_ledger` |
+| `InsufficientBalance` / `InsufficientAllowance` | Supporter balance or token allowance is currently below `amount` | **Retryable** — back off and retry later |
+| `RecurringNotFound` | Schedule was cancelled or never existed | **Dead schedule** — remove `id` from active index |
+| `JarNotFound` | Target jar no longer exists | **Dead schedule** — remove `id` from active index |
+
+```bash
+# Inspect a recurring schedule
+stellar contract invoke --id <CONTRACT_ID> --network testnet -- get_recurring --id 1
+
+# Collect one due period (keeper signs and pays the transaction fee)
+stellar contract invoke --id <CONTRACT_ID> --source <KEEPER_ACCOUNT> --network testnet -- collect_recurring --id 1
+```
+
 ## The post-tip hook (#176)
 
 The admin can register one optional contract — the `supporter_badge` in the
@@ -1910,4 +1947,321 @@ HostError: Error(Contract, #9)   # InvalidJarId
 **Cause:** A tip or view was called with a slug that lacks the required leading `@` (producing `InvalidJarId`), uses invalid characters/length, or points to an unregistered jar slug (`JarNotFound`).
 
 **Fix:** Ensure the slug matches `@` followed by 3–32 lowercase alphanumeric characters, dashes, or underscores (`@<slug>`), and verify registration using `get_jar(jar_id)` or `./scripts/jar-info.sh`.
+
+
+## Transaction cost and recipient count (#55)
+
+A `tip` makes one token transfer per recipient. The cost of a tip therefore
+grows with the number of recipients in the jar. A solo jar makes one transfer.
+A jar with twenty recipients makes up to twenty.
+
+What adds to the cost of one tip:
+
+- One `transfer` for each recipient with a non-zero share. A tipper who is also
+  a recipient is skipped (see [when the tipper is also a recipient](#when-the-tipper-is-also-a-recipient-85)).
+- One more `transfer` for the protocol fee, when a fee is set and the tipper is
+  not the admin.
+- For each recipient who cannot receive the token, one transfer into the
+  contract and one persistent write under `Held(recipient)` (#171).
+- A `tip` event with one `breakdown` entry per split, so the event grows with
+  the recipient count.
+
+What does not grow: the jar totals and the supporter totals are two writes
+whatever the recipient count (see [reading tip totals](#reading-tip-totals)).
+
+The tipper's wallet shows one transfer approval per recipient, so a twenty-way
+split asks for twenty approvals in one transaction.
+
+**Why the cap is twenty.** `MAX_RECIPIENTS` is a compile-time bound on the
+fan-out of one tip. Without it a single tip could issue an unbounded number of
+transfers. `tip_many` multiplies the bound by `MAX_BATCH_TIPS` (10), so the
+worst case for one batch is 200 transfers (see
+[tipping many jars at once](#tipping-many-jars-at-once-84)).
+
+### Figures
+
+The rows below are not yet measured. Do not quote numbers from this section
+until they are filled in.
+
+| Measure | Small split (2 recipients) | Large split (20 recipients) |
+|---------|----------------------------|-----------------------------|
+| Token transfers per tip (from the code, not measured) | 2 | 20 |
+| CPU instructions | to be measured | to be measured |
+| Read bytes | to be measured | to be measured |
+| Write bytes | to be measured | to be measured |
+| Ledger entries read / written | to be measured | to be measured |
+| Minimum resource fee (stroops) | to be measured | to be measured |
+| `tip` event size (bytes) | to be measured | to be measured |
+
+### Method
+
+1. Deploy the build from `main` to testnet. The testnet deployment listed in
+   the README is behind `main`, so do not measure against it.
+2. Create two jars: one with two recipients at 5 000 / 5 000 bps, and one with
+   twenty recipients at 500 bps each. The last recipient takes any remainder.
+3. Give every recipient a trustline to the settlement asset, so the escrow
+   path is not measured by accident.
+4. Use a supporter who is not on either jar, so no share is skipped.
+5. Simulate `tip` for each jar with the same amount. Simulate only, so no
+   balances change. Record the cost fields the simulation returns.
+6. Repeat each simulation a few times and record the median.
+7. Record the date, the ledger, and the Stellar CLI and SDK versions used.
+
+As a cross-check, the test suite can take `env.cost_estimate()` before and
+after a tip, as the totals section does. That gives relative deltas, not
+testnet figures.
+
+## Storage model and idle jars (#56)
+
+### Where state lives
+
+The contract uses two storage types. The table below lists every key in
+`DataKey`, grouped by type.
+
+| Storage | Keys | Extended when |
+|---------|------|---------------|
+| Instance | `Admin`, `Token`, `AllowedToken(addr)`, `AllowedTokens`, `TipCount`, `TipHook`, `Registrar`, `Paused`, `FeeBps`, `WasmHash`, `SchemaVersion` | `create_jar` and every settled tip. Reads do not extend it. |
+| Persistent | `Jar(id)`, `MinTip(id)`, `Stats(id)`, `Supporter(id, addr)` | `Jar` and `MinTip` on every load or store of the jar, reads included. `Stats` and `Supporter` on every tip. |
+| Persistent | `MaxTip(id)` | Only `set_max_tip_amount` and `rename_jar`. See the known gap below. |
+| Persistent | `Held(addr)` | Each tip that escrows a share, and `get_held` while the balance is above zero. |
+| Persistent | `Recurring(id)`, `RecurringCount` | Create, update, collect and get for the schedule. Create for the counter. |
+
+Instance storage holds configuration that must not expire ahead of the
+contract. Persistent storage holds per-jar and per-address records. The
+allowlist is in instance storage for that reason: a silently archived entry
+would look like a token that stopped working.
+
+### Idle jars
+
+Persistent entries have a time to live. Each access that finds the entry below
+`JAR_TTL_THRESHOLD` (500 000 ledgers) extends it to `JAR_TTL_LEDGERS`
+(1 000 000 ledgers). At a 5-second close rate, 1 000 000 ledgers is about 58
+days. A jar that nobody reads or tips for about that long is archived.
+
+- Reads count. Any call that loads the jar, such as `get_jar`, `preview_split`
+  or `is_recipient`, keeps it alive. A jar that is only viewed does not
+  archive.
+- A call that touches an archived entry fails with a storage error from the
+  host, not with a contract error code. Tips and reads of that jar fail until
+  the entry is restored. Treat that failure as a storage problem, not as
+  `JarNotFound`.
+- To restore an entry, use a restore-footprint operation, then retry. The
+  Stellar CLI provides this as `stellar contract restore`.
+- An escrowed share has its own `Held` entry. If it archives, restore it before
+  calling `withdraw_held`. The funds stay in the contract's token balance until
+  then.
+- The instance entry is extended only by `create_jar` and by tips. If the
+  contract sees neither for about 58 days, the instance can archive, and every
+  call fails until it is restored. The instance also holds the Wasm code.
+
+**Known gap: `MaxTip`.** A jar's maximum tip is extended only by
+`set_max_tip_amount` and `rename_jar`. Tips and reads do not extend it, even
+though every tip reads it. An active jar with a maximum set can therefore
+archive. Tips to that jar would then fail until the owner restores the entry or
+clears the maximum. The fix belongs with the open issue on extending a jar's
+time to live. That issue's number is not given here and should be added.
+
+### What a client should do
+
+- If a read or tip fails with a storage error, check whether the error names an
+  archived or expired entry. If it does, restore the entry and retry.
+- Keep the two error kinds apart: a contract code such as `JarNotFound` means
+  the slug is free; a storage error means the record exists but is archived.
+- Do not treat a failed `get_jar` as proof that a jar was deleted.
+
+## Event encoding and `getEvents` filters (#57)
+
+Every event has topics and data. Topics are XDR-encoded `ScVal` values. The
+first topic is always the event name, as a `Symbol`. The data is a struct with
+named fields, and its first field is `version`.
+
+A filter matches topic segments in order. It must have one segment for each
+topic the event publishes. A filter with the wrong number of segments, or with a
+segment of the wrong type, returns no events and no error. A quiet filter looks
+the same as a quiet contract.
+
+### Topics and data by event
+
+| Event | Topics, in order | Data |
+|-------|------------------|------|
+| `tk_allow` / `tk_dis` | `(sym)` | `TokenAllowlistEvent { version, admin, token, allowed }` |
+| `jar_crtd` | `(sym, jar_id)` | `JarCreatedEvent { version, owner }` |
+| `splits` | `(sym, jar_id)` | `SplitsUpdatedEvent { version, count, splits }` |
+| `lock` | `(sym, jar_id)` | `JarLockEvent { version, locked }` (emitted by lock and unlock) |
+| `jar_pause` | `(sym, jar_id)` | `JarPausedEvent { version, paused }` |
+| `jar_xfer` | `(sym, jar_id)` | `JarTransferredEvent { version, previous_owner, new_owner }` |
+| `jar_del` | `(sym, jar_id)` | `JarDeletedEvent { version, jar_id }` |
+| `jar_rnm` | `(sym, old jar_id)` | `JarRenamedEvent { version, jar_id, new_jar_id }` |
+| `min_tip` | `(sym, jar_id)` | `MinTipEvent { version, amount }` |
+| `max_tip` | `(sym, jar_id)` | `MaxTipEvent { version, amount }` |
+| `tip` | `(sym, jar_id)` | `TipEvent { version, from, amount, fee, message, breakdown, token, seq, reference }` |
+| `withdraw` | `(sym, recipient)` | `HeldWithdrawnEvent { version, amount }` |
+| `recr_add` | `(sym, supporter, jar_id)` | `RecurringAddedEvent { version, id, jar_id, amount, period_ledgers, next_due_ledger }` |
+| `recr_upd` | `(sym, supporter)` | `RecurringUpdatedEvent { version, id, amount, message }` |
+| `recr_del` | `(sym, supporter)` | tuple `(id, cancelled_by)` |
+| `adm_xfer` | `(sym)` | `AdminTransferredEvent { version, admin, new_admin }` |
+| `pause` / `resume` | `(sym)` | `PauseEvent { version, admin, paused }` |
+| `upgrade` | `(sym)` | `UpgradedEvent { version, admin, previous_hash, new_hash }` |
+| `migrate` | `(sym)` | `MigratedEvent { version, admin, from_version, to_version }` |
+| `tip_hook` | `(sym)` | `TipHookEvent { version, admin, hook }` |
+| `reg_set` | `(sym)` | `RegistrarEvent { version, admin, registrar }` |
+| `fee_set` | `(sym)` | `FeeEvent { version, admin, fee_bps }` |
+
+Notes on the table:
+
+- `recr_add` has three topics. A creator who wants one jar's schedules filters
+  on the third segment. A filter with two segments will not match it.
+- `recr_del` is the one event whose data is a tuple, not a named struct.
+- `max_tip`, `tip_hook`, `reg_set`, `fee_set` and `recr_upd` are emitted by the
+  current build but were not in the earlier list of event names.
+
+### Building a filter for `tip`
+
+A `tip` publishes two topics: the symbol `tip`, then the jar id as a `String`.
+The filter therefore has two segments.
+
+- Segment 1, the symbol `tip`: `AAAADwAAAAN0aXAA`
+- Segment 2, the jar id:
+  - any jar: `*`
+  - `@demo`: `AAAADgAAAAVAZGVtbwAAAA==`
+
+A `getEvents` request that follows every tip, across all jars:
+
+```json
+{
+  "startLedger": "<LEDGER>",
+  "filters": [
+    {
+      "type": "contract",
+      "contractIds": ["<TIP_SPLITTER_CONTRACT_ID>"],
+      "topics": [["AAAADwAAAAN0aXAA", "*"]]
+    }
+  ]
+}
+```
+
+The `*` in the second segment matches any jar id. It matches exactly one
+segment. To follow one jar, replace `*` with that jar's encoded string.
+
+Build each segment with `stellar xdr encode --type ScVal`, as
+`scripts/events.sh` does, rather than by hand. The two strings above were
+checked against the XDR layout (`ScVal` symbol is type 15, `ScVal` string is
+type 14). The `*` wildcard and the outer and inner array shape follow the
+Soroban RPC convention. They were not run against a live RPC in this document.
+
+### Warnings
+
+- A filter with the wrong segment count returns nothing. A `tip` filter with
+  only the symbol segment matches no tips.
+- A jar id must be a `String` segment. A `Symbol` segment, or a jar id without
+  the leading `@`, matches nothing.
+- The testnet deployment listed in the README is behind `main`. Its events may
+  not have the shape above. Call [`version()`](#detecting-the-interface-version)
+  before decoding.
+
+## Security considerations (#58)
+
+### Custody
+
+- Tips do not sit in the contract. A tip moves funds from the tipper to each
+  recipient, and the fee to the admin, in one call.
+- One exception: a share that a recipient cannot receive, for example because of
+  a missing trustline, is moved into the contract and recorded under
+  `Held(recipient)`. The contract holds that balance until the recipient calls
+  `withdraw_held`. So the contract is not strictly non-custodial. See
+  [the trust implication of escrow](#splitting-rules).
+- Only the named recipient can withdraw a held balance. `get_held` reports the
+  amount.
+
+### Who can do what
+
+- **Tipper:** authorises its own tip. Nothing else is needed.
+- **Anyone:** may call `collect_recurring`. It moves at most the supporter's
+  approved amount for one due period, and it fails early with `NotDue`.
+- **Jar owner:** splits, locking, pausing, minimum and maximum tips, renaming,
+  deleting and transferring the jar. The full list is under
+  [owner-only functions](#owner-only-functions).
+- **Recipient:** `leave_jar`, `withdraw_held`, and consent when a locked jar's
+  shares are reduced.
+- **Supporter:** creates, updates and cancels a recurring tip. The jar owner can
+  also cancel it.
+- **Admin:** the ten admin-gated functions under
+  [admin-only functions](#admin-only-functions).
+
+### What the admin can and cannot do
+
+The admin is the address stored at deploy time. Ten functions check it:
+`allow_token`, `disallow_token`, `set_tip_hook`, `set_registrar`,
+`set_fee_bps`, `transfer_admin`, `pause`, `resume`, `upgrade` and `migrate`.
+
+The admin **can**:
+
+- pause tipping for every jar (`tip`, `tip_with_ref`, `tip_in_token`, `tip_many`);
+- set a protocol fee of up to 5% (500 bps), paid to the admin on each tip;
+- add or remove tokens from the allowlist;
+- point the post-tip hook at a contract, or clear it;
+- require a registrar co-signature for new jars;
+- transfer the admin role to another address, effective at once, with no
+  acceptance step;
+- replace the contract code with `upgrade`.
+
+The admin **cannot**:
+
+- move a jar's funds. No function sends a tip or a jar balance to the admin.
+  The only transfer out of escrow is `withdraw_held`, and it pays only the
+  named recipient;
+- edit a jar it does not own. Splits, locks, pauses and ownership check the
+  jar owner, and a locked jar also needs each affected recipient;
+- change the settlement token after deploy;
+- set a fee above 5%;
+- stop `collect_recurring` or `withdraw_held` by pausing.
+
+**The upgrade caveat.** `upgrade` replaces the whole contract code. A new build
+can read or move anything the contract holds, including held balances. The
+statement "the admin cannot move jar funds" describes the code as it is now,
+not every future build. The admin key is the contract's root authority for that
+reason.
+
+### Other notes
+
+- A recurring tip is pulled from the supporter's token allowance. Revoking the
+  allowance, or cancelling the schedule, stops collection. The allowance is the
+  ceiling on what any keeper can take.
+- `withdraw_held` clears the escrow balance before it transfers, so a repeat
+  call cannot withdraw the same amount twice.
+
+### Status
+
+- The contract has not been audited.
+- It is for testnet use only. The README lists mainnet as pending an audit.
+- The testnet deployment is behind `main`, so this document describes `main`,
+  not the deployed build.
+### 5. Archived persistent storage entry
+
+**Symptom:**
+
+```text
+HostError: Error(Storage, MissingValue)   # or JarNotFound / Stats read as missing after long inactivity
+```
+
+When a persistent ledger entry's TTL expires without being bumped, Soroban archives it and subsequent reads treat the entry as absent until restored.
+
+**Storage keys a jar can have:**
+
+- `Jar(jar_id)` — jar owner and split configuration
+- `MinTip(jar_id)` — optional per-jar minimum tip floor
+- `Stats(jar_id)` — cumulative tip count and volume for the jar
+- `Supporter(jar_id, supporter)` — per-supporter tip count and volume against the jar
+- `Recurring(id)` — recurring tip schedule associated with a jar
+- `Held(jar_id, recipient, token)` — escrowed payout held for a recipient who could not receive at tip time
+
+**Fix:** Restore the archived persistent entry with the Stellar CLI before re-invoking the contract:
+
+```bash
+stellar contract restore \
+  --id <CONTRACT_ID> \
+  --source <ACCOUNT> \
+  --network testnet \
+  --key '{"vec":[{"symbol":"Jar"},{"symbol":"alice"}]}'
+```
 
