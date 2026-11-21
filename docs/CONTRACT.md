@@ -624,6 +624,35 @@ the code, so flipping that profile setting cannot turn it into a bypass.
   `breakdown`, so no consumer has to reproduce this arithmetic after the fact
   either.
 
+**Worked example: an amount that does not divide evenly.** A jar splits a tip
+three ways, in this order, with no protocol fee set (with one, the same
+arithmetic runs on the amount left after the fee):
+
+```
+splits:  alice 3_333,  bob 3_333,  carol 3_334      (bps; sums to 10_000)
+tip:     1_001
+```
+
+| Recipient | Rule | Calculation | Share |
+|-----------|------|-------------|------:|
+| alice | `amount * bps / 10_000` | `1_001 * 3_333 / 10_000 = 3_336_333 / 10_000 = 333.63…`, truncated | 333 |
+| bob | `amount * bps / 10_000` | same as alice | 333 |
+| carol (last) | `amount - (sum of prior shares)` | `1_001 - (333 + 333) = 1_001 - 666` | 335 |
+
+The shares always sum to the full amount: `333 + 333 + 335 = 1_001`. Nothing is
+lost to rounding and nothing is created. Carol's nominal 33.34% of `1_001` is
+`333.73…`, yet she receives `335`: the last entry takes the whole remainder, so
+it can end up slightly above its percentage (by less than one unit for each
+earlier recipient, so at most `n - 1` units for `n` recipients). That is the
+rule working as designed, not a bug.
+
+**Order matters.** The same three entries listed as `carol 3_334, alice 3_333,
+bob 3_333` give carol `1_001 * 3_334 / 10_000 = 333`, alice `333`, and bob, now
+last, `1_001 - 666 = 335`. The total is unchanged, but the extra unit has moved
+from carol to bob. `create_jar` and `update_splits` keep the vector in the
+order given, so put the recipient who should absorb rounding dust last.
+`preview_split` returns `[333, 333, 335]` for the first order, in split order.
+
 > **Trust implication (escrow).** Holding an undeliverable share means the
 > contract temporarily custodies tokens it did not before — the previous
 > all-or-nothing design let the contract hold no balance. The contract account

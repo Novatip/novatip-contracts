@@ -4,6 +4,11 @@ All notable changes to `novatip-contracts` are documented here.
 
 ## [Unreleased]
 
+### Documentation
+
+- Added a `cargo doc` examples module with a representative call for every public contract function, including building the split vector for `create_jar` (#59).
+- Documented the split rounding rule with a worked example: the last recipient absorbs the remainder, so entry order matters (#60).
+
 ### Added
 - `tip_many(from, tips, token)` takes an optional `token` for the whole batch, checked against the allowlist like `tip_in_token`; the jar minimum applies only to the default token (#322). `TipRequest` gains `reference: Option<BytesN<32>>`, echoed in each entry's `tip` event (#318)
 - `get_allowed_tokens() -> Vec<Address>` lists the allowlist, default first, capped at `MAX_ALLOWED_TOKENS` (10) with the appended error `TooManyAllowedTokens` (40) (#321)
