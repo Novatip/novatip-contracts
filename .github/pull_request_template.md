@@ -12,6 +12,7 @@
 - [ ] `cargo clippy --all-targets -- -D warnings` passes
 - [ ] `cargo test` passes from a clean checkout (before any wasm build)
 - [ ] The CI wasm size check still measures `tip_splitter.wasm` (not an example or test artifact)
+- [ ] Reviewed [required CI checks & PR safety check](../CONTRIBUTING.md#required-ci-checks--pr-safety-check) if touching `.github/`, `scripts/`, or `build.rs`
 
 ## Interface changes
 

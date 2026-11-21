@@ -153,6 +153,21 @@ one belongs to a jar, the other to a `(jar, supporter)` pair.
 | `get_allowed_tokens() -> Vec<Address>` | — | Every allowed token, default first (#321). The list holds at most 10 tokens (`MAX_ALLOWED_TOKENS`); `allow_token` beyond that is rejected with `TooManyAllowedTokens`. |
 The **Errors** column lists the `tip_splitter` error codes a call can return,
 **in the order the contract checks them** — only the first failure a call hits
+
+### Admin powers and blast radius
+
+Every privileged entry point requires the contract `admin` signature (`transfer_admin` hands that role to a new address):
+
+| Admin function | What it can affect | What it can never do |
+| -------------- | ------------------ | -------------------- |
+| `pause()` / `resume()` | Halts or resumes `tip`, `tip_with_ref`, `tip_in_token`, and `collect_recurring` | Cannot move funds out of any jar or alter existing splits |
+| `set_fee_bps(fee_bps)` | Sets the protocol fee taken off the top of tips (capped at 5% / `500` bps) | Cannot exceed `500` bps or take funds retroactively |
+| `allow_token(token)` / `disallow_token(token)` | Controls which tokens (besides the default USDC token) can be tipped | Cannot disallow the default token or seize held balances |
+| `set_tip_hook(hook)` | Registers or clears a post-tip hook contract called after tip transfers | Cannot intercept or revert funds already sent to recipients before the hook runs (hook failure reverts the whole tx) |
+| `set_registrar(registrar)` | Registers or clears a co-signer required for new jar creation | Cannot modify, pause, or delete already-registered jars |
+| `transfer_admin(new_admin)` | Transfers the `admin` role to `new_admin` | Cannot bypass any per-function bounds by itself |
+| `migrate()` | Runs once per schema version after an upgrade to migrate stored state | Cannot run arbitrarily without a preceding `upgrade` |
+| `upgrade(new_wasm_hash)` | **Replaces the contract Wasm code** while keeping the address and all stored state | **Overrides every other guarantee above** — new code is not bound by the old contract's caps or invariants |
 is reported, so the order tells a client what it will actually see. An error is
 written as raised only when every earlier check has passed.
 
@@ -1435,6 +1450,28 @@ collection: a minimum raised later must not silently strand schedules already
 registered under the old floor. A supporter who wants the new floor honoured
 cancels and re-registers.
 
+### Running a keeper
+
+Anyone can call `collect_recurring(id)` once a schedule is due; the caller (keeper) pays the Stellar transaction fee, and no supporter signature is required.
+
+- **Discovering due schedules:** Index `recr_add` and `recr_del` contract events to maintain the active set of schedule IDs, and query `get_recurring(id)` to read each schedule's `next_due_ledger` and `period_ledgers`.
+- **Polling cadence:** Poll at an interval shorter than `period_ledgers` (for example every few minutes on 5-second ledgers) and invoke `collect_recurring(id)` once `latest_ledger >= next_due_ledger`.
+
+| Error | Meaning | Keeper action |
+| ----- | ------- | ------------- |
+| `NotDue` | `latest_ledger < next_due_ledger` | **Retryable** — wait until `next_due_ledger` |
+| `InsufficientBalance` / `InsufficientAllowance` | Supporter balance or token allowance is currently below `amount` | **Retryable** — back off and retry later |
+| `RecurringNotFound` | Schedule was cancelled or never existed | **Dead schedule** — remove `id` from active index |
+| `JarNotFound` | Target jar no longer exists | **Dead schedule** — remove `id` from active index |
+
+```bash
+# Inspect a recurring schedule
+stellar contract invoke --id <CONTRACT_ID> --network testnet -- get_recurring --id 1
+
+# Collect one due period (keeper signs and pays the transaction fee)
+stellar contract invoke --id <CONTRACT_ID> --source <KEEPER_ACCOUNT> --network testnet -- collect_recurring --id 1
+```
+
 ## The post-tip hook (#176)
 
 The admin can register one optional contract — the `supporter_badge` in the
@@ -2182,3 +2219,32 @@ reason.
 - It is for testnet use only. The README lists mainnet as pending an audit.
 - The testnet deployment is behind `main`, so this document describes `main`,
   not the deployed build.
+### 5. Archived persistent storage entry
+
+**Symptom:**
+
+```text
+HostError: Error(Storage, MissingValue)   # or JarNotFound / Stats read as missing after long inactivity
+```
+
+When a persistent ledger entry's TTL expires without being bumped, Soroban archives it and subsequent reads treat the entry as absent until restored.
+
+**Storage keys a jar can have:**
+
+- `Jar(jar_id)` — jar owner and split configuration
+- `MinTip(jar_id)` — optional per-jar minimum tip floor
+- `Stats(jar_id)` — cumulative tip count and volume for the jar
+- `Supporter(jar_id, supporter)` — per-supporter tip count and volume against the jar
+- `Recurring(id)` — recurring tip schedule associated with a jar
+- `Held(jar_id, recipient, token)` — escrowed payout held for a recipient who could not receive at tip time
+
+**Fix:** Restore the archived persistent entry with the Stellar CLI before re-invoking the contract:
+
+```bash
+stellar contract restore \
+  --id <CONTRACT_ID> \
+  --source <ACCOUNT> \
+  --network testnet \
+  --key '{"vec":[{"symbol":"Jar"},{"symbol":"alice"}]}'
+```
+
