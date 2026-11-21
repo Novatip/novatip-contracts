@@ -126,3 +126,15 @@ jobs:
 
       - name: Report wasm size
         run: ./scripts/check-wasm-size.sh
+
+      # Fail here, not later, if the artifact the smoke tests import is absent.
+      - name: Check the built wasm exists
+        run: |
+          set -euo pipefail
+          WASM=target/wasm32v1-none/release/tip_splitter.wasm
+          test -f "${WASM}" || { echo "error: ${WASM} was not built" >&2; exit 1; }
+
+      # The wasm smoke tests (#143) import the artifact built above through
+      # contractimport!, so they test the file deployments ship, not the native build.
+      - name: Wasm smoke tests against the built contract
+        run: cargo test --locked -p tip-splitter --features wasm-test wasm_
