@@ -313,6 +313,10 @@ pub enum DataKey {
     WasmHash,
     /// Optional maximum tip amount for a jar keyed by its public slug (#323).
     MaxTip(String),
+    /// Per-jar flag (#313): when present and `true`, `tip_in_token` rejects
+    /// every token other than the default one for this jar. Persistent,
+    /// keyed by the public slug like `MinTip`; absence means any allowed token.
+    DefaultTokenOnly(String),
     /// Every allowed token in insertion order, default first (#321). Instance
     /// storage like `AllowedToken`; bounded by `MAX_ALLOWED_TOKENS`.
     AllowedTokens,
@@ -367,6 +371,9 @@ pub enum Error {
     TooManyAllowedTokens = 40,
     AboveMaxTipAmount = 41,
     InvalidMaximumAmount = 42,
+    /// `tip_in_token` was called with a non-default token for a jar that
+    /// accepts only the default token (#313). Appended, never renumbered.
+    NonDefaultToken = 43,
     NotAuthorized = 40,
 }
 
@@ -995,6 +1002,9 @@ impl TipSplitter {
         env.storage()
             .persistent()
             .remove(&DataKey::MaxTip(jar_id.clone()));
+        env.storage()
+            .persistent()
+            .remove(&DataKey::DefaultTokenOnly(jar_id.clone()));
 
         env.events().publish(
             (symbol_short!("jar_del"), jar_id.clone()),
@@ -1165,6 +1175,16 @@ impl TipSplitter {
                 .extend_ttl(&new_max_key, JAR_TTL_THRESHOLD, JAR_TTL_LEDGERS);
             env.storage().persistent().remove(&old_max_key);
         }
+        // Move the default-token-only flag (#313) so it survives a rename.
+        let old_flag_key = DataKey::DefaultTokenOnly(jar_id.clone());
+        if let Some(flag) = env.storage().persistent().get::<_, bool>(&old_flag_key) {
+            let new_flag_key = DataKey::DefaultTokenOnly(new_jar_id.clone());
+            env.storage().persistent().set(&new_flag_key, &flag);
+            env.storage()
+                .persistent()
+                .extend_ttl(&new_flag_key, JAR_TTL_THRESHOLD, JAR_TTL_LEDGERS);
+            env.storage().persistent().remove(&old_flag_key);
+        }
 
         env.events().publish(
             (symbol_short!("jar_rnm"), jar_id.clone()),
@@ -1261,6 +1281,33 @@ impl TipSplitter {
                 amount: max_amount,
             },
         );
+    }
+
+    /// Set or clear the per-jar default-token-only flag (#313). Owner only.
+    /// While `true`, `tip_in_token` rejects any token other than the default
+    /// with `NonDefaultToken`, before any transfer. Survives rename and
+    /// ownership transfer, since it is keyed by the jar's slug.
+    pub fn set_jar_tokens_default_only(env: Env, jar_id: String, default_only: bool) {
+        let jar = Self::load_jar(&env, &jar_id);
+        jar.owner.require_auth();
+
+        let key = DataKey::DefaultTokenOnly(jar_id.clone());
+        if default_only {
+            env.storage().persistent().set(&key, &true);
+            env.storage()
+                .persistent()
+                .extend_ttl(&key, JAR_TTL_THRESHOLD, JAR_TTL_LEDGERS);
+        } else {
+            env.storage().persistent().remove(&key);
+        }
+    }
+
+    /// Whether the jar accepts only the default token (#313). `false` when unset.
+    pub fn get_jar_tokens_default_only(env: Env, jar_id: String) -> bool {
+        env.storage()
+            .persistent()
+            .get(&DataKey::DefaultTokenOnly(jar_id))
+            .unwrap_or(false)
     }
 
     pub fn tip(env: Env, from: Address, jar_id: String, amount: i128, message: String) -> u64 {
@@ -1385,6 +1432,11 @@ impl TipSplitter {
             panic_with_error!(&env, Error::TokenNotAllowed);
         }
         let default: Address = Self::get_token(env.clone());
+        // #313: a jar that opted into default-token-only refuses other tokens
+        // before any transfer is attempted.
+        if token != default && Self::get_jar_tokens_default_only(env.clone(), jar_id.clone()) {
+            panic_with_error!(&env, Error::NonDefaultToken);
+        }
         Self::settle_tip(
             &env,
             &from,
