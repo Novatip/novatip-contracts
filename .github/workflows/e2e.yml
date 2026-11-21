@@ -25,6 +25,8 @@ env:
   # One definition of the jar that the tip and both assertions read, so the
   # create / tip / assert steps cannot drift apart.
   JAR_ID: '@testjar'
+  # A jar whose only recipient has no trustline, so its share is held (#304).
+  HELD_JAR_ID: '@heldjar'
 
 jobs:
   e2e:
@@ -83,13 +85,15 @@ jobs:
       - name: Setup local identities
         run: |
           set -euo pipefail
-          # All four are funded: a recipient with no on-chain account can hold no
+          # All are funded: a recipient with no on-chain account can hold no
           # trustline, and the contract then holds its share instead of paying it,
-          # which is exactly what the balance assertions below reject.
+          # which is exactly what the balance assertions below reject. recipient3
+          # is funded but gets no trustline until the held-share step adds one.
           stellar keys generate deployer --network local --fund
           stellar keys generate creator --network local --fund
           stellar keys generate recipient1 --network local --fund
           stellar keys generate recipient2 --network local --fund
+          stellar keys generate recipient3 --network local --fund
 
       - name: Deploy a test token (stand-in for USDC)
         run: |
@@ -104,12 +108,23 @@ jobs:
             --network local | tail -1)
           echo "TOKEN_ID=${TOKEN_ID}" >> "$GITHUB_ENV"
 
+      - name: Deploy a second test token (for tip_in_token)
+        run: |
+          set -euo pipefail
+          ISSUER=$(stellar keys address deployer)
+          TOKEN2_ID=$(stellar contract asset deploy \
+            --asset "TEST2:${ISSUER}" \
+            --source deployer \
+            --network local | tail -1)
+          echo "TOKEN2_ID=${TOKEN2_ID}" >> "$GITHUB_ENV"
+
       - name: Open recipient trustlines
         run: |
           set -euo pipefail
           ISSUER=$(stellar keys address deployer)
           for NAME in recipient1 recipient2; do
             stellar tx new change-trust --source "${NAME}" --line "TEST:${ISSUER}" --network local
+            stellar tx new change-trust --source "${NAME}" --line "TEST2:${ISSUER}" --network local
           done
 
       - name: Deploy tip_splitter via deploy.sh
@@ -160,6 +175,75 @@ jobs:
             get_jar --jar_id "${JAR_ID}")
           echo "jar: ${JAR}"
           echo "${JAR}" | jq -e '.splits | length == 2' >/dev/null || { echo "FAIL: jar should have 2 splits"; exit 1; }
+
+      - name: Allow the second token on the contract
+        run: |
+          set -euo pipefail
+          stellar contract invoke -q --id "$(cat .contract-id.local)" --source deployer --network local -- \
+            allow_token --token "${TOKEN2_ID}"
+          ALLOWED=$(stellar contract invoke -q --id "$(cat .contract-id.local)" --source deployer --network local -- \
+            is_token_allowed --token "${TOKEN2_ID}" | jq -r .)
+          test "${ALLOWED}" = "true" || { echo "FAIL: TOKEN2 should be allowed, got ${ALLOWED}"; exit 1; }
+
+      - name: Tip in the second token via tip_in_token and assert balances
+        run: |
+          set -euo pipefail
+          stellar contract invoke -q --id "$(cat .contract-id.local)" --source deployer --network local -- \
+            tip_in_token \
+            --from "$(stellar keys address deployer)" \
+            --jar_id "${JAR_ID}" \
+            --token "${TOKEN2_ID}" \
+            --amount 10000000 \
+            --message 'e2e second token'
+          BAL1=$(stellar contract invoke -q --id "${TOKEN2_ID}" --source deployer --network local -- \
+            balance --id "$(stellar keys address recipient1)" | jq -r .)
+          BAL2=$(stellar contract invoke -q --id "${TOKEN2_ID}" --source deployer --network local -- \
+            balance --id "$(stellar keys address recipient2)" | jq -r .)
+          echo "recipient1 TEST2 balance: ${BAL1}"
+          echo "recipient2 TEST2 balance: ${BAL2}"
+          # Same 60/40 split as the default token, paid in TEST2.
+          test "${BAL1}" = "6000000" || { echo "FAIL: recipient1 TEST2 expected 6000000, got ${BAL1}"; exit 1; }
+          test "${BAL2}" = "4000000" || { echo "FAIL: recipient2 TEST2 expected 4000000, got ${BAL2}"; exit 1; }
+
+      - name: Create a jar whose recipient has no trustline
+        run: |
+          export NETWORK=local
+          export SOURCE=creator
+          export OWNER=$(stellar keys address creator)
+          export SLUG="${HELD_JAR_ID}"
+          export RECIPIENT=$(stellar keys address recipient3)
+          ./scripts/create-jar.sh
+
+      - name: Tip the held jar and assert the share is held
+        run: |
+          set -euo pipefail
+          export NETWORK=local
+          export SOURCE=deployer
+          export JAR_ID="${HELD_JAR_ID}"
+          export AMOUNT=1000000
+          export MESSAGE='e2e held share'
+          ./scripts/tip.sh
+          # recipient3 has no trustline, so the contract keeps its share.
+          HELD=$(stellar contract invoke -q --id "$(cat .contract-id.local)" --source deployer --network local -- \
+            get_held --recipient "$(stellar keys address recipient3)" | jq -r .)
+          echo "held for recipient3: ${HELD}"
+          test "${HELD}" = "1000000" || { echo "FAIL: recipient3 should hold 1000000, got ${HELD}"; exit 1; }
+
+      - name: Add the trustline, withdraw_held and assert the balance
+        run: |
+          set -euo pipefail
+          ISSUER=$(stellar keys address deployer)
+          RECIPIENT3=$(stellar keys address recipient3)
+          stellar tx new change-trust --source recipient3 --line "TEST:${ISSUER}" --network local
+          stellar contract invoke -q --id "$(cat .contract-id.local)" --source recipient3 --network local -- \
+            withdraw_held --recipient "${RECIPIENT3}"
+          BAL3=$(stellar contract invoke -q --id "${TOKEN_ID}" --source deployer --network local -- \
+            balance --id "${RECIPIENT3}" | jq -r .)
+          HELD=$(stellar contract invoke -q --id "$(cat .contract-id.local)" --source deployer --network local -- \
+            get_held --recipient "${RECIPIENT3}" | jq -r .)
+          echo "recipient3 balance: ${BAL3}, still held: ${HELD}"
+          test "${BAL3}" = "1000000" || { echo "FAIL: recipient3 expected 1000000, got ${BAL3}"; exit 1; }
+          test "${HELD}" = "0" || { echo "FAIL: held should be cleared, got ${HELD}"; exit 1; }
 
       # Last, so failure() has something to have seen: the network's own log is
       # the first thing you want when a transaction is rejected, and it is gone
