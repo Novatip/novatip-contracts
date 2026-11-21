@@ -1,6 +1,6 @@
 {
   "generators": {
-    "address": 19,
+    "address": 17,
     "nonce": 0
   },
   "auth": [
@@ -39,7 +39,7 @@
                 {
                   "i128": {
                     "hi": 0,
-                    "lo": 1
+                    "lo": 20
                   }
                 }
               ]
@@ -73,7 +73,7 @@
                             "symbol": "bps"
                           },
                           "val": {
-                            "u32": 888
+                            "u32": 1597
                           }
                         },
                         {
@@ -93,7 +93,7 @@
                             "symbol": "bps"
                           },
                           "val": {
-                            "u32": 1517
+                            "u32": 806
                           }
                         },
                         {
@@ -113,7 +113,7 @@
                             "symbol": "bps"
                           },
                           "val": {
-                            "u32": 544
+                            "u32": 611
                           }
                         },
                         {
@@ -133,7 +133,7 @@
                             "symbol": "bps"
                           },
                           "val": {
-                            "u32": 1105
+                            "u32": 1235
                           }
                         },
                         {
@@ -153,7 +153,7 @@
                             "symbol": "bps"
                           },
                           "val": {
-                            "u32": 1183
+                            "u32": 773
                           }
                         },
                         {
@@ -173,7 +173,7 @@
                             "symbol": "bps"
                           },
                           "val": {
-                            "u32": 659
+                            "u32": 301
                           }
                         },
                         {
@@ -193,7 +193,7 @@
                             "symbol": "bps"
                           },
                           "val": {
-                            "u32": 378
+                            "u32": 597
                           }
                         },
                         {
@@ -213,7 +213,7 @@
                             "symbol": "bps"
                           },
                           "val": {
-                            "u32": 304
+                            "u32": 588
                           }
                         },
                         {
@@ -233,7 +233,7 @@
                             "symbol": "bps"
                           },
                           "val": {
-                            "u32": 460
+                            "u32": 880
                           }
                         },
                         {
@@ -253,7 +253,7 @@
                             "symbol": "bps"
                           },
                           "val": {
-                            "u32": 252
+                            "u32": 66
                           }
                         },
                         {
@@ -273,7 +273,7 @@
                             "symbol": "bps"
                           },
                           "val": {
-                            "u32": 79
+                            "u32": 1148
                           }
                         },
                         {
@@ -293,7 +293,7 @@
                             "symbol": "bps"
                           },
                           "val": {
-                            "u32": 1237
+                            "u32": 1398
                           }
                         },
                         {
@@ -302,46 +302,6 @@
                           },
                           "val": {
                             "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABDWC6"
-                          }
-                        }
-                      ]
-                    },
-                    {
-                      "map": [
-                        {
-                          "key": {
-                            "symbol": "bps"
-                          },
-                          "val": {
-                            "u32": 23
-                          }
-                        },
-                        {
-                          "key": {
-                            "symbol": "to"
-                          },
-                          "val": {
-                            "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABFO3O"
-                          }
-                        }
-                      ]
-                    },
-                    {
-                      "map": [
-                        {
-                          "key": {
-                            "symbol": "bps"
-                          },
-                          "val": {
-                            "u32": 1371
-                          }
-                        },
-                        {
-                          "key": {
-                            "symbol": "to"
-                          },
-                          "val": {
-                            "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABHGT6"
                           }
                         }
                       ]
@@ -355,10 +315,6 @@
         }
       ]
     ],
-    [],
-    [],
-    [],
-    [],
     [],
     [],
     [],
@@ -546,6 +502,14 @@
                     },
                     {
                       "key": {
+                        "symbol": "paused"
+                      },
+                      "val": {
+                        "bool": false
+                      }
+                    },
+                    {
+                      "key": {
                         "symbol": "splits"
                       },
                       "val": {
@@ -557,7 +521,7 @@
                                   "symbol": "bps"
                                 },
                                 "val": {
-                                  "u32": 888
+                                  "u32": 1597
                                 }
                               },
                               {
@@ -577,7 +541,7 @@
                                   "symbol": "bps"
                                 },
                                 "val": {
-                                  "u32": 1517
+                                  "u32": 806
                                 }
                               },
                               {
@@ -597,7 +561,7 @@
                                   "symbol": "bps"
                                 },
                                 "val": {
-                                  "u32": 544
+                                  "u32": 611
                                 }
                               },
                               {
@@ -617,7 +581,7 @@
                                   "symbol": "bps"
                                 },
                                 "val": {
-                                  "u32": 1105
+                                  "u32": 1235
                                 }
                               },
                               {
@@ -637,7 +601,7 @@
                                   "symbol": "bps"
                                 },
                                 "val": {
-                                  "u32": 1183
+                                  "u32": 773
                                 }
                               },
                               {
@@ -657,7 +621,7 @@
                                   "symbol": "bps"
                                 },
                                 "val": {
-                                  "u32": 659
+                                  "u32": 301
                                 }
                               },
                               {
@@ -677,7 +641,7 @@
                                   "symbol": "bps"
                                 },
                                 "val": {
-                                  "u32": 378
+                                  "u32": 597
                                 }
                               },
                               {
@@ -697,7 +661,7 @@
                                   "symbol": "bps"
                                 },
                                 "val": {
-                                  "u32": 304
+                                  "u32": 588
                                 }
                               },
                               {
@@ -717,7 +681,7 @@
                                   "symbol": "bps"
                                 },
                                 "val": {
-                                  "u32": 460
+                                  "u32": 880
                                 }
                               },
                               {
@@ -737,7 +701,7 @@
                                   "symbol": "bps"
                                 },
                                 "val": {
-                                  "u32": 252
+                                  "u32": 66
                                 }
                               },
                               {
@@ -757,7 +721,7 @@
                                   "symbol": "bps"
                                 },
                                 "val": {
-                                  "u32": 79
+                                  "u32": 1148
                                 }
                               },
                               {
@@ -777,7 +741,7 @@
                                   "symbol": "bps"
                                 },
                                 "val": {
-                                  "u32": 1237
+                                  "u32": 1398
                                 }
                               },
                               {
@@ -786,46 +750,6 @@
                                 },
                                 "val": {
                                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABDWC6"
-                                }
-                              }
-                            ]
-                          },
-                          {
-                            "map": [
-                              {
-                                "key": {
-                                  "symbol": "bps"
-                                },
-                                "val": {
-                                  "u32": 23
-                                }
-                              },
-                              {
-                                "key": {
-                                  "symbol": "to"
-                                },
-                                "val": {
-                                  "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABFO3O"
-                                }
-                              }
-                            ]
-                          },
-                          {
-                            "map": [
-                              {
-                                "key": {
-                                  "symbol": "bps"
-                                },
-                                "val": {
-                                  "u32": 1371
-                                }
-                              },
-                              {
-                                "key": {
-                                  "symbol": "to"
-                                },
-                                "val": {
-                                  "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABHGT6"
                                 }
                               }
                             ]
@@ -839,7 +763,7 @@
             },
             "ext": "v0"
           },
-          4095
+          1000000
         ]
       ],
       [
@@ -890,6 +814,22 @@
                         },
                         "val": {
                           "bool": true
+                        }
+                      },
+                      {
+                        "key": {
+                          "vec": [
+                            {
+                              "symbol": "AllowedTokens"
+                            }
+                          ]
+                        },
+                        "val": {
+                          "vec": [
+                            {
+                              "address": "CBEPDNVYXQGWB5YUBXKJWYJA7OXTZW5LFLNO5JRRGE6Z6C5OSUZPCCEL"
+                            }
+                          ]
                         }
                       },
                       {
@@ -991,7 +931,7 @@
                       "val": {
                         "i128": {
                           "hi": 0,
-                          "lo": 1
+                          "lo": 20
                         }
                       }
                     },

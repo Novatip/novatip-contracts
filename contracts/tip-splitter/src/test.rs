@@ -33,6 +33,17 @@ fn setup() -> Setup {
     }
 }
 
+/// Config for every property test: a fixed seed, so the snapshots their envs
+/// write are identical on every run and `cargo test` leaves the checkout clean
+/// (#264). Set `PROPTEST_RNG_SEED` to run a different set of cases.
+fn snapshot_stable(cases: u32) -> ProptestConfig {
+    let mut config = ProptestConfig::with_cases(cases);
+    if std::env::var_os("PROPTEST_RNG_SEED").is_none() {
+        config.rng_seed = proptest::test_runner::RngSeed::Fixed(0x6e6f_7661_7469_7073);
+    }
+    config
+}
+
 #[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
 #[repr(u32)]
@@ -4303,7 +4314,7 @@ fn splits_with_optional_tipper() -> impl Strategy<Value = (std::vec::Vec<u32>, O
 }
 
 proptest! {
-    #![proptest_config(ProptestConfig::with_cases(64))]
+    #![proptest_config(snapshot_stable(64))]
 
     /// The core invariant, stated so it holds whether or not the tipper is
     /// one of the recipients (#78):
@@ -7262,7 +7273,7 @@ fn create_jar_is_unchanged_when_no_registrar_is_set() {
 // `ceil(BPS_DENOM / min_bps)` for the generated splits — below that,
 // some recipient's share would truncate to zero.
 proptest! {
-    #![proptest_config(ProptestConfig::with_cases(64))]
+    #![proptest_config(snapshot_stable(64))]
 
     #[test]
     fn tip_rejects_small_amounts(
@@ -7364,7 +7375,7 @@ fn model_validate_splits(splits: &std::vec::Vec<(u8, u32)>) -> Result<(), ModelE
 }
 
 proptest! {
-    #![proptest_config(ProptestConfig::with_cases(64))]
+    #![proptest_config(snapshot_stable(64))]
 
     /// Compares \`try_create_jar\` against the reference model across
     /// generated vectors that combine several defects (duplicates, out-of-range
@@ -7411,7 +7422,7 @@ proptest! {
 // ── Issue #138: preview_split matches tip across random jars ────────────────
 
 proptest! {
-    #![proptest_config(ProptestConfig::with_cases(64))]
+    #![proptest_config(snapshot_stable(64))]
 
     /// Asserts that preview_split, the tip event breakdown, and balance
     /// changes all agree recipient-by-recipient for random jars and amounts.
@@ -7510,6 +7521,8 @@ fn op_strategy() -> impl Strategy<Value = Op> {
 }
 
 proptest! {
+    #![proptest_config(snapshot_stable(ProptestConfig::default().cases))]
+
     #[test]
     fn model_based_property_test(ops in proptest::collection::vec(op_strategy(), 20..50)) {
         let s = setup();
@@ -8947,7 +8960,7 @@ fn last_tip_event(env: &Env, contract: &Address, jar_id: &String) -> TipEvent {
 }
 
 proptest! {
-    #![proptest_config(ProptestConfig::with_cases(48))]
+    #![proptest_config(snapshot_stable(48))]
 
     /// For any fee up to the cap and any valid split, the recipients' total
     /// plus the fee equals the tip exactly, and the fee is the truncated

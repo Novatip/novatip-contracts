@@ -38,7 +38,7 @@
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAITA4"
                 },
                 {
-                  "string": "@v"
+                  "string": "@vvv"
                 },
                 {
                   "vec": [
@@ -154,7 +154,7 @@
                   "symbol": "Jar"
                 },
                 {
-                  "string": "@v"
+                  "string": "@vvv"
                 }
               ]
             },
@@ -174,7 +174,7 @@
                       "symbol": "Jar"
                     },
                     {
-                      "string": "@v"
+                      "string": "@vvv"
                     }
                   ]
                 },
@@ -195,6 +195,14 @@
                       },
                       "val": {
                         "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAITA4"
+                      }
+                    },
+                    {
+                      "key": {
+                        "symbol": "paused"
+                      },
+                      "val": {
+                        "bool": false
                       }
                     },
                     {
@@ -232,7 +240,7 @@
             },
             "ext": "v0"
           },
-          4095
+          1000000
         ]
       ],
       [
@@ -283,6 +291,22 @@
                         },
                         "val": {
                           "bool": true
+                        }
+                      },
+                      {
+                        "key": {
+                          "vec": [
+                            {
+                              "symbol": "AllowedTokens"
+                            }
+                          ]
+                        },
+                        "val": {
+                          "vec": [
+                            {
+                              "address": "CBEPDNVYXQGWB5YUBXKJWYJA7OXTZW5LFLNO5JRRGE6Z6C5OSUZPCCEL"
+                            }
+                          ]
                         }
                       },
                       {

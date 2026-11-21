@@ -62,7 +62,7 @@
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAITA4"
                 },
                 {
-                  "string": "@jarA"
+                  "string": "@jara"
                 },
                 {
                   "vec": [
@@ -108,7 +108,7 @@
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAITA4"
                 },
                 {
-                  "string": "@jarB"
+                  "string": "@jarb"
                 },
                 {
                   "vec": [
@@ -154,7 +154,7 @@
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAOLZM"
                 },
                 {
-                  "string": "@jarA"
+                  "string": "@jara"
                 },
                 {
                   "i128": {
@@ -209,7 +209,7 @@
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAOLZM"
                 },
                 {
-                  "string": "@jarA"
+                  "string": "@jara"
                 },
                 {
                   "i128": {
@@ -264,7 +264,7 @@
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAOLZM"
                 },
                 {
-                  "string": "@jarB"
+                  "string": "@jarb"
                 },
                 {
                   "i128": {
@@ -424,7 +424,7 @@
                   "symbol": "Jar"
                 },
                 {
-                  "string": "@jarA"
+                  "string": "@jara"
                 }
               ]
             },
@@ -444,7 +444,7 @@
                       "symbol": "Jar"
                     },
                     {
-                      "string": "@jarA"
+                      "string": "@jara"
                     }
                   ]
                 },
@@ -465,6 +465,14 @@
                       },
                       "val": {
                         "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAITA4"
+                      }
+                    },
+                    {
+                      "key": {
+                        "symbol": "paused"
+                      },
+                      "val": {
+                        "bool": false
                       }
                     },
                     {
@@ -515,7 +523,7 @@
                   "symbol": "Jar"
                 },
                 {
-                  "string": "@jarB"
+                  "string": "@jarb"
                 }
               ]
             },
@@ -535,7 +543,7 @@
                       "symbol": "Jar"
                     },
                     {
-                      "string": "@jarB"
+                      "string": "@jarb"
                     }
                   ]
                 },
@@ -556,6 +564,14 @@
                       },
                       "val": {
                         "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAITA4"
+                      }
+                    },
+                    {
+                      "key": {
+                        "symbol": "paused"
+                      },
+                      "val": {
+                        "bool": false
                       }
                     },
                     {
@@ -606,7 +622,7 @@
                   "symbol": "Stats"
                 },
                 {
-                  "string": "@jarA"
+                  "string": "@jara"
                 }
               ]
             },
@@ -626,7 +642,7 @@
                       "symbol": "Stats"
                     },
                     {
-                      "string": "@jarA"
+                      "string": "@jara"
                     }
                   ]
                 },
@@ -671,7 +687,7 @@
                   "symbol": "Stats"
                 },
                 {
-                  "string": "@jarB"
+                  "string": "@jarb"
                 }
               ]
             },
@@ -691,7 +707,7 @@
                       "symbol": "Stats"
                     },
                     {
-                      "string": "@jarB"
+                      "string": "@jarb"
                     }
                   ]
                 },
@@ -736,7 +752,7 @@
                   "symbol": "Supporter"
                 },
                 {
-                  "string": "@jarA"
+                  "string": "@jara"
                 },
                 {
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAOLZM"
@@ -759,7 +775,7 @@
                       "symbol": "Supporter"
                     },
                     {
-                      "string": "@jarA"
+                      "string": "@jara"
                     },
                     {
                       "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAOLZM"
@@ -807,7 +823,7 @@
                   "symbol": "Supporter"
                 },
                 {
-                  "string": "@jarB"
+                  "string": "@jarb"
                 },
                 {
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAOLZM"
@@ -830,7 +846,7 @@
                       "symbol": "Supporter"
                     },
                     {
-                      "string": "@jarB"
+                      "string": "@jarb"
                     },
                     {
                       "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAOLZM"
@@ -916,6 +932,22 @@
                         },
                         "val": {
                           "bool": true
+                        }
+                      },
+                      {
+                        "key": {
+                          "vec": [
+                            {
+                              "symbol": "AllowedTokens"
+                            }
+                          ]
+                        },
+                        "val": {
+                          "vec": [
+                            {
+                              "address": "CBEPDNVYXQGWB5YUBXKJWYJA7OXTZW5LFLNO5JRRGE6Z6C5OSUZPCCEL"
+                            }
+                          ]
                         }
                       },
                       {

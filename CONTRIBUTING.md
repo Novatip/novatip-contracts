@@ -35,7 +35,16 @@ make ci
 ```
 
 It runs the format check, clippy, tests, the release wasm build and the wasm
-size check, in the same order with the same flags as CI. See
+size check, in the same order with the same flags as CI. Right after the
+tests it runs `./scripts/check-snapshots.sh`, which fails if `cargo test`
+changed or created anything under `contracts/*/test_snapshots/`.
+
+**Commit your test snapshots.** Every test writes a JSON snapshot of the
+ledger state and events it produced. Commit the new and changed snapshot
+files with your change, so storage and event changes show up in review.
+Property tests run from a fixed seed so their snapshots are stable; set
+`PROPTEST_RNG_SEED` to explore other cases, but do not commit the snapshots
+that run writes. See
 [RELEASING.md](./RELEASING.md) for how a contract release is versioned,
 tagged and deployed.
 
@@ -58,6 +67,7 @@ Do not open a public issue. See
 | Format / lint / test | `cargo fmt --all -- --check`, `cargo clippy --all-targets -- -D warnings`, `cargo test` |
 | MSRV pin sync (#133) | `make check-msrv` — `rust-toolchain.toml` `channel` and workspace `rust-version` must share major.minor. The crate inherits `rust-version.workspace = true`. |
 | Dependency audit (#132) | `cargo deny check` (`cargo install cargo-deny`) — advisories, licenses, bans. See `deny.toml`. |
+| Test snapshots (#264) | `cargo test && ./scripts/check-snapshots.sh` — fails when a test changed or created a snapshot that is not committed. |
 | Contract size (#131) | `make build && ./scripts/check-wasm-size.sh` — measures the `stellar contract build` artifact. |
 | Public interface (#134) | `make interface` to regenerate `contracts/tip-splitter/interface.json`, then `./scripts/check-interface.sh`. **When it changes:** regenerate, add a CHANGELOG entry, and never renumber existing `Error` variants — append only. |
 

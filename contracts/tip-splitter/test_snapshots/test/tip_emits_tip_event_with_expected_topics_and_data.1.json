@@ -62,7 +62,7 @@
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAITA4"
                 },
                 {
-                  "string": "@ev"
+                  "string": "@evt1"
                 },
                 {
                   "vec": [
@@ -108,7 +108,7 @@
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAMDR4"
                 },
                 {
-                  "string": "@ev"
+                  "string": "@evt1"
                 },
                 {
                   "i128": {
@@ -265,7 +265,7 @@
                   "symbol": "Jar"
                 },
                 {
-                  "string": "@ev"
+                  "string": "@evt1"
                 }
               ]
             },
@@ -285,7 +285,7 @@
                       "symbol": "Jar"
                     },
                     {
-                      "string": "@ev"
+                      "string": "@evt1"
                     }
                   ]
                 },
@@ -306,6 +306,14 @@
                       },
                       "val": {
                         "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAITA4"
+                      }
+                    },
+                    {
+                      "key": {
+                        "symbol": "paused"
+                      },
+                      "val": {
+                        "bool": false
                       }
                     },
                     {
@@ -356,7 +364,7 @@
                   "symbol": "Stats"
                 },
                 {
-                  "string": "@ev"
+                  "string": "@evt1"
                 }
               ]
             },
@@ -376,7 +384,7 @@
                       "symbol": "Stats"
                     },
                     {
-                      "string": "@ev"
+                      "string": "@evt1"
                     }
                   ]
                 },
@@ -421,7 +429,7 @@
                   "symbol": "Supporter"
                 },
                 {
-                  "string": "@ev"
+                  "string": "@evt1"
                 },
                 {
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAMDR4"
@@ -444,7 +452,7 @@
                       "symbol": "Supporter"
                     },
                     {
-                      "string": "@ev"
+                      "string": "@evt1"
                     },
                     {
                       "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAMDR4"
@@ -530,6 +538,22 @@
                         },
                         "val": {
                           "bool": true
+                        }
+                      },
+                      {
+                        "key": {
+                          "vec": [
+                            {
+                              "symbol": "AllowedTokens"
+                            }
+                          ]
+                        },
+                        "val": {
+                          "vec": [
+                            {
+                              "address": "CBEPDNVYXQGWB5YUBXKJWYJA7OXTZW5LFLNO5JRRGE6Z6C5OSUZPCCEL"
+                            }
+                          ]
                         }
                       },
                       {
@@ -958,7 +982,7 @@
                 "symbol": "tip"
               },
               {
-                "string": "@ev"
+                "string": "@evt1"
               }
             ],
             "data": {
