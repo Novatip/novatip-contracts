@@ -334,3 +334,114 @@ fn default_token_minimum_applies_only_to_default_and_stats_sum_raw_units() {
     assert_eq!(client.get_jar_stats(&jar), JarStats { tip_count: 2, total: 150 });
     assert_eq!(client.get_tip_count(), 2);
 }
+
+// #254: Collecting a recurring payment must use the same fee and split
+// accounting as a direct tip, while charging exactly the scheduled allowance.
+#[test]
+fn recurring_fee_matches_manual_tip_and_debits_allowance_exactly() {
+    let s = setup();
+    let env = &s.env;
+    let client = TipSplitterClient::new(env, &s.contract);
+    let token = token::Client::new(env, &s.token);
+    let token_admin = token::StellarAssetClient::new(env, &s.token);
+    let alice = Address::generate(env);
+    let bob = Address::generate(env);
+    let supporter = Address::generate(env);
+    let jar = String::from_str(env, "@recfee");
+    client.create_jar(&Address::generate(env), &jar, &vec![
+        env, Split { to: alice.clone(), bps: 7000 },
+        Split { to: bob.clone(), bps: 3000 },
+    ]);
+    token_admin.mint(&supporter, &4_000);
+    client.set_fee_bps(&100);
+    let initial_allowance = 2_000;
+    token.approve(&supporter, &s.contract, &initial_allowance, &(env.ledger().sequence() + 10_000));
+    let id = client.create_recurring(&supporter, &jar, &1_000, &100, &String::from_str(env, "same"));
+    let due = client.get_recurring(&id).next_due_ledger;
+    env.ledger().set_sequence_number(due);
+
+    env.mock_auths(&[]);
+    client.collect_recurring(&id);
+    let collected = last_tip_event(env, &s.contract, &jar);
+    env.mock_all_auths();
+    assert_eq!(collected.token, s.token);
+    assert_eq!(collected.fee, 10);
+    assert_eq!(collected.breakdown, vec![
+        env, (alice.clone(), 693_i128, false), (bob.clone(), 297_i128, false)
+    ]);
+    assert_eq!(token.allowance(&supporter, &s.contract), initial_allowance - 1_000);
+    assert_eq!(token.balance(&s.admin), 10);
+    assert_eq!(token.balance(&alice), 693);
+    assert_eq!(token.balance(&bob), 297);
+    assert_eq!(token.balance(&supporter), 3_000);
+    assert_eq!(client.get_jar_stats(&jar), JarStats { tip_count: 1, total: 1_000 });
+
+    client.tip(&supporter, &jar, &1_000, &String::from_str(env, "same"));
+    let manual = last_tip_event(env, &s.contract, &jar);
+    assert_eq!(collected.amount, manual.amount);
+    assert_eq!(collected.fee, manual.fee);
+    assert_eq!(collected.breakdown, manual.breakdown);
+    assert_eq!(collected.token, manual.token);
+    assert_eq!(collected.message, manual.message);
+    assert_eq!(manual.seq, collected.seq + 1);
+    assert_eq!(token.allowance(&supporter, &s.contract), 1_000);
+    assert_eq!(client.get_jar_stats(&jar), JarStats { tip_count: 2, total: 2_000 });
+    assert_eq!(token.balance(&s.admin), 20);
+    assert_eq!(token.balance(&alice), 1_386);
+    assert_eq!(token.balance(&bob), 594);
+}
+
+#[test]
+fn recurring_held_share_matches_manual_tip_and_charges_full_allowance() {
+    let s = setup_hostile();
+    let env = &s.env;
+    let client = TipSplitterClient::new(env, &s.contract);
+    let token = TestTokenClient::new(env, &s.token);
+    let alice = Address::generate(env);
+    let bob = Address::generate(env);
+    let supporter = Address::generate(env);
+    let jar = String::from_str(env, "@recheld");
+    client.create_jar(&Address::generate(env), &jar, &vec![
+        env, Split { to: alice.clone(), bps: 7000 },
+        Split { to: bob.clone(), bps: 3000 },
+    ]);
+    token.mint(&supporter, &4_000);
+    client.set_fee_bps(&100);
+    token.approve(&supporter, &s.contract, &2_000, &(env.ledger().sequence() + 10_000));
+    let id = client.create_recurring(&supporter, &jar, &1_000, &100, &String::from_str(env, "held"));
+    token.block(&bob);
+    let due = client.get_recurring(&id).next_due_ledger;
+    env.ledger().set_sequence_number(due);
+
+    env.mock_auths(&[]);
+    client.collect_recurring(&id);
+    let collected = last_tip_event(env, &s.contract, &jar);
+    env.mock_all_auths();
+    assert_eq!(collected.token, s.token);
+    assert_eq!(collected.fee, 10);
+    assert_eq!(collected.breakdown, vec![
+        env, (alice.clone(), 693_i128, false), (bob.clone(), 297_i128, true)
+    ]);
+    assert_eq!(token.allowance(&supporter, &s.contract), 1_000);
+    assert_eq!(token.balance(&supporter), 3_000);
+    assert_eq!(token.balance(&s.admin), 10);
+    assert_eq!(token.balance(&alice), 693);
+    assert_eq!(token.balance(&bob), 0);
+    assert_eq!(token.balance(&s.contract), 297);
+    assert_eq!(client.get_held(&bob), 297);
+    assert_eq!(client.get_jar_stats(&jar), JarStats { tip_count: 1, total: 1_000 });
+
+    client.tip(&supporter, &jar, &1_000, &String::from_str(env, "held"));
+    let manual = last_tip_event(env, &s.contract, &jar);
+    assert_eq!(collected.amount, manual.amount);
+    assert_eq!(collected.fee, manual.fee);
+    assert_eq!(collected.breakdown, manual.breakdown);
+    assert_eq!(collected.token, manual.token);
+    assert_eq!(collected.message, manual.message);
+    assert_eq!(manual.seq, collected.seq + 1);
+    assert_eq!(token.allowance(&supporter, &s.contract), 1_000);
+    assert_eq!(client.get_held(&bob), 594);
+    assert_eq!(token.balance(&s.contract), 594);
+    assert_eq!(token.balance(&s.admin), 20);
+    assert_eq!(client.get_jar_stats(&jar), JarStats { tip_count: 2, total: 2_000 });
+}
