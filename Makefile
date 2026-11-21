@@ -67,6 +67,7 @@ ci:
 	cargo fmt --all -- --check
 	cargo clippy --locked --all-targets -- -D warnings
 	cargo test --locked
+	./scripts/check-snapshots.sh
 	cargo build --locked --target wasm32-unknown-unknown --release
 	stellar contract build
 	./scripts/check-wasm-size.sh
