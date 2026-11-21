@@ -27,6 +27,12 @@ env:
   JAR_ID: '@testjar'
   # A jar whose only recipient has no trustline, so its share is held (#304).
   HELD_JAR_ID: '@heldjar'
+  # Pinned quickstart image (#303). The protocol and CLI move together: when
+  # MIN_STELLAR_CLI_VERSION in scripts/lib/cli.sh is bumped, bump this tag to the
+  # quickstart release that matches the same protocol, in the same pull request,
+  # and re-run this job. `latest` is not used, because it can move to a protocol
+  # the pinned CLI does not support.
+  QUICKSTART_IMAGE: 'stellar/quickstart:v27.1.0'
 
 jobs:
   e2e:
@@ -59,7 +65,7 @@ jobs:
       - name: Start the local Stellar network
         run: |
           set -euo pipefail
-          docker run -d --name stellar -p 8000:8000 stellar/quickstart:latest --local
+          docker run -d --name stellar -p 8000:8000 "${QUICKSTART_IMAGE}" --local
           # Two conditions that /health alone misses. The RPC has to have ingested
           # a ledger: in local mode quickstart answers /health while it is still
           # applying the Soroban protocol upgrades, and calls made in that window
