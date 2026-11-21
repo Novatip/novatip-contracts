@@ -10136,15 +10136,305 @@ fn change_recipient_rejects_duplicate_invalid_and_non_recipient() {
     assert_eq!(
         client.try_change_recipient(&jar_id, &stranger, &Address::generate(env)),
         Err(Ok(Error::NotRecipient.into()))
+// ---------------------------------------------------------------------------
+// #259 — registrar co-signature argument binding and clear/set events
+// ---------------------------------------------------------------------------
+
+#[test]
+fn registrar_cosignature_is_bound_to_exact_jar_id_and_owner() {
+    let s = setup();
+    let env = &s.env;
+    let client = TipSplitterClient::new(env, &s.contract);
+    let owner_a = Address::generate(env);
+    let owner_b = Address::generate(env);
+    let recipient = Address::generate(env);
+    let registrar = Address::generate(env);
+
+    let splits = vec![
+        env,
+        Split {
+            to: recipient.clone(),
+            bps: 10_000,
+        },
+    ];
+    let jar_alice = String::from_str(env, "@alice");
+    let jar_bob = String::from_str(env, "@bob");
+
+    // Installing the registrar emits `reg_set` with the new address.
+    client.set_registrar(&Some(registrar.clone()));
+    let reg_topics = vec![env, symbol_short!("reg_set").into_val(env)];
+    let set_evs: std::vec::Vec<_> = env
+        .events()
+        .all()
+        .iter()
+        .filter(|e| e.0 == s.contract && e.1 == reg_topics)
+        .collect();
+    assert_eq!(set_evs.len(), 1);
+    let set_ev: RegistrarEvent =
+        TryFromVal::try_from_val(env, &set_evs[0].2).expect("reg_set event data");
+    assert_eq!(set_ev.version, 1);
+    assert_eq!(set_ev.admin, s.admin);
+    assert_eq!(set_ev.registrar, Some(registrar.clone()));
+
+    // Mismatched slug: registrar co-signed ("@alice", owner_a), caller tries ("@bob", owner_a).
+    env.mock_auths(&[
+        MockAuth {
+            address: &owner_a,
+            invoke: &MockAuthInvoke {
+                contract: &s.contract,
+                fn_name: "create_jar",
+                args: (owner_a.clone(), jar_bob.clone(), splits.clone()).into_val(env),
+                sub_invokes: &[],
+            },
+        },
+        MockAuth {
+            address: &registrar,
+            invoke: &MockAuthInvoke {
+                contract: &s.contract,
+                fn_name: "create_jar",
+                args: (jar_alice.clone(), owner_a.clone()).into_val(env),
+                sub_invokes: &[],
+            },
+        },
+    ]);
+    assert!(
+        client.try_create_jar(&owner_a, &jar_bob, &splits).is_err(),
+        "co-signature for (@alice, owner_a) must not authorise (@bob, owner_a)"
+    );
+
+    // Mismatched owner: registrar co-signed ("@alice", owner_a), caller tries ("@alice", owner_b).
+    env.mock_auths(&[
+        MockAuth {
+            address: &owner_b,
+            invoke: &MockAuthInvoke {
+                contract: &s.contract,
+                fn_name: "create_jar",
+                args: (owner_b.clone(), jar_alice.clone(), splits.clone()).into_val(env),
+                sub_invokes: &[],
+            },
+        },
+        MockAuth {
+            address: &registrar,
+            invoke: &MockAuthInvoke {
+                contract: &s.contract,
+                fn_name: "create_jar",
+                args: (jar_alice.clone(), owner_a.clone()).into_val(env),
+                sub_invokes: &[],
+            },
+        },
+    ]);
+    assert!(
+        client
+            .try_create_jar(&owner_b, &jar_alice, &splits)
+            .is_err(),
+        "co-signature for (@alice, owner_a) must not authorise (@alice, owner_b)"
+    );
+
+    assert!(!client.jar_exists(&jar_alice));
+    assert!(!client.jar_exists(&jar_bob));
+
+    // Exact match: ("@alice", owner_a) succeeds.
+    env.mock_auths(&[
+        MockAuth {
+            address: &owner_a,
+            invoke: &MockAuthInvoke {
+                contract: &s.contract,
+                fn_name: "create_jar",
+                args: (owner_a.clone(), jar_alice.clone(), splits.clone()).into_val(env),
+                sub_invokes: &[],
+            },
+        },
+        MockAuth {
+            address: &registrar,
+            invoke: &MockAuthInvoke {
+                contract: &s.contract,
+                fn_name: "create_jar",
+                args: (jar_alice.clone(), owner_a.clone()).into_val(env),
+                sub_invokes: &[],
+            },
+        },
+    ]);
+    client.create_jar(&owner_a, &jar_alice, &splits);
+    assert!(client.jar_exists(&jar_alice));
+
+    // Clearing the registrar emits `reg_set` with `None` and restores owner-only creation.
+    env.mock_all_auths();
+    client.set_registrar(&None);
+    let clear_evs: std::vec::Vec<_> = env
+        .events()
+        .all()
+        .iter()
+        .filter(|e| e.0 == s.contract && e.1 == reg_topics)
+        .collect();
+    assert_eq!(clear_evs.len(), 1);
+    let clear_ev: RegistrarEvent =
+        TryFromVal::try_from_val(env, &clear_evs[0].2).expect("reg_set clear event data");
+    assert_eq!(clear_ev.version, 1);
+    assert_eq!(clear_ev.admin, s.admin);
+    assert_eq!(clear_ev.registrar, None);
+
+    env.mock_auths(&[MockAuth {
+        address: &owner_b,
+        invoke: &MockAuthInvoke {
+            contract: &s.contract,
+            fn_name: "create_jar",
+            args: (owner_b.clone(), jar_bob.clone(), splits.clone()).into_val(env),
+            sub_invokes: &[],
+        },
+    }]);
+    client.create_jar(&owner_b, &jar_bob, &splits);
+    assert!(client.jar_exists(&jar_bob));
+}
+
+// ---------------------------------------------------------------------------
+// #260 — hostile post-tip hooks (panic, error return, re-entrant tip)
+// ---------------------------------------------------------------------------
+
+mod erroring_hook {
+    use super::*;
+
+    #[contracterror]
+    #[derive(Copy, Clone, Debug, Eq, PartialEq)]
+    #[repr(u32)]
+    pub enum HookErr {
+        Rejected = 1,
+    }
+
+    #[contract]
+    pub struct ErroringHook;
+
+    #[contractimpl]
+    impl ErroringHook {
+        pub fn on_tip(
+            _env: Env,
+            _jar_id: String,
+            _from: Address,
+            _amount: i128,
+        ) -> Result<(), HookErr> {
+            Err(HookErr::Rejected)
+        }
+    }
+}
+
+mod reentrant_hook {
+    use super::*;
+
+    #[contracttype]
+    #[derive(Clone)]
+    enum ReentrantKey {
+        Target,
+    }
+
+    #[contract]
+    pub struct ReentrantHook;
+
+    #[contractimpl]
+    impl ReentrantHook {
+        pub fn __constructor(env: Env, target: Address) {
+            env.storage().instance().set(&ReentrantKey::Target, &target);
+        }
+
+        pub fn on_tip(env: Env, jar_id: String, from: Address, amount: i128) {
+            let target: Address = env
+                .storage()
+                .instance()
+                .get(&ReentrantKey::Target)
+                .expect("target set");
+            let splitter = TipSplitterClient::new(&env, &target);
+            splitter.tip(&from, &jar_id, &amount, &String::from_str(&env, "reenter"));
+        }
+    }
+}
+
+fn assert_tip_settles_once_despite_hook(
+    s: &Setup,
+    client: &TipSplitterClient,
+    tipper: &Address,
+    alice: &Address,
+    jar_id: &String,
+    hook: Address,
+) {
+    let env = &s.env;
+    let token = token::Client::new(env, &s.token);
+
+    client.set_tip_hook(&Some(hook));
+    let seq = client.tip(tipper, jar_id, &100, &String::from_str(env, "hi"));
+
+    // Snapshot events before any subsequent client call clears the test buffer.
+    let tip_evs: std::vec::Vec<_> = env
+        .events()
+        .all()
+        .iter()
+        .filter(|e| e.0 == s.contract && topic_is_symbol(env, &e.1, 0, symbol_short!("tip")))
+        .collect();
+    assert_eq!(tip_evs.len(), 1, "tip event must be published exactly once");
+    let decoded: TipEvent =
+        TryFromVal::try_from_val(env, &tip_evs[0].2).expect("tip event data shape");
+    assert_eq!(decoded.from, *tipper);
+    assert_eq!(decoded.amount, 100);
+    assert_eq!(decoded.seq, 1);
+
+    assert_eq!(seq, 1);
+    assert_eq!(client.get_tip_count(), 1);
+    assert_eq!(token.balance(alice), 100);
+    assert_eq!(token.balance(tipper), 900);
+    assert_eq!(
+        client.get_jar_stats(jar_id),
+        JarStats {
+            tip_count: 1,
+            total: 100,
+        }
+    );
+    assert_eq!(
+        client.get_supporter_stats(jar_id, tipper),
+        SupporterStats {
+            tip_count: 1,
+            total: 100,
+        }
     );
 }
 
 #[test]
 fn withdraw_held_to_pays_another_address_and_records_both() {
+fn hostile_hooks_panic_error_and_reentry_do_not_disrupt_tip() {
+    // (a) Hook that panics.
+    {
+        let s = setup();
+        let hook = s.env.register(PanickyHook, ());
+        let (client, tipper, alice, jar_id) = hook_jar(&s.env, &s);
+        assert_tip_settles_once_despite_hook(&s, &client, &tipper, &alice, &jar_id, hook);
+    }
+
+    // (b) Hook that returns a contract error.
+    {
+        let s = setup();
+        let hook = s.env.register(erroring_hook::ErroringHook, ());
+        let (client, tipper, alice, jar_id) = hook_jar(&s.env, &s);
+        assert_tip_settles_once_despite_hook(&s, &client, &tipper, &alice, &jar_id, hook);
+    }
+
+    // (c) Hook that tries to re-enter TipSplitter::tip.
+    {
+        let s = setup();
+        let hook = s
+            .env
+            .register(reentrant_hook::ReentrantHook, (s.contract.clone(),));
+        let (client, tipper, alice, jar_id) = hook_jar(&s.env, &s);
+        assert_tip_settles_once_despite_hook(&s, &client, &tipper, &alice, &jar_id, hook);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// #261 — withdraw_held edge cases
+// ---------------------------------------------------------------------------
+
+#[test]
+fn withdraw_held_edge_cases_accumulate_retry_pause_and_double_withdraw() {
     let s = setup_hostile();
     let env = &s.env;
     let client = TipSplitterClient::new(env, &s.contract);
     let token = TestTokenClient::new(env, &s.token);
+
     let owner = Address::generate(env);
     let alice = Address::generate(env);
     let bob = Address::generate(env);
@@ -10155,6 +10445,14 @@ fn withdraw_held_to_pays_another_address_and_records_both() {
     client.create_jar(
         &owner,
         &jar_id,
+    token.mint(&tipper, &1_000);
+
+    let jar_one = String::from_str(env, "@held_one");
+    let jar_two = String::from_str(env, "@held_two");
+
+    client.create_jar(
+        &owner,
+        &jar_one,
         &vec![
             env,
             Split {
@@ -10184,6 +10482,51 @@ fn withdraw_held_to_pays_another_address_and_records_both() {
     let expected_topics = vec![
         env,
         symbol_short!("wd_to").into_val(env),
+                bps: 5_000,
+            },
+            Split {
+                to: bob.clone(),
+                bps: 5_000,
+            },
+        ],
+    );
+    client.create_jar(
+        &owner,
+        &jar_two,
+        &vec![
+            env,
+            Split {
+                to: bob.clone(),
+                bps: 10_000,
+            },
+        ],
+    );
+
+    // Block Bob and accumulate held credit across multiple tips and jars.
+    token.block(&bob);
+    client.tip(&tipper, &jar_one, &100, &String::from_str(env, "t1")); // +50 held
+    client.tip(&tipper, &jar_one, &200, &String::from_str(env, "t2")); // +100 held
+    client.tip(&tipper, &jar_two, &75, &String::from_str(env, "t3")); // +75 held
+
+    assert_eq!(token.balance(&alice), 150);
+    assert_eq!(client.get_held(&bob), 225);
+    assert_eq!(token.balance(&s.contract), 225);
+
+    // Withdrawing while Bob still cannot receive fails and leaves `get_held` intact.
+    assert!(client.try_withdraw_held(&bob).is_err());
+    assert_eq!(client.get_held(&bob), 225);
+    assert_eq!(token.balance(&bob), 0);
+
+    // Pause the contract: per docs/CONTRACT.md, admin cannot stop `withdraw_held` by pausing.
+    client.pause();
+    assert!(client.is_paused());
+
+    // Unblock Bob and withdraw while paused; assert the `withdraw` event.
+    token.unblock();
+    client.withdraw_held(&bob);
+    let expected_topics = vec![
+        env,
+        symbol_short!("withdraw").into_val(env),
         bob.clone().into_val(env),
     ];
     let evs: std::vec::Vec<_> = env
@@ -10237,4 +10580,154 @@ fn fee_recipient_set_clear_and_self_transfer_rule() {
         client.try_set_fee_recipient(&Some(s.contract.clone())),
         Err(Ok(Error::InvalidRecipient.into()))
     );
+    let decoded: HeldWithdrawnEvent =
+        TryFromVal::try_from_val(env, &evs[0].2).expect("withdraw event data");
+    assert_eq!(decoded.version, 1);
+    assert_eq!(decoded.amount, 225);
+
+    assert_eq!(token.balance(&bob), 225);
+    assert_eq!(token.balance(&s.contract), 0);
+    assert_eq!(client.get_held(&bob), 0);
+
+    // Withdrawing a second time fails with `NothingHeld`.
+    assert_eq!(
+        client.try_withdraw_held(&bob),
+        Err(Ok(Error::NothingHeld.into()))
+    );
+}
+
+// ---------------------------------------------------------------------------
+// #262 — every jar-taking public function rejects non-canonical jar IDs
+// ---------------------------------------------------------------------------
+
+#[test]
+fn every_public_function_rejects_non_canonical_jar_ids_consistently() {
+    let s = setup();
+    let env = &s.env;
+    let client = TipSplitterClient::new(env, &s.contract);
+    let token_admin = token::StellarAssetClient::new(env, &s.token);
+
+    let owner = Address::generate(env);
+    let new_owner = Address::generate(env);
+    let recipient = Address::generate(env);
+    let tipper = Address::generate(env);
+    token_admin.mint(&tipper, &10_000);
+
+    let splits = vec![
+        env,
+        Split {
+            to: recipient.clone(),
+            bps: 10_000,
+        },
+    ];
+
+    // One valid jar so `rename_jar(valid, bad)` exercises `new_jar_id` validation.
+    let valid_jar = String::from_str(env, "@valid");
+    let valid_new = String::from_str(env, "@valid_new");
+    client.create_jar(&owner, &valid_jar, &splits);
+
+    let invalid_ids = [
+        "",                                   // empty
+        "@Alice",                             // uppercase
+        "@ali ce",                            // embedded whitespace
+        " @alice",                            // leading whitespace
+        "@alice ",                            // trailing whitespace
+        "alice",                              // missing leading @
+        "@ab",                                // too short (< 3 chars after @)
+        "@aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", // too long (33 chars after @)
+    ];
+
+    let msg = String::from_str(env, "hi");
+    let invalid_jar_id = Err(Ok(Error::InvalidJarId.into()));
+    let jar_not_found = Err(Ok(Error::JarNotFound.into()));
+
+    for raw in invalid_ids {
+        let bad = String::from_str(env, raw);
+
+        // Creation and rename target validate format explicitly -> InvalidJarId.
+        assert_eq!(
+            client.try_create_jar(&owner, &bad, &splits),
+            invalid_jar_id,
+            "create_jar({raw:?})"
+        );
+        assert_eq!(
+            client.try_rename_jar(&valid_jar, &bad),
+            invalid_jar_id,
+            "rename_jar(valid, {raw:?})"
+        );
+
+        // Boolean existence / default-only queries return false without panicking.
+        assert!(!client.jar_exists(&bad), "jar_exists({raw:?})");
+        assert!(
+            !client.get_jar_tokens_default_only(&bad),
+            "get_jar_tokens_default_only({raw:?})"
+        );
+
+        // All other jar-taking entry points fail with JarNotFound.
+        assert_eq!(client.try_update_splits(&bad, &splits), jar_not_found);
+        assert_eq!(client.try_lock_splits(&bad), jar_not_found);
+        assert_eq!(client.try_unlock_splits(&bad), jar_not_found);
+        assert_eq!(client.try_is_splits_locked(&bad), jar_not_found);
+        assert_eq!(client.try_set_jar_paused(&bad, &true), jar_not_found);
+        assert_eq!(client.try_is_jar_paused(&bad), jar_not_found);
+        assert_eq!(client.try_leave_jar(&bad, &recipient), jar_not_found);
+        assert_eq!(
+            client.try_transfer_jar_ownership(&bad, &new_owner),
+            jar_not_found
+        );
+        assert_eq!(
+            client.try_admin_recover_jar(&bad, &new_owner),
+            jar_not_found
+        );
+        assert_eq!(client.try_delete_jar(&bad), jar_not_found);
+        assert_eq!(client.try_rename_jar(&bad, &valid_new), jar_not_found);
+        assert_eq!(
+            client.try_set_min_tip_amount(&bad, &Some(10)),
+            jar_not_found
+        );
+        assert_eq!(
+            client.try_set_max_tip_amount(&bad, &Some(100)),
+            jar_not_found
+        );
+        assert_eq!(
+            client.try_set_jar_tokens_default_only(&bad, &true),
+            jar_not_found
+        );
+        assert_eq!(client.try_tip(&tipper, &bad, &100, &msg), jar_not_found);
+        assert_eq!(
+            client.try_tip_with_ref(&tipper, &bad, &100, &msg, &None),
+            jar_not_found
+        );
+        let batch = vec![
+            env,
+            TipRequest {
+                jar_id: bad.clone(),
+                amount: 100,
+                message: msg.clone(),
+                reference: None,
+            },
+        ];
+        assert_eq!(client.try_tip_many(&tipper, &None, &batch), jar_not_found);
+        assert_eq!(
+            client.try_tip_in_token(&tipper, &bad, &s.token, &100, &msg),
+            jar_not_found
+        );
+        assert_eq!(
+            client.try_create_recurring(&tipper, &bad, &100, &86_400, &msg),
+            jar_not_found
+        );
+        assert_eq!(client.try_get_jar(&bad), jar_not_found);
+        assert_eq!(client.try_get_jar_owner(&bad), jar_not_found);
+        assert_eq!(client.try_get_split_count(&bad), jar_not_found);
+        assert_eq!(client.try_preview_split(&bad, &100), jar_not_found);
+        assert_eq!(client.try_preview_split_details(&bad, &100), jar_not_found);
+        assert_eq!(client.try_preview_tip(&bad, &tipper, &100), jar_not_found);
+        assert_eq!(client.try_get_max_tip_amount(&bad), jar_not_found);
+        assert_eq!(client.try_get_min_tip_amount(&bad), jar_not_found);
+        assert_eq!(client.try_get_min_accepted_tip(&bad), jar_not_found);
+        assert_eq!(client.try_get_jar_stats(&bad), jar_not_found);
+        assert_eq!(client.try_get_jar_info(&bad), jar_not_found);
+        assert_eq!(client.try_get_supporter_stats(&bad, &tipper), jar_not_found);
+        assert_eq!(client.try_is_recipient(&bad, &recipient), jar_not_found);
+    }
 }

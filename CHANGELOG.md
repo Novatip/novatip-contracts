@@ -14,6 +14,10 @@ All notable changes to `novatip-contracts` are documented here.
 
 ### Added
 - `version()` is now `10`: `change_recipient(jar_id, old, new)` lets a recipient replace their own address in a jar without the owner, keeping bps, position and any lock, and publishes a `splits` event (#310); `withdraw_held_to(recipient, to)` pays a held balance to another address with a `wd_to` event carrying both (#311); `set_fee_recipient(Option<Address>)` (admin only) and `get_fee_recipient()` send protocol fees to a configurable address, defaulting to the admin, with a `fee_rcpt` event, and the fee self-transfer rule now compares the tipper with the fee recipient (#312). No new error codes
+- `scripts/upgrade.sh` uploads a wasm, checks its hash, confirms on mainnet, calls `upgrade`, verifies the deployed wasm and prints `version()` before and after (#294)
+- `scripts/recurring.sh` creates, shows, cancels and collects recurring tips, printing the token `approve` command and explaining `NotDue` with the next due ledger (#290)
+- `scripts/delete-jar.sh` prints a jar and its totals, requires typing the slug to confirm, deletes it and checks `jar_exists` (#288)
+- `scripts/rename-jar.sh` validates the new canonical slug, rejects a taken one and reads the jar back under its new id (#287)
 - Added admin-authorized `admin_recover_jar` for lost owner keys and the distinct `jar_recov` audit event. This can reassign any jar without old/new-owner consent; splits and jar flags are preserved. `version()` is now `9` (#52).
 - `tip_many(from, tips, token)` takes an optional `token` for the whole batch, checked against the allowlist like `tip_in_token`; the jar minimum applies only to the default token (#322). `TipRequest` gains `reference: Option<BytesN<32>>`, echoed in each entry's `tip` event (#318)
 - `get_allowed_tokens() -> Vec<Address>` lists the allowlist, default first, capped at `MAX_ALLOWED_TOKENS` (10) with the appended error `TooManyAllowedTokens` (40) (#321)
