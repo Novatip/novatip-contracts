@@ -10086,3 +10086,155 @@ fn default_token_only_jar_rejects_other_tokens() {
     );
     assert_eq!(eurc_client.balance(&alice), 100);
 }
+
+// ===========================================================================
+// #310 change_recipient, #311 withdraw_held_to, #312 fee recipient
+// ===========================================================================
+
+#[test]
+fn change_recipient_needs_only_old_and_keeps_bps_position_and_lock() {
+    let s = setup();
+    let env = &s.env;
+    let client = TipSplitterClient::new(env, &s.contract);
+    let (jar_id, alice, bob, _) = fee_jar(&s, "@chg_rcpt", 0);
+    client.lock_splits(&jar_id);
+    let carol = Address::generate(env);
+
+    client.change_recipient(&jar_id, &alice, &carol);
+    let auths = env.auths();
+    assert_eq!(auths.len(), 1);
+    assert_eq!(auths[0].0, alice);
+
+    let jar = client.get_jar(&jar_id);
+    let first = jar.splits.get(0).unwrap();
+    assert_eq!((first.to, first.bps), (carol, 7000));
+    let second = jar.splits.get(1).unwrap();
+    assert_eq!((second.to, second.bps), (bob, 3000));
+    assert!(client.is_splits_locked(&jar_id));
+}
+
+#[test]
+fn change_recipient_rejects_duplicate_invalid_and_non_recipient() {
+    let s = setup();
+    let env = &s.env;
+    let client = TipSplitterClient::new(env, &s.contract);
+    let (jar_id, alice, bob, _) = fee_jar(&s, "@chg_bad", 0);
+    let stranger = Address::generate(env);
+
+    assert_eq!(
+        client.try_change_recipient(&jar_id, &alice, &bob),
+        Err(Ok(Error::DuplicateRecipient.into()))
+    );
+    assert_eq!(
+        client.try_change_recipient(&jar_id, &alice, &s.contract),
+        Err(Ok(Error::InvalidRecipient.into()))
+    );
+    assert_eq!(
+        client.try_change_recipient(&jar_id, &alice, &s.token),
+        Err(Ok(Error::InvalidRecipient.into()))
+    );
+    assert_eq!(
+        client.try_change_recipient(&jar_id, &stranger, &Address::generate(env)),
+        Err(Ok(Error::NotRecipient.into()))
+    );
+}
+
+#[test]
+fn withdraw_held_to_pays_another_address_and_records_both() {
+    let s = setup_hostile();
+    let env = &s.env;
+    let client = TipSplitterClient::new(env, &s.contract);
+    let token = TestTokenClient::new(env, &s.token);
+    let owner = Address::generate(env);
+    let alice = Address::generate(env);
+    let bob = Address::generate(env);
+    let tipper = Address::generate(env);
+    let rescue = Address::generate(env);
+    token.mint(&tipper, &1_000);
+    let jar_id = String::from_str(env, "@held_to");
+    client.create_jar(
+        &owner,
+        &jar_id,
+        &vec![
+            env,
+            Split {
+                to: alice.clone(),
+                bps: 7000,
+            },
+            Split {
+                to: bob.clone(),
+                bps: 3000,
+            },
+        ],
+    );
+    token.block(&bob);
+    client.tip(&tipper, &jar_id, &100, &String::from_str(env, "hi"));
+    assert_eq!(client.get_held(&bob), 30);
+
+    assert_eq!(
+        client.try_withdraw_held_to(&bob, &s.contract),
+        Err(Ok(Error::InvalidRecipient.into()))
+    );
+    assert_eq!(
+        client.try_withdraw_held_to(&bob, &s.token),
+        Err(Ok(Error::InvalidRecipient.into()))
+    );
+
+    client.withdraw_held_to(&bob, &rescue);
+    let expected_topics = vec![
+        env,
+        symbol_short!("wd_to").into_val(env),
+        bob.clone().into_val(env),
+    ];
+    let evs: std::vec::Vec<_> = env
+        .events()
+        .all()
+        .iter()
+        .filter(|e| e.0 == s.contract && e.1 == expected_topics)
+        .collect();
+    assert_eq!(evs.len(), 1);
+    let decoded: HeldWithdrawnToEvent =
+        TryFromVal::try_from_val(env, &evs[0].2).expect("wd_to event data shape");
+    assert_eq!(decoded.amount, 30);
+    assert_eq!(decoded.to, rescue);
+    assert_eq!(token.balance(&rescue), 30);
+    assert_eq!(client.get_held(&bob), 0);
+    assert!(client.try_withdraw_held_to(&bob, &rescue).is_err());
+}
+
+#[test]
+fn fee_recipient_set_clear_and_self_transfer_rule() {
+    let s = setup();
+    let env = &s.env;
+    let client = TipSplitterClient::new(env, &s.contract);
+    let token = token::Client::new(env, &s.token);
+    let token_admin = token::StellarAssetClient::new(env, &s.token);
+    let (jar_id, _, _, tipper) = fee_jar(&s, "@fee_rcpt", 10_000);
+    let treasury = Address::generate(env);
+    client.set_fee_bps(&100);
+
+    assert_eq!(client.get_fee_recipient(), s.admin);
+    client.set_fee_recipient(&Some(treasury.clone()));
+    assert_eq!(client.get_fee_recipient(), treasury);
+    client.tip(&tipper, &jar_id, &10_000, &String::from_str(env, "fee"));
+    assert_eq!(token.balance(&treasury), 100);
+    assert_eq!(token.balance(&s.admin), 0);
+
+    // A tip from the fee recipient moves no fee.
+    token_admin.mint(&treasury, &10_000);
+    client.tip(&treasury, &jar_id, &10_000, &String::from_str(env, "own"));
+    assert_eq!(last_tip_event(env, &s.contract, &jar_id).fee, 0);
+    assert_eq!(token.balance(&treasury), 100);
+
+    // Clearing sends fees back to the admin.
+    client.set_fee_recipient(&None);
+    assert_eq!(client.get_fee_recipient(), s.admin);
+    token_admin.mint(&tipper, &10_000);
+    client.tip(&tipper, &jar_id, &10_000, &String::from_str(env, "back"));
+    assert_eq!(token.balance(&s.admin), 100);
+
+    assert_eq!(
+        client.try_set_fee_recipient(&Some(s.contract.clone())),
+        Err(Ok(Error::InvalidRecipient.into()))
+    );
+}

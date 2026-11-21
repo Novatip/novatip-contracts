@@ -1,0 +1,6 @@
+# Reviewers requested automatically for contract, workflow, script and
+# interface-doc changes (#308). Confirm the handle with a maintainer.
+/contracts/        @Novatip/maintainers
+/.github/          @Novatip/maintainers
+/scripts/          @Novatip/maintainers
+/docs/CONTRACT.md  @Novatip/maintainers
