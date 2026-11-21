@@ -239,3 +239,98 @@ fn leave_jar_preserves_minimum_and_enforces_it_after_redistribution() {
     assert_eq!(token.balance(&bob), 100);
     assert_eq!(client.get_jar_stats(&id).total, 100);
 }
+
+// #253: Fee currency, escrow currency and minimum policy must not cross assets.
+#[test]
+fn alternate_token_fee_is_paid_in_that_token_and_event_names_the_asset() {
+    let s = setup();
+    let env = &s.env;
+    let client = TipSplitterClient::new(env, &s.contract);
+    let other = second_asset(env, &s.admin);
+    let other_token = token::Client::new(env, &other);
+    let default_token = token::Client::new(env, &s.token);
+    let recipient = Address::generate(env);
+    let tipper = Address::generate(env);
+    token::StellarAssetClient::new(env, &other).mint(&tipper, &1_000);
+    client.allow_token(&other);
+    let jar = one_jar(env, &client, "@otherfee", &recipient);
+    client.set_fee_bps(&100);
+    client.tip_in_token(&tipper, &jar, &other, &500, &String::from_str(env, "fee"));
+    let event = last_tip_event(env, &s.contract, &jar);
+    assert_eq!(event.token, other);
+    assert_eq!(event.fee, 5);
+    assert_eq!(event.breakdown, vec![env, (recipient.clone(), 495_i128, false)]);
+    assert_eq!(other_token.balance(&recipient), 495);
+    assert_eq!(other_token.balance(&s.admin), 5);
+    assert_eq!(other_token.balance(&tipper), 500);
+    assert_eq!(default_token.balance(&recipient), 0);
+    assert_eq!(default_token.balance(&s.admin), 0);
+    assert_eq!(client.get_jar_stats(&jar), JarStats { tip_count: 1, total: 500 });
+}
+
+#[test]
+fn alternate_token_undeliverable_share_is_held_and_event_marks_it() {
+    let s = setup();
+    let env = &s.env;
+    let client = TipSplitterClient::new(env, &s.contract);
+    let other = env.register(TestToken, ());
+    let other_token = TestTokenClient::new(env, &other);
+    let alice = Address::generate(env);
+    let bob = Address::generate(env);
+    let tipper = Address::generate(env);
+    other_token.mint(&tipper, &1_000);
+    client.allow_token(&other);
+    let jar = String::from_str(env, "@otherheld");
+    client.create_jar(&Address::generate(env), &jar, &vec![
+        env, Split { to: alice.clone(), bps: 7000 },
+        Split { to: bob.clone(), bps: 3000 },
+    ]);
+    other_token.block(&bob);
+    client.tip_in_token(&tipper, &jar, &other, &100, &String::from_str(env, "held"));
+    let event = last_tip_event(env, &s.contract, &jar);
+    assert_eq!(event.token, other);
+    assert_eq!(event.breakdown, vec![
+        env, (alice.clone(), 70_i128, false), (bob.clone(), 30_i128, true)
+    ]);
+    assert_eq!(other_token.balance(&alice), 70);
+    assert_eq!(other_token.balance(&bob), 0);
+    assert_eq!(other_token.balance(&s.contract), 30);
+    assert_eq!(other_token.balance(&tipper), 900);
+    assert_eq!(client.get_held(&bob), 30);
+    assert_eq!(client.get_jar_stats(&jar), JarStats { tip_count: 1, total: 100 });
+    // Withdrawal is intentionally not tested until escrow is keyed per token:
+    // get_held is currently recipient-keyed and withdraw_held uses default token.
+}
+
+#[test]
+fn default_token_minimum_applies_only_to_default_and_stats_sum_raw_units() {
+    let s = setup();
+    let env = &s.env;
+    let client = TipSplitterClient::new(env, &s.contract);
+    let other = second_asset(env, &s.admin);
+    client.allow_token(&other);
+    let default_token = token::Client::new(env, &s.token);
+    let other_token = token::Client::new(env, &other);
+    let recipient = Address::generate(env);
+    let tipper = Address::generate(env);
+    token::StellarAssetClient::new(env, &s.token).mint(&tipper, &1_000);
+    token::StellarAssetClient::new(env, &other).mint(&tipper, &1_000);
+    let jar = one_jar(env, &client, "@mintoken", &recipient);
+    client.set_min_tip_amount(&jar, &Some(100));
+    assert_eq!(
+        client.try_tip_in_token(&tipper, &jar, &s.token, &99, &String::from_str(env, "low")),
+        Err(Ok(Error::BelowMinTipAmount.into()))
+    );
+    assert_eq!(default_token.balance(&tipper), 1_000);
+    client.tip_in_token(&tipper, &jar, &other, &50, &String::from_str(env, "other"));
+    assert_eq!(last_tip_event(env, &s.contract, &jar).token, other);
+    client.tip_in_token(&tipper, &jar, &s.token, &100, &String::from_str(env, "default"));
+    assert_eq!(last_tip_event(env, &s.contract, &jar).token, s.token);
+    assert_eq!(default_token.balance(&recipient), 100);
+    assert_eq!(other_token.balance(&recipient), 50);
+    assert_eq!(default_token.balance(&tipper), 900);
+    assert_eq!(other_token.balance(&tipper), 950);
+    // These stats are intentionally raw amounts from different currencies.
+    assert_eq!(client.get_jar_stats(&jar), JarStats { tip_count: 2, total: 150 });
+    assert_eq!(client.get_tip_count(), 2);
+}
