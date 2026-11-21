@@ -17,6 +17,9 @@
 //! `jar_crtd` event, and indexers reconstruct the full jar list by scanning
 //! those events. This keeps on-chain storage O(1) regardless of how many jars
 //! are ever registered.
+//!
+//! A worked call for every public function, including how to build the split
+//! vector for `create_jar`, is in the `examples` module (`cargo doc` only).
 
 use soroban_sdk::{
     contract, contractclient, contracterror, contractimpl, contracttype, panic_with_error,
@@ -2412,6 +2415,11 @@ impl TipSplitter {
     /// reports them, which is what keeps the quoted split and the paid split
     /// identical.
     ///
+    /// Example: `amount = 1_001` over `3_333 / 3_333 / 3_334` bps gives
+    /// `333`, `333` and `1_001 - 666 = 335`, which sums to `1_001`. Listing the
+    /// `3_334` entry first moves the extra unit to whoever is last, so order
+    /// matters. See "Splitting rules" in `docs/CONTRACT.md`.
+    ///
     /// Panics with `AmountZero` / `AmountNegative` if `amount` is not positive,
     /// `SplitAmountTooSmall` if it is small enough that some recipient's share
     /// would truncate to zero, and `AmountOverflow` if `amount * bps` overflows
@@ -2590,6 +2598,348 @@ impl TipSplitter {
             panic_with_error!(env, Error::SplitSumNot100Pct);
         }
     }
+}
+
+// Rendered by `cargo doc` only (`cfg(doc)`): the examples never reach the wasm
+// build, so they cannot grow `contractspecv0` or trip `check-doc-length.sh`
+// and `check-wasm-size.sh`. The blocks are fenced `ignore` and the crate sets
+// `doctest = false`, so `cargo test` never compiles them (#59).
+#[cfg(doc)]
+pub mod examples {
+    //! One example per public function of [`TipSplitter`](crate::TipSplitter).
+    //!
+    //! Every snippet uses the generated `TipSplitterClient` and the names
+    //! defined under "Setup". Amounts are `i128` token base units (USDC has 7
+    //! decimals, so `10_000_000` is 1 USDC). A snippet that panics on bad input
+    //! has a `try_` twin on the client that returns the typed `Error` instead.
+    //!
+    //! # Setup
+    //!
+    //! ```ignore
+    //! use soroban_sdk::{testutils::Address as _, vec, Address, BytesN, Env, String, Vec};
+    //! use tip_splitter::{Split, TipRequest, TipSplitter, TipSplitterClient};
+    //!
+    //! let env = Env::default();
+    //! env.mock_all_auths();
+    //! let admin = Address::generate(&env);
+    //! let token = env.register_stellar_asset_contract_v2(admin.clone()).address();
+    //! // The constructor runs at registration: `(admin, default_token)`.
+    //! let contract_id = env.register(TipSplitter, (admin.clone(), token.clone()));
+    //! let client = TipSplitterClient::new(&env, &contract_id);
+    //!
+    //! let alice = Address::generate(&env);
+    //! let bob = Address::generate(&env);
+    //! let supporter = Address::generate(&env);
+    //! let jar_id = String::from_str(&env, "@alice");
+    //! let note = String::from_str(&env, "thanks!");
+    //! ```
+    //!
+    //! # Building the split vector for `create_jar`
+    //!
+    //! A split is a `Split { to, bps }`: the recipient and their share in basis
+    //! points (`10_000` = 100%). The vector must hold 1 to 20 entries, every
+    //! `bps` must be in `1..=10_000`, the entries must sum to exactly `10_000`,
+    //! and no address may appear twice. Order is kept and it matters: the last
+    //! entry absorbs the rounding remainder of every tip (see "Splitting rules"
+    //! in `docs/CONTRACT.md`).
+    //!
+    //! ```ignore
+    //! let splits: Vec<Split> = vec![
+    //!     &env,
+    //!     Split { to: alice.clone(), bps: 7_000 }, // 70%
+    //!     Split { to: bob.clone(), bps: 3_000 },   // 30%, last: takes the remainder
+    //! ];
+    //! client.create_jar(&alice, &jar_id, &splits);
+    //! ```
+    //!
+    //! A single recipient is `vec![&env, Split { to: alice.clone(), bps: 10_000 }]`.
+    //! Outside a test, build the same vector from the caller's own `Env`; the
+    //! `Vec` is the SDK type, not `std::vec::Vec`.
+    //!
+    //! Tipping needs a funded supporter. In a test, mint with the asset admin:
+    //!
+    //! ```ignore
+    //! soroban_sdk::token::StellarAssetClient::new(&env, &token).mint(&supporter, &100_000_000);
+    //! ```
+    //!
+    //! # Setup and administration
+    //!
+    //! `__constructor(admin, token)` runs once, at deployment. It is not called
+    //! through the client; pass its arguments to `register` (or to
+    //! `stellar contract deploy -- --admin <ADDR> --token <ADDR>`).
+    //!
+    //! ```ignore
+    //! let contract_id = env.register(TipSplitter, (admin.clone(), token.clone()));
+    //! ```
+    //!
+    //! `allow_token(token)` (admin) adds a token that `tip_in_token` accepts.
+    //! `disallow_token(token)` (admin) removes one; the default token cannot be
+    //! removed.
+    //!
+    //! ```ignore
+    //! let other = env.register_stellar_asset_contract_v2(admin.clone()).address();
+    //! client.allow_token(&other);
+    //! assert!(client.is_token_allowed(&other));
+    //! client.disallow_token(&other);
+    //! ```
+    //!
+    //! `transfer_admin(new_admin)` (admin) hands the admin role over.
+    //!
+    //! ```ignore
+    //! client.transfer_admin(&bob);
+    //! assert_eq!(client.get_admin(), bob);
+    //! ```
+    //!
+    //! `pause()` and `resume()` (admin) stop and restart all tipping;
+    //! `is_paused()` reports the flag.
+    //!
+    //! ```ignore
+    //! client.pause();
+    //! assert!(client.is_paused());
+    //! client.resume();
+    //! ```
+    //!
+    //! `upgrade(new_wasm_hash)` (admin) swaps the contract code for an uploaded
+    //! wasm; `migrate()` (admin) then moves stored state to that build's schema
+    //! and is safe to call again.
+    //!
+    //! ```ignore
+    //! // `wasm` is the new build's bytes; the hash comes from uploading it.
+    //! let new_hash: BytesN<32> = env.deployer().upload_contract_wasm(wasm);
+    //! client.upgrade(&new_hash);
+    //! client.migrate();
+    //! ```
+    //!
+    //! `set_fee_bps(fee_bps)` (admin) sets the protocol fee in basis points
+    //! (`0..=500`); `get_fee_bps()` reads it.
+    //!
+    //! ```ignore
+    //! client.set_fee_bps(&100); // 1%, taken from each tip before the split
+    //! assert_eq!(client.get_fee_bps(), 100);
+    //! ```
+    //!
+    //! `set_tip_hook(hook)` and `set_registrar(registrar)` (admin) take an
+    //! `Option<Address>`: `Some` installs the contract, `None` clears it.
+    //! `get_tip_hook()` and `get_registrar()` read them back.
+    //!
+    //! ```ignore
+    //! client.set_tip_hook(&Some(hook_contract.clone()));
+    //! assert_eq!(client.get_tip_hook(), Some(hook_contract));
+    //! client.set_registrar(&None);
+    //! assert_eq!(client.get_registrar(), None);
+    //! ```
+    //!
+    //! # Creating and managing jars
+    //!
+    //! `create_jar(owner, jar_id, splits)`: `jar_id` is a slug, `@` followed by
+    //! 3 to 32 of `a-z`, `0-9`, `_`, `-`. The owner must authorize, and the
+    //! registrar too while one is set.
+    //!
+    //! ```ignore
+    //! let splits = vec![
+    //!     &env,
+    //!     Split { to: alice.clone(), bps: 5_000 },
+    //!     Split { to: bob.clone(), bps: 5_000 },
+    //! ];
+    //! client.create_jar(&alice, &jar_id, &splits);
+    //! ```
+    //!
+    //! `update_splits(jar_id, splits)` (owner) replaces the whole vector, which
+    //! is validated like `create_jar`'s. On a locked jar, every recipient whose
+    //! share drops or who is removed must also authorize.
+    //!
+    //! ```ignore
+    //! let new_splits = vec![
+    //!     &env,
+    //!     Split { to: alice.clone(), bps: 6_000 },
+    //!     Split { to: bob.clone(), bps: 4_000 },
+    //! ];
+    //! client.update_splits(&jar_id, &new_splits);
+    //! ```
+    //!
+    //! `lock_splits(jar_id)` (owner) arms the consent rule above;
+    //! `unlock_splits(jar_id)` needs the owner and every current recipient;
+    //! `is_splits_locked(jar_id)` reads the flag.
+    //!
+    //! ```ignore
+    //! client.lock_splits(&jar_id);
+    //! assert!(client.is_splits_locked(&jar_id));
+    //! client.unlock_splits(&jar_id);
+    //! ```
+    //!
+    //! `set_jar_paused(jar_id, paused)` (owner) pauses or resumes tipping into
+    //! one jar; `is_jar_paused(jar_id)` reads the flag.
+    //!
+    //! ```ignore
+    //! client.set_jar_paused(&jar_id, &true);
+    //! assert!(client.is_jar_paused(&jar_id));
+    //! ```
+    //!
+    //! `leave_jar(jar_id, recipient)`: a recipient removes themselves, and the
+    //! last remaining entry absorbs their share. A sole recipient cannot leave.
+    //!
+    //! ```ignore
+    //! client.leave_jar(&jar_id, &bob);
+    //! ```
+    //!
+    //! `transfer_jar_ownership(jar_id, new_owner)` needs the current owner and
+    //! the new owner to authorize.
+    //!
+    //! ```ignore
+    //! client.transfer_jar_ownership(&jar_id, &bob);
+    //! assert_eq!(client.get_jar_owner(&jar_id), bob);
+    //! ```
+    //!
+    //! `rename_jar(jar_id, new_jar_id)` (owner) moves a jar to a free slug.
+    //! `delete_jar(jar_id)` (owner) removes the jar and its settings.
+    //!
+    //! ```ignore
+    //! let renamed = String::from_str(&env, "@alice-music");
+    //! client.rename_jar(&jar_id, &renamed);
+    //! client.delete_jar(&renamed);
+    //! ```
+    //!
+    //! `set_min_tip_amount(jar_id, min_amount)` and
+    //! `set_max_tip_amount(jar_id, max_amount)` (owner) take an `Option<i128>`:
+    //! `Some(positive amount)` sets the bound, `None` clears it, and the minimum
+    //! may not exceed the maximum.
+    //!
+    //! ```ignore
+    //! client.set_min_tip_amount(&jar_id, &Some(100_000));
+    //! client.set_max_tip_amount(&jar_id, &Some(50_000_000));
+    //! client.set_min_tip_amount(&jar_id, &None);
+    //! ```
+    //!
+    //! # Tipping
+    //!
+    //! `tip(from, jar_id, amount, message)` splits `amount` across the jar's
+    //! recipients and returns the tip's sequence number. `from` authorizes.
+    //!
+    //! ```ignore
+    //! let seq: u64 = client.tip(&supporter, &jar_id, &10_000_000, &note);
+    //! ```
+    //!
+    //! `tip_with_ref(from, jar_id, amount, message, reference)` also echoes an
+    //! opaque 32-byte client reference in the `tip` event.
+    //!
+    //! ```ignore
+    //! let reference: BytesN<32> = BytesN::from_array(&env, &[7u8; 32]);
+    //! client.tip_with_ref(&supporter, &jar_id, &10_000_000, &note, &Some(reference));
+    //! ```
+    //!
+    //! `tip_in_token(from, jar_id, token, amount, message)` tips in an allowed
+    //! token other than the default.
+    //!
+    //! ```ignore
+    //! client.tip_in_token(&supporter, &jar_id, &other, &10_000_000, &note);
+    //! ```
+    //!
+    //! `tip_many(from, tips, token)` tips several jars in one all-or-nothing
+    //! call (1 to 10 entries). `token` is `None` for the default token.
+    //!
+    //! ```ignore
+    //! let tips = vec![
+    //!     &env,
+    //!     TipRequest {
+    //!         jar_id: jar_id.clone(),
+    //!         amount: 10_000_000,
+    //!         message: note.clone(),
+    //!         reference: None,
+    //!     },
+    //! ];
+    //! let seqs: Vec<u64> = client.tip_many(&supporter, &tips, &None);
+    //! ```
+    //!
+    //! `withdraw_held(recipient)` pays out a share that could not be delivered
+    //! at tip time; `get_held(recipient)` reports what is owed.
+    //!
+    //! ```ignore
+    //! if client.get_held(&bob) > 0 {
+    //!     client.withdraw_held(&bob);
+    //! }
+    //! ```
+    //!
+    //! # Recurring tips
+    //!
+    //! `create_recurring(supporter, jar_id, amount, period_ledgers, message)`
+    //! returns the schedule id. The supporter first approves the contract as a
+    //! spender of the token (`approve(from, spender, amount, expiration_ledger)`).
+    //!
+    //! ```ignore
+    //! let tok = soroban_sdk::token::Client::new(&env, &token);
+    //! tok.approve(&supporter, &contract_id, &50_000_000, &(env.ledger().sequence() + 100_000));
+    //! let id: u128 = client.create_recurring(&supporter, &jar_id, &1_000_000, &17_280, &note);
+    //! ```
+    //!
+    //! `update_recurring(id, amount, message)` (supporter) changes the amount and
+    //! message; `get_recurring(id)` reads the schedule; `cancel_recurring(caller,
+    //! id)` removes it.
+    //!
+    //! ```ignore
+    //! client.update_recurring(&id, &2_000_000, &note);
+    //! let schedule = client.get_recurring(&id); // Recurring { amount, next_due_ledger, .. }
+    //! client.cancel_recurring(&supporter, &id);
+    //! ```
+    //!
+    //! `collect_recurring(id)` is callable by anyone once the schedule is due; an
+    //! early call fails with `NotDue`.
+    //!
+    //! ```ignore
+    //! client.collect_recurring(&id);
+    //! ```
+    //!
+    //! # Reading jars and previews
+    //!
+    //! ```ignore
+    //! let jar = client.get_jar(&jar_id);                 // Jar { owner, splits, locked, paused }
+    //! let owner = client.get_jar_owner(&jar_id);
+    //! let n: u32 = client.get_split_count(&jar_id);
+    //! let exists: bool = client.jar_exists(&jar_id);
+    //! let listed: bool = client.is_recipient(&jar_id, &bob);
+    //! let info = client.get_jar_info(&jar_id);           // owner, splits, limits and totals in one call
+    //! ```
+    //!
+    //! `preview_split(jar_id, amount)` returns one share per recipient, in split
+    //! order, from the same code `tip` pays with. For a jar created with the 70/30
+    //! split vector from the section above:
+    //!
+    //! ```ignore
+    //! let shares: Vec<i128> = client.preview_split(&jar_id, &101);
+    //! assert_eq!(shares, vec![&env, 70, 31]); // the last entry takes the remainder
+    //! ```
+    //!
+    //! `preview_split_details(jar_id, amount)` pairs each share with its
+    //! recipient. `preview_tip(jar_id, from, amount)` reports what a given
+    //! sender actually moves: their own entry is `0`.
+    //!
+    //! ```ignore
+    //! let details = client.preview_split_details(&jar_id, &101); // [PreviewSplit { to, amount }, ..]
+    //! let paid = client.preview_tip(&jar_id, &bob, &101);        // bob tips: [70, 0]
+    //! ```
+    //!
+    //! `get_min_tip_amount(jar_id)` and `get_max_tip_amount(jar_id)` read the
+    //! owner's bounds (`None` when unset). `get_min_accepted_tip(jar_id)` is the
+    //! smallest amount the jar accepts at all, after the fee and the minimum.
+    //!
+    //! ```ignore
+    //! let floor: i128 = client.get_min_accepted_tip(&jar_id); // 4 for that 70/30 jar, no fee
+    //! let min: Option<i128> = client.get_min_tip_amount(&jar_id);
+    //! let max: Option<i128> = client.get_max_tip_amount(&jar_id);
+    //! ```
+    //!
+    //! # Totals and contract-wide reads
+    //!
+    //! ```ignore
+    //! let stats = client.get_jar_stats(&jar_id);                        // JarStats { tip_count, total }
+    //! let mine = client.get_supporter_stats(&jar_id, &supporter);       // SupporterStats { tip_count, total }
+    //! let count: u64 = client.get_tip_count();
+    //! let v: u32 = client.version();                                    // INTERFACE_VERSION
+    //! let tokens: Vec<Address> = client.get_allowed_tokens();           // default token first
+    //! let ok: bool = client.is_token_allowed(&token);
+    //! let admin_now: Address = client.get_admin();
+    //! let default_token: Address = client.get_token();
+    //! let limits = client.get_limits();                                 // max_recipients, max_batch_tips, ..
+    //! ```
 }
 
 mod test;
