@@ -27,15 +27,14 @@ jobs:
         run: shellcheck scripts/*.sh scripts/lib/*.sh
 
   # The Stellar CLI does not ship with the plain-rust CI above, so this job
-  # The Stellar CLI does not ship with the plain-rust CI below, so this job
-  # installs a pinned version — deliberately the release line matching the
-  # soroban-sdk the contract builds against — and checks that
-  # docs/CONTRACT.md's function and error tables match the built interface.
-  # Bump STELLAR_VERSION together with a soroban-sdk major.
+  # installs a pinned version — the minimum version required by the scripts,
+  # read from scripts/lib/cli.sh — and checks that docs/CONTRACT.md's function
+  # and error tables match the built interface. Keep STELLAR_VERSION in sync
+  # with MIN_STELLAR_CLI_VERSION in scripts/lib/cli.sh.
   docs-check:
     runs-on: ubuntu-latest
     env:
-      STELLAR_VERSION: 22.0.0
+      STELLAR_VERSION: 27.1.0
     steps:
       - uses: actions/checkout@v4
 
@@ -78,7 +77,7 @@ jobs:
   build-test:
     runs-on: ubuntu-latest
     env:
-      STELLAR_VERSION: 22.0.0
+      STELLAR_VERSION: 27.1.0
     steps:
       - uses: actions/checkout@v4
 

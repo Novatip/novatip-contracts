@@ -23,9 +23,6 @@ set -euo pipefail
 #                  resume | adm_xfer | upgrade | all (default: all)
 #   SLUG           jar id to filter on, e.g. "@demo". Ignored for admin events,
 #                  which have no jar id topic. Unset lists every jar.
-#   EVENT          one of jar_crtd | splits | jar_xfer | jar_del | min_tip | tip | all
-#                  (default: all)
-#   SLUG           jar id to filter on, e.g. "@demo". Unset lists every jar.
 #   START_LEDGER   first ledger to scan. Default: WINDOW ledgers before the
 #                  network's current ledger.
 #   END_LEDGER     last ledger to scan. Default: the current ledger.
@@ -80,7 +77,6 @@ is_jar_event() {
   return 1
 }
 
-VALID_EVENTS=(jar_crtd splits jar_xfer jar_del min_tip tip)
 if [ "${EVENT}" != "all" ]; then
   ok=0
   for e in "${VALID_EVENTS[@]}"; do
