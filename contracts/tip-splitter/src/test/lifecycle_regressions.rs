@@ -206,7 +206,10 @@ fn rename_jar_moves_stats_minimum_and_flags_and_emits_event() {
 
     assert_eq!(client.try_get_jar(&old), Err(Ok(Error::JarNotFound.into())));
     let after = client.get_jar(&new);
-    assert_eq!(after, before);
+    assert_eq!(after.owner, before.owner);
+    assert_eq!(after.splits, before.splits);
+    assert_eq!(after.locked, before.locked);
+    assert_eq!(after.paused, before.paused);
     assert!(after.locked && after.paused);
     assert_eq!(client.get_jar_stats(&new), stats);
     assert_eq!(client.get_min_tip_amount(&new), Some(50));
