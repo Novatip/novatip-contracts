@@ -72,6 +72,34 @@ set -a; source .env; set +a
 `set-min-tip.sh` reads the value back afterwards, since the CLI prints nothing
 on success and clearing a jar that already had no floor is a silent no-op.
 
+### Create and read a multi-recipient jar on testnet
+
+This example uses the currently deployed testnet contract, which supports
+`create_jar` and `get_jar`. Use a funded testnet identity, choose a jar slug
+that is not already taken, and replace the two recipient addresses with valid
+testnet accounts. The recipient shares must add up to exactly 10,000 basis
+points (100%): Alice receives 65% and Bob receives 35%.
+
+```bash
+CONTRACT_ID=CCKPD2MPAYQYCL7QJKUMJHTEJWNHSIP7BZYIZBRO3C4DM4VHZKL6VBRL
+SOURCE=your-funded-testnet-identity
+OWNER=$(stellar keys address "$SOURCE")
+ALICE=G... # replace with Alice's testnet address
+BOB=G...   # replace with Bob's testnet address
+SLUG=@multi-split-demo # choose an unused slug
+SPLITS="[{\"to\":\"$ALICE\",\"bps\":6500},{\"to\":\"$BOB\",\"bps\":3500}]"
+
+stellar contract invoke --id "$CONTRACT_ID" --source "$SOURCE" --network testnet -- \
+  create_jar --owner "$OWNER" --jar_id "$SLUG" --splits "$SPLITS"
+
+stellar contract invoke --id "$CONTRACT_ID" --source "$SOURCE" --network testnet -- \
+  get_jar --jar_id "$SLUG"
+```
+
+The read returns the stored owner and two splits in order: Alice at `6500` bps
+and Bob at `3500` bps, with `locked: false` and `paused: false` for a newly
+created jar. The contract validates the 10,000-bps total when creating the jar.
+
 ## Tech
 
 - [Rust](https://www.rust-lang.org/) + [Soroban SDK](https://developers.stellar.org/docs/build/smart-contracts)

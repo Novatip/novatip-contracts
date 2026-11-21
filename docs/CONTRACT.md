@@ -31,6 +31,42 @@ withdrawal.
   match the on-chain event back to whatever it created off-chain. Never stored
   and never checked by the contract.
 
+## Storage keys and lifetimes
+
+`DataKey` is the complete set of contract storage keys. Persistent entries have
+their own TTL: jar-related paths extend an entry to `JAR_TTL_LEDGERS` (1,000,000
+ledgers) when it falls below `JAR_TTL_THRESHOLD` (500,000). Instance entries
+share one contract-instance TTL; `create_jar` and a successful tip extend the
+instance to the same target. An archived entry must be restored before it can
+be read or written again. Instance entries archive together, while persistent
+entries archive independently.
+
+| `DataKey` variant | Storage | Writers | Readers | TTL extension | After archival |
+|------------------|---------|---------|---------|---------------|-----------------|
+| `Admin` | Instance | `__constructor`, `transfer_admin` | `get_admin`, `require_admin` and every admin-only function | With the shared instance TTL | Restore the contract instance before admin-gated calls can read it. |
+| `Token` | Instance | `__constructor` | `get_token`, default-token tip and recurring paths | With the shared instance TTL | Restore the contract instance; there is no token setter. |
+| `Jar(jar_id)` | Persistent | `create_jar`, `store_jar` used by owner, split, pause, lock and recovery changes | `load_jar`, jar reads, tips and recurring operations | `store_jar` and `load_jar` extend the jar | Restore to make the jar available again; event history remains available for reconstruction. |
+| `MinTip(jar_id)` | Persistent | `set_min_tip_amount`, clear, and `rename_jar` | Tip validation, previews and minimum-tip reads | Set/clear, minimum reads, and `load_jar` renew it alongside the jar | Restore it to recover the configured floor; a never-set floor is `None`. |
+| `Held(recipient)` | Persistent | `pay_out` when a recipient cannot receive a share | `get_held`, `withdraw_held` | A new held credit and positive `get_held` reads extend it | Restore to withdraw the balance; the event log alone cannot recreate a spendable held balance. |
+| `Recurring(id)` | Persistent | `create_recurring`, `update_recurring`, `collect_recurring` | `get_recurring`, `cancel_recurring`, `update_recurring`, `collect_recurring` | Creation, update, read and collection extend it | Restore the schedule; otherwise collection reports `RecurringNotFound`. |
+| `RecurringCount` | Persistent | `create_recurring` | `create_recurring` | Extended when a schedule is created | Restore the counter to preserve the next id; an absent counter is read as zero. |
+| `Stats(jar_id)` | Persistent | Successful tips through `bump_totals`; `rename_jar` moves an existing entry | `get_jar_stats`, combined jar info | A successful tip and a positive stats read extend it | Restore to recover totals; if no stats entry has ever been written, the getter returns zero totals. |
+| `Supporter(jar_id, supporter)` | Persistent | Successful tips through `bump_totals` | `get_supporter_stats` | A successful tip and a positive stats read extend it | Restore to recover totals; a never-written entry reads as zero totals. |
+| `AllowedToken(token)` | Instance | `__constructor`, `allow_token`, `disallow_token` | `is_token_allowed`, `tip_in_token` | With the shared instance TTL | Restoring the contract instance restores the allowlist; the default token is initially allowed. |
+| `TipCount` | Instance | Successful tip settlement | Sequence assignment and `get_tip_count` | With the shared instance TTL | Restore the instance to preserve the sequence counter. |
+| `TipHook` | Instance | `set_tip_hook` | `get_tip_hook` and successful tip settlement | With the shared instance TTL | Restore the instance; an absent hook means no hook is configured. |
+| `Registrar` | Instance | `set_registrar` | `get_registrar` and `create_jar` | With the shared instance TTL | Restore the instance; an absent registrar means no co-signature is required. |
+| `Paused` | Instance | `pause`, removed by `resume` | `is_paused` and tip entry points | With the shared instance TTL | Restore the instance; absent pause state means the contract is not paused. |
+| `FeeBps` | Instance | `set_fee_bps` | `get_fee_bps` and tip settlement | With the shared instance TTL | Restore the instance; absent fee state defaults to zero. |
+| `WasmHash` | Instance | Successful `upgrade` | The next `upgrade` event | With the shared instance TTL | Restore the instance; absent history is reported as `previous_hash: None`. |
+| `MaxTip(jar_id)` | Persistent | `set_max_tip_amount`, clear, and `rename_jar` | Tip validation, previews and maximum-tip reads | Set/read and tip paths extend the entry | Restore to recover the cap; a never-set maximum is `None`. |
+| `AllowedTokens` | Instance | `__constructor`, `allow_token`, `disallow_token` | `get_allowed_tokens` | With the shared instance TTL | Restore the instance; older deployments without the list fall back to the default token. |
+| `SchemaVersion` | Instance | `migrate` | `migrate` | With the shared instance TTL | Restore the instance; an absent version is treated as zero so migration can run. |
+
+Deleting a jar explicitly removes its `Jar`, `Stats`, `MinTip` and `MaxTip`
+entries. `Supporter`, `Held`, recurring schedules, and contract-wide counters
+have independent keys and are not removed by `delete_jar`.
+
 ## Limits
 
 Quick reference for bounds enforced by the contract:
@@ -97,6 +133,7 @@ one belongs to a jar, the other to a `(jar, supporter)` pair.
 | `set_max_tip_amount(jar_id, max_amount)` | jar `owner` | Set or clear an optional maximum tip amount for a jar (#323). `max_amount` must be positive and no lower than the jar's minimum (`InvalidMaximumAmount`), or `None` to clear. Tips in the default token and previews above it are rejected with `AboveMaxTipAmount`. Emits a `max_tip` event with `MaxTipEvent { version, amount }` data. |
 | `get_max_tip_amount(jar_id) -> Option<i128>` | — | Read a jar's optional maximum tip amount. Panics with `JarNotFound` if the slug is free. |
 | `transfer_jar_ownership(jar_id, new_owner)` | current jar `owner` and `new_owner` | Hand control of a jar to `new_owner`. The exact `(jar_id, new_owner)` pair must be signed by both parties; a transfer to the current owner is rejected. Splits are unchanged. Emits a `jar_xfer` event carrying both owners. |
+| `admin_recover_jar(jar_id, new_owner)` | contract admin | Reassign a jar whose owner key is lost. No owner signature is required; shares and jar flags are preserved. Emits `jar_recov`. |
 | `delete_jar(jar_id)` | current jar `owner` | Delete a registered jar and free its slug so it can be recreated. Removes the jar, its stats, and any minimum-tip value for that slug. Emits a `jar_del` event with the jar id as a topic. |
 | `rename_jar(jar_id, new_jar_id)` | jar `owner` | Move a jar, its stats and its minimum to a new slug. The old slug stops resolving immediately; `new_jar_id` must be free and pass the same length checks as `create_jar`. Emits a `jar_rnm` event with the old jar id as a topic and `JarRenamedEvent { version, jar_id, new_jar_id }` data. |
 | `tip(from, jar_id, amount, message)` | `from` | Move `amount` USDC out of `from` and route it across the jar's recipients. A recipient who cannot receive the token has their share **escrowed in the contract** (see `get_held`/`withdraw_held`) instead of reverting the tip. Emits a `tip` event carrying the per-recipient breakdown. Rejects amounts below the jar's minimum with `BelowMinTipAmount`. |
@@ -163,6 +200,7 @@ written as raised only when every earlier check has passed.
 | `update_splits(jar_id, splits)` | jar `owner` | `JarNotFound` → `SplitsEmpty` → `TooManyRecipients` → `SplitOutOfRange` / `DuplicateRecipient` (per entry) → `SplitSumNot100Pct` | Replace a jar's splits. Subject to the same validation as `create_jar`. Emits a `splits` event. |
 | `set_min_tip_amount(jar_id, min_amount)` | jar `owner` | `JarNotFound` → `InvalidMinimumAmount` | Set or clear an optional minimum tip amount for a jar. `min_amount` must be strictly positive (`> 0`) or `None` to clear. Emits a `min_tip` event. |
 | `transfer_jar_ownership(jar_id, new_owner)` | current jar `owner` and `new_owner` | `JarNotFound` → `InvalidRecipient` (new owner is the current owner, the contract itself, or the token) | Hand control of a jar to `new_owner`. The exact `(jar_id, new_owner)` pair is signed by both owners. Splits are unchanged. Emits a `jar_xfer` event carrying both owners. |
+| `admin_recover_jar(jar_id, new_owner)` | contract admin | `JarNotFound` → `InvalidRecipient` (new owner is current owner, contract, or token) | Reassign a jar after owner-key loss. Preserves splits and flags; emits `jar_recov`. |
 | `delete_jar(jar_id)` | current jar `owner` | `JarNotFound` | Delete a registered jar and free its slug for reuse. Removes the jar, its stats, and the associated minimum-tip value. Emits a `jar_del` event with the jar id as a topic. |
 | `rename_jar(jar_id, new_jar_id)` | jar `owner` | `InvalidJarId` (new id not a canonical `@`-prefixed `[a-z0-9_-]{3,32}` slug) → `JarNotFound` → `JarIdInUse` | Move a jar, its stats and its minimum to `new_jar_id`. The old id stops resolving once the move is complete. Emits a `jar_rnm` event with the old jar id as a topic and `JarRenamedEvent { version, jar_id, new_jar_id }` data. |
 | `tip(from, jar_id, amount, message)` | `from` | `ContractPaused` → `NotInitialized` → `AmountZero` (amount = 0) / `AmountNegative` (amount < 0) → `MessageTooLong` → `JarNotFound` → `JarPaused` → `BelowMinTipAmount` → `InsufficientBalance` → `SplitAmountTooSmall` (a share truncates to zero) / `AmountOverflow` (`amount * bps` overflows `i128`) | Transfer `amount` USDC from `from`, split across the jar's recipients. Emits a `tip` event carrying the per-recipient breakdown. Rejects amounts below the jar's minimum with `BelowMinTipAmount` and amounts that cannot pay every recipient with `SplitAmountTooSmall`; see [the smallest amount a jar accepts](#the-smallest-amount-a-jar-accepts-86). A failing token `transfer` reverts the whole call with the **token contract's own error**, not one of this contract's codes (e.g. an insufficient balance). |
@@ -332,6 +370,18 @@ budget and fail with an opaque wasm trap. `MAX_BATCH_TIPS * MAX_RECIPIENTS`
 keeps the worst case at 200 transfers, the same order of magnitude as a single
 maximum-size jar. Exceeding the bound is `BatchTooLarge`; an empty batch is
 `BatchEmpty`.
+
+### Preparing and debugging a batch
+
+Before asking the supporter to sign a batch:
+
+1. Read `get_limits().max_batch_tips`; submit between 1 and that number of entries (currently at most 10).
+2. Check `is_paused()` and, when a non-default `token` is supplied, check `is_token_allowed(token)`. One token applies to the whole batch.
+3. For each entry, check `jar_exists(jar_id)`, `is_jar_paused(jar_id)`, the amount, and the message length against `get_limits().max_message_len` (280 bytes).
+4. Call `preview_tip(jar_id, from, amount)` for every entry to catch per-jar minimum, split, and arithmetic failures. Each entry is settled like a standalone tip and incurs its own protocol fee.
+5. Simulate the exact complete `tip_many` call with the intended sender, token, amounts, and messages before requesting authorization. Per-entry previews do not validate the combined call's authorization or total available balance.
+
+If a batch simulation fails, the contract error does not identify which entry failed. Simulate entries individually, or divide the batch into smaller subsets, using the same sender and token; remove or correct the rejected entry, then simulate the complete batch again. Because execution is all-or-nothing, no entry succeeds until the full batch succeeds.
 
 ### Reading just the owner
 
@@ -777,6 +827,7 @@ Consequences a client has to design for:
 | `create_jar(owner, jar_id, splits)` | `owner` | The contract call only. No token moves. |
 | `update_splits(jar_id, splits)` | the jar's current `owner` | The contract call only. |
 | `transfer_jar_ownership(jar_id, new_owner)` | the jar's current `owner` and `new_owner` | The exact `(jar_id, new_owner)` transfer pair, signed by both parties. |
+| `admin_recover_jar(jar_id, new_owner)` | the contract admin | The admin authorizes reassignment; neither old nor new owner signs. Splits and flags are preserved. |
 | `delete_jar(jar_id)` | the jar's current `owner` | The contract call only. |
 | `set_min_tip_amount(jar_id, min_amount)` | the jar's current `owner` | The contract call only. |
 | `set_jar_paused(jar_id, paused)` | the jar's current `owner` | The contract call only. No token moves. |
@@ -797,7 +848,7 @@ slug names at submission time.
 ### Admin-only functions
 
 A single address — recorded at deploy time and readable through `get_admin()` —
-authorizes the contract's configuration entry points. All of them go through the
+authorizes the contract's configuration and explicitly listed recovery entry points. All of them go through the
 same `require_admin` helper, which loads the stored address and demands its
 signature, so the table below is exhaustive: an entry point that is not in it
 does not check the admin.
@@ -813,15 +864,24 @@ does not check the admin.
 | `pause()` / `resume()` | Stop and restart `tip`, `tip_with_ref` and `tip_in_token`. |
 | `upgrade(new_wasm_hash)` | Replace the running Wasm, keeping the address and all stored state. |
 | `migrate()` | Run the stored-state migration for the installed build, once per schema version. |
+| `admin_recover_jar(jar_id, new_owner)` | Reassign ownership of an existing jar after its owner key is lost, preserving its splits, lock, and pause state. |
 
-The powers are configuration, not custody. The admin **cannot**:
+Recovery is a powerful exception to owner-controlled custody. `admin_recover_jar`
+requires only the admin's authorization; neither the previous owner nor the new
+owner needs to sign, and there is no delay or co-signature. The admin can
+reassign any existing jar, including an active one. This does not move funds or
+change the recipients, but the new owner controls the jar after reassignment.
+The `jar_recov` event provides an audit record; it does not prevent abuse.
+Operators must therefore protect and govern the admin key as a root authority.
+
+The admin **cannot**:
 
 - move a jar's funds. Nothing can: tips go straight from the tipper to the
   recipients in the same invocation. There is no sweep, no withdraw-all, and
   `withdraw_held` pays only the address it names.
-- edit a jar it does not own. Splits, minimum, ownership, lock and pause state
-  are gated on the jar's owner — plus each affected recipient for a reduction on
-  a locked jar — regardless of who holds the admin key.
+- edit a jar's splits, minimum, lock or pause state without its owner. The
+  explicit `admin_recover_jar` exception changes only ownership; plus each
+  affected recipient is required for a reduction on a locked jar.
 - repoint the settlement token. `DataKey::Token` is written exactly once, in
   `__constructor`, and there is no setter, so `get_token()` is immutable after
   deploy. The admin may add other assets to the allowlist, but `tip` always
@@ -980,6 +1040,14 @@ read window created by a second update racing with a follow-up `get_jar` call.
 
 - **Topics:** `(symbol "jar_xfer", jar_id: String)`
 - **Data:** `JarTransferredEvent { previous_owner: Address, new_owner: Address }`
+
+### `jar_recov` — published on every successful `admin_recover_jar`
+
+- **Topics:** `(symbol "jar_recov", jar_id: String)`
+- **Data:** `JarAdminRecoveredEvent { version: u32, admin: Address, previous_owner: Address, new_owner: Address }`
+
+This event is distinct from the mutually authorized `jar_xfer` handoff. It
+records the admin-authorized recovery and both owners for monitoring and audit.
 
 Lets an indexer update who controls a jar without re-polling `get_jar` for
 every jar on a schedule.
@@ -1587,7 +1655,7 @@ changes. Do not bump it for an internal refactor, a new storage key, or a doc
 edit — none of those are visible to a consumer, and a version that changes when
 nothing observable did is a version consumers stop trusting.
 
-This build ships `version() == 8`. Version 8 adds `update_recurring`, `get_jar_info` and the `recr_upd` event, gives `recr_add` a `RecurringAddedEvent` payload with the jar in its topics, and adds `min_jar_id_len` and `max_fee_bps` to `get_limits`. Version 7 gives every admin event one shape
+This build ships `version() == 9`. Version 9 adds admin-only `admin_recover_jar` and the distinct `jar_recov` event. Version 8 adds `update_recurring`, `get_jar_info` and the `recr_upd` event, gives `recr_add` a `RecurringAddedEvent` payload with the jar in its topics, and adds `min_jar_id_len` and `max_fee_bps` to `get_limits`. Version 7 gives every admin event one shape
 (name-only topic, versioned data struct with `version` and `admin`), turns
 `lock`, `jar_pause`, `withdraw`, `adm_xfer` and `jar_rnm` into named, versioned
 structs, adds the jar id to the `jar_del` and `jar_rnm` topics, and adds
