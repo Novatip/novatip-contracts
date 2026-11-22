@@ -614,7 +614,14 @@ fn error_codes_are_pinned_to_the_public_interface() {
         (Error::BatchEmpty, 37),
         (Error::BatchTooLarge, 38),
         (Error::JarPaused, 39),
-        (Error::NotAuthorized, 40),
+        (Error::TooManyAllowedTokens, 40),
+        (Error::AboveMaxTipAmount, 41),
+        (Error::InvalidMaximumAmount, 42),
+        (Error::NonDefaultToken, 43),
+        (Error::NotAuthorized, 44),
+        (Error::SameOwner, 45),
+        (Error::RemovalNotRequested, 46),
+        (Error::RemovalNotReady, 47),
     ];
 
     for (variant, expected) in codes {
@@ -1268,7 +1275,6 @@ fn assert_tip_settles_once_despite_hook(
 }
 
 #[test]
-fn withdraw_held_to_pays_another_address_and_records_both() {
 fn hostile_hooks_panic_error_and_reentry_do_not_disrupt_tip() {
     // (a) Hook that panics.
     {

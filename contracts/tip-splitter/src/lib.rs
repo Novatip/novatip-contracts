@@ -42,12 +42,6 @@ const MAX_BATCH_TIPS: u32 = 10;
 /// Most tokens the allowlist may hold, the default token included (#321).
 /// Bounds the `Vec` that `get_allowed_tokens` returns.
 const MAX_ALLOWED_TOKENS: u32 = 10;
-/// Longest `jar_id`, in bytes, accepted by `create_jar`.
-///
-/// The id is used as a storage key, an event topic, and a public URL slug, so
-/// an unbounded id costs unnecessary rent and can produce jars no frontend can
-/// address.
-const MAX_JAR_ID_LEN: u32 = 64;
 /// Shortest slug body, excluding the leading `@`. Mirrors `novatip-backend`'s
 /// `SLUG_REGEX`, so every id a tip page can produce is accepted here.
 const MIN_JAR_SLUG_LEN: u32 = 3;
@@ -326,7 +320,26 @@ pub enum DataKey {
     /// Optional fee recipient set by the admin (#312). Instance storage;
     /// absence means fees go to the admin.
     FeeRecipient,
+    /// Pending removal of an unreachable recipient from a jar (#239), keyed by
+    /// the jar's public slug. Persistent; at most one per jar.
+    PendingRemoval(String),
 }
+
+/// A recipient removal announced by the jar owner (#239). It is only
+/// executable while the jar's splits still equal `splits`, so any change to
+/// the recipients (an update, a departure, a replacement) voids it.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PendingRemoval {
+    pub recipient: Address,
+    pub ready_ledger: u32,
+    pub splits: Vec<Split>,
+}
+
+/// Ledgers between announcing a recipient's removal and being able to execute
+/// it (#239): about seven days at 5 seconds per ledger. Long enough for a
+/// reachable recipient to notice the `rm_req` event and cancel.
+const RECIPIENT_REMOVAL_DELAY_LEDGERS: u32 = 120_960;
 
 #[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
@@ -336,6 +349,10 @@ pub enum Error {
     JarExists = 2,
     JarNotFound = 3,
     InvalidSplits = 4,
+    /// **Retired; never raised.** Kept so existing codes keep their values.
+    /// Amount validation now reports the specific failure: `AmountZero` (25),
+    /// `AmountNegative` (26), `SplitAmountTooSmall` (27), `AmountOverflow` (28)
+    /// or `InvalidMinimumAmount` (29).
     InvalidAmount = 5,
     TooManyRecipients = 6,
     DuplicateRecipient = 7,
@@ -380,6 +397,18 @@ pub enum Error {
     /// The allowlist or constructor was given an address that is not a SAC.
     InvalidToken = 44,
     NotAuthorized = 40,
+    /// `cancel_recurring` was called by neither the supporter nor the jar
+    /// owner (#324). Appended after 43; it previously collided with 40.
+    NotAuthorized = 44,
+    /// `transfer_jar_ownership` named the jar's current owner as the new owner,
+    /// a no-op handoff. Appended, never renumbered.
+    SameOwner = 45,
+    /// `execute_recipient_removal` found no pending removal request for the
+    /// jar, or the jar's splits changed since the request was announced.
+    RemovalNotRequested = 46,
+    /// `execute_recipient_removal` was called before the announced delay
+    /// (`RECIPIENT_REMOVAL_DELAY_LEDGERS`) elapsed.
+    RemovalNotReady = 47,
 }
 
 #[contractclient(name = "TipHookClient")]
@@ -403,6 +432,24 @@ pub struct SplitsUpdatedEvent {
     pub version: u32,
     pub count: u32,
     pub splits: Vec<Split>,
+}
+
+// Data published by `rm_req` (#239). Topics: `("rm_req", jar_id)`.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RemovalRequestedEvent {
+    pub version: u32,
+    pub recipient: Address,
+    pub ready_ledger: u32,
+}
+
+// Data published by `rm_cancel` (#239). Topics: `("rm_cancel", jar_id)`.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RemovalCancelledEvent {
+    pub version: u32,
+    pub recipient: Address,
+    pub caller: Address,
 }
 
 #[contracttype]
@@ -587,6 +634,8 @@ pub struct MigratedEvent {
     pub admin: Address,
     pub from_version: u32,
     pub to_version: u32,
+}
+
 // Data published by `recr_add` (#317). Topics: `("recr_add", supporter, jar_id)`.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -732,7 +781,7 @@ impl TipSplitter {
     /// cheap enough to run before the storage lookup.
     fn is_valid_jar_id(jar_id: &String) -> bool {
         let len = jar_id.len();
-        if len > MAX_JAR_ID_LEN || !(MIN_JAR_SLUG_LEN + 1..=MAX_JAR_SLUG_LEN + 1).contains(&len) {
+        if !(MIN_JAR_SLUG_LEN + 1..=MAX_JAR_SLUG_LEN + 1).contains(&len) {
             return false;
         }
         let mut buf = [0u8; (MAX_JAR_SLUG_LEN + 1) as usize];
@@ -921,6 +970,10 @@ impl TipSplitter {
         );
     }
 
+    /// Remove the lock. Needs the owner and **every** current recipient, so a
+    /// recipient who has lost their key (or is a contract that cannot sign)
+    /// blocks it; such a jar recovers through `request_recipient_removal`
+    /// instead, which keeps the lock in place (#239).
     pub fn unlock_splits(env: Env, jar_id: String) {
         let jar = Self::load_jar(&env, &jar_id);
         jar.owner.require_auth();
@@ -947,6 +1000,134 @@ impl TipSplitter {
             JarLockEvent {
                 version: 1,
                 locked: false,
+            },
+        );
+    }
+
+    /// Announce the removal of a recipient who cannot sign (#239). Owner only.
+    ///
+    /// This is the recovery path for a locked jar. It cannot cut a reachable
+    /// recipient unilaterally: the removal only becomes executable
+    /// `RECIPIENT_REMOVAL_DELAY_LEDGERS` after this call, the `rm_req` event
+    /// announces it, and the recipient (or the owner) can cancel at any time
+    /// with `cancel_recipient_removal`. One request per jar; a new one replaces
+    /// the old and restarts the delay.
+    pub fn request_recipient_removal(env: Env, jar_id: String, recipient: Address) {
+        let jar = Self::load_jar(&env, &jar_id);
+        jar.owner.require_auth();
+        if jar.splits.len() == 1 {
+            panic_with_error!(&env, Error::SoleRecipient);
+        }
+        if !jar.splits.iter().any(|s| s.to == recipient) {
+            panic_with_error!(&env, Error::NotRecipient);
+        }
+        let ready_ledger = env
+            .ledger()
+            .sequence()
+            .saturating_add(RECIPIENT_REMOVAL_DELAY_LEDGERS);
+        let key = DataKey::PendingRemoval(jar_id.clone());
+        env.storage().persistent().set(
+            &key,
+            &PendingRemoval {
+                recipient: recipient.clone(),
+                ready_ledger,
+                splits: jar.splits,
+            },
+        );
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, JAR_TTL_THRESHOLD, JAR_TTL_LEDGERS);
+        env.events().publish(
+            (symbol_short!("rm_req"), jar_id),
+            RemovalRequestedEvent {
+                version: 1,
+                recipient,
+                ready_ledger,
+            },
+        );
+    }
+
+    /// Cancel a pending removal (#239). `caller` is the recipient it names, who
+    /// vetoes it by signing, or the jar owner.
+    pub fn cancel_recipient_removal(env: Env, jar_id: String, caller: Address) {
+        let key = DataKey::PendingRemoval(jar_id.clone());
+        let pending: PendingRemoval = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .unwrap_or_else(|| panic_with_error!(&env, Error::RemovalNotRequested));
+        if caller != pending.recipient && caller != Self::load_jar(&env, &jar_id).owner {
+            panic_with_error!(&env, Error::NotAuthorized);
+        }
+        caller.require_auth();
+        env.storage().persistent().remove(&key);
+        env.events().publish(
+            (symbol_short!("rm_cancel"), jar_id),
+            RemovalCancelledEvent {
+                version: 1,
+                recipient: pending.recipient,
+                caller,
+            },
+        );
+    }
+
+    /// Execute an announced removal once its delay has elapsed (#239). Owner
+    /// only. The departed share goes to the last remaining recipient, as in
+    /// `leave_jar`, and the lock stays on. Fails with `RemovalNotRequested` if
+    /// the splits changed since the announcement.
+    pub fn execute_recipient_removal(env: Env, jar_id: String) {
+        let jar = Self::load_jar(&env, &jar_id);
+        jar.owner.require_auth();
+        let key = DataKey::PendingRemoval(jar_id.clone());
+        let pending: PendingRemoval = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .unwrap_or_else(|| panic_with_error!(&env, Error::RemovalNotRequested));
+        if pending.splits != jar.splits {
+            panic_with_error!(&env, Error::RemovalNotRequested);
+        }
+        if env.ledger().sequence() < pending.ready_ledger {
+            panic_with_error!(&env, Error::RemovalNotReady);
+        }
+
+        let mut departed_bps: u32 = 0;
+        let mut remaining: Vec<Split> = Vec::new(&env);
+        for split in jar.splits.iter() {
+            if split.to == pending.recipient {
+                departed_bps = split.bps;
+            } else {
+                remaining.push_back(split);
+            }
+        }
+        let last = remaining.len() - 1;
+        let mut last_split = remaining.get(last).unwrap();
+        last_split.bps = last_split
+            .bps
+            .checked_add(departed_bps)
+            .unwrap_or_else(|| panic_with_error!(&env, Error::SplitSumNot100Pct));
+        remaining.set(last, last_split);
+        Self::validate_splits(&env, &remaining);
+
+        env.storage().persistent().remove(&key);
+        let split_count = remaining.len();
+        let new_splits = remaining.clone();
+        Self::store_jar(
+            &env,
+            &jar_id,
+            &Jar {
+                owner: jar.owner,
+                splits: remaining,
+                locked: jar.locked,
+                paused: jar.paused,
+            },
+        );
+        env.events().publish(
+            (symbol_short!("splits"), jar_id),
+            SplitsUpdatedEvent {
+                version: 1,
+                count: split_count,
+                splits: new_splits,
             },
         );
     }
@@ -1052,8 +1233,11 @@ impl TipSplitter {
         // Issue #94: reject the contract itself or its token as new owner.
         let contract_addr = env.current_contract_address();
         let token_addr: Address = Self::get_token(env.clone());
-        if new_owner == contract_addr || new_owner == token_addr || new_owner == jar.owner {
+        if new_owner == contract_addr || new_owner == token_addr {
             panic_with_error!(&env, Error::InvalidRecipient);
+        }
+        if new_owner == jar.owner {
+            panic_with_error!(&env, Error::SameOwner);
         }
         jar.owner.require_auth();
         new_owner.require_auth_for_args((jar_id.clone(), new_owner.clone()).into_val(&env));
@@ -1139,6 +1323,9 @@ impl TipSplitter {
         env.storage()
             .persistent()
             .remove(&DataKey::DefaultTokenOnly(jar_id.clone()));
+        env.storage()
+            .persistent()
+            .remove(&DataKey::PendingRemoval(jar_id.clone()));
 
         env.events().publish(
             (symbol_short!("jar_del"), jar_id.clone()),
@@ -1276,6 +1463,9 @@ impl TipSplitter {
         env.storage()
             .persistent()
             .remove(&DataKey::Jar(jar_id.clone()));
+        env.storage()
+            .persistent()
+            .remove(&DataKey::PendingRemoval(jar_id.clone()));
 
         // Move stats too
         let old_stats_key = DataKey::Stats(jar_id.clone());
@@ -3022,6 +3212,18 @@ pub mod examples {
     //! client.lock_splits(&jar_id);
     //! assert!(client.is_splits_locked(&jar_id));
     //! client.unlock_splits(&jar_id);
+    //! ```
+    //!
+    //! A recipient who cannot sign is removed from a locked jar in two steps:
+    //! the owner announces it with `request_recipient_removal(jar_id,
+    //! recipient)`, and after `RECIPIENT_REMOVAL_DELAY_LEDGERS` runs
+    //! `execute_recipient_removal(jar_id)`. The recipient (or the owner) can
+    //! call `cancel_recipient_removal(jar_id, caller)` in between.
+    //!
+    //! ```ignore
+    //! client.request_recipient_removal(&jar_id, &lost_key);
+    //! // ... 120_960 ledgers later ...
+    //! client.execute_recipient_removal(&jar_id);
     //! ```
     //!
     //! `set_jar_paused(jar_id, paused)` (owner) pauses or resumes tipping into

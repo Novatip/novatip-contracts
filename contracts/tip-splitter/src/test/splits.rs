@@ -1228,3 +1228,187 @@ fn update_splits_leaves_the_owner_unchanged() {
     assert_eq!(jar.owner, owner);
     assert!(jar.splits == second);
 }
+
+// ---------------------------------------------------------------------------
+// #239 — recovering a locked jar from an unreachable recipient
+// ---------------------------------------------------------------------------
+
+use soroban_sdk::testutils::Ledger as _;
+
+/// A locked jar: alice 5000, bob 3000, carol 2000. Returns the pieces.
+fn locked_three(s: &Setup, id: &str) -> (String, Address, Address, Address, Address) {
+    let env = &s.env;
+    let client = TipSplitterClient::new(env, &s.contract);
+    let owner = Address::generate(env);
+    let (alice, bob, carol) = (
+        Address::generate(env),
+        Address::generate(env),
+        Address::generate(env),
+    );
+    let jar_id = String::from_str(env, id);
+    client.create_jar(
+        &owner,
+        &jar_id,
+        &vec![
+            env,
+            Split {
+                to: alice.clone(),
+                bps: 5000,
+            },
+            Split {
+                to: bob.clone(),
+                bps: 3000,
+            },
+            Split {
+                to: carol.clone(),
+                bps: 2000,
+            },
+        ],
+    );
+    client.lock_splits(&jar_id);
+    (jar_id, owner, alice, bob, carol)
+}
+
+fn advance(env: &Env, ledgers: u32) {
+    env.ledger().with_mut(|l| l.sequence_number += ledgers);
+}
+
+#[test]
+fn locked_jar_recovers_from_an_unreachable_recipient_after_the_delay() {
+    let s = setup();
+    let env = &s.env;
+    let client = TipSplitterClient::new(env, &s.contract);
+    let (jar_id, _, alice, bob, carol) = locked_three(&s, "@recover");
+
+    client.request_recipient_removal(&jar_id, &bob);
+    let ready = env.ledger().sequence() + 120_960;
+    let evs = env.events().all();
+    let last = evs.last().unwrap();
+    let data: RemovalRequestedEvent = TryFromVal::try_from_val(env, &last.2).unwrap();
+    assert_eq!(data.recipient, bob);
+    assert_eq!(data.ready_ledger, ready);
+
+    // Not yet: the delay has not elapsed.
+    advance(env, 120_959);
+    assert_eq!(
+        client.try_execute_recipient_removal(&jar_id),
+        Err(Ok(Error::RemovalNotReady.into()))
+    );
+    advance(env, 1);
+    client.execute_recipient_removal(&jar_id);
+
+    // Bob is gone, his share went to the last entry, and the lock is intact.
+    let jar = client.get_jar(&jar_id);
+    assert_eq!(
+        jar.splits,
+        vec![
+            env,
+            Split {
+                to: alice,
+                bps: 5000
+            },
+            Split {
+                to: carol,
+                bps: 5000
+            },
+        ]
+    );
+    assert!(client.is_splits_locked(&jar_id));
+    // The request is consumed.
+    assert_eq!(
+        client.try_execute_recipient_removal(&jar_id),
+        Err(Ok(Error::RemovalNotRequested.into()))
+    );
+}
+
+#[test]
+fn recipient_can_veto_a_removal_and_owner_cannot_force_it() {
+    let s = setup();
+    let env = &s.env;
+    let client = TipSplitterClient::new(env, &s.contract);
+    let (jar_id, owner, _, bob, _) = locked_three(&s, "@veto");
+
+    client.request_recipient_removal(&jar_id, &bob);
+    advance(env, 200_000);
+    client.cancel_recipient_removal(&jar_id, &bob);
+    assert_eq!(
+        client.try_execute_recipient_removal(&jar_id),
+        Err(Ok(Error::RemovalNotRequested.into()))
+    );
+    assert_eq!(client.get_jar(&jar_id).splits.len(), 3);
+
+    // The owner can withdraw their own request too; a stranger cannot.
+    client.request_recipient_removal(&jar_id, &bob);
+    let stranger = Address::generate(env);
+    assert_eq!(
+        client.try_cancel_recipient_removal(&jar_id, &stranger),
+        Err(Ok(Error::NotAuthorized.into()))
+    );
+    client.cancel_recipient_removal(&jar_id, &owner);
+}
+
+#[test]
+fn removal_bypass_attempts_are_blocked() {
+    let s = setup();
+    let env = &s.env;
+    let client = TipSplitterClient::new(env, &s.contract);
+    let (jar_id, _, alice, bob, _) = locked_three(&s, "@bypass");
+    let stranger = Address::generate(env);
+
+    // Not a recipient / executing with no request.
+    assert_eq!(
+        client.try_request_recipient_removal(&jar_id, &stranger),
+        Err(Ok(Error::NotRecipient.into()))
+    );
+    assert_eq!(
+        client.try_execute_recipient_removal(&jar_id),
+        Err(Ok(Error::RemovalNotRequested.into()))
+    );
+
+    // Requests need the owner's signature.
+    env.mock_auths(&[]);
+    assert!(client.try_request_recipient_removal(&jar_id, &bob).is_err());
+    env.mock_all_auths();
+
+    // A request is void once the recipients change underneath it.
+    client.request_recipient_removal(&jar_id, &bob);
+    client.leave_jar(&jar_id, &alice);
+    advance(env, 120_960);
+    assert_eq!(
+        client.try_execute_recipient_removal(&jar_id),
+        Err(Ok(Error::RemovalNotRequested.into()))
+    );
+
+    // Execution needs the owner's signature.
+    client.request_recipient_removal(&jar_id, &bob);
+    advance(env, 120_960);
+    env.mock_auths(&[]);
+    assert!(client.try_execute_recipient_removal(&jar_id).is_err());
+    env.mock_all_auths();
+}
+
+#[test]
+fn sole_recipient_cannot_be_removed() {
+    let s = setup();
+    let env = &s.env;
+    let client = TipSplitterClient::new(env, &s.contract);
+    let owner = Address::generate(env);
+    let alice = Address::generate(env);
+    let jar_id = String::from_str(env, "@solo-rm");
+    client.create_jar(
+        &owner,
+        &jar_id,
+        &vec![
+            env,
+            Split {
+                to: alice.clone(),
+                bps: 10_000,
+            },
+        ],
+    );
+    client.lock_splits(&jar_id);
+    assert_eq!(
+        client.try_request_recipient_removal(&jar_id, &alice),
+        Err(Ok(Error::SoleRecipient.into()))
+    );
+}
