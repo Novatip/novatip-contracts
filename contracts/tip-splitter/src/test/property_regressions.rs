@@ -80,7 +80,14 @@ proptest! {
             prop_assert_eq!(to, recipient.clone());
             prop_assert!(!held);
             prop_assert_eq!(moved, preview.get(idx as u32).unwrap());
-            prop_assert_eq!(token.balance(recipient) - before[idx], moved);
+            // The sender can also be a recipient. Their event moved amount
+            // is zero, but their wallet is debited for all *other* recipients
+            // and the fee; it does not simply stay at its pre-tip balance.
+            if sender_index != Some(idx) {
+                prop_assert_eq!(token.balance(recipient) - before[idx], moved);
+            } else {
+                prop_assert_eq!(moved, 0);
+            }
         }
         let net_moved: i128 = (0..preview.len()).map(|idx| preview.get(idx).unwrap()).sum();
         prop_assert_eq!(before_sender - token.balance(&supporter), net_moved + event.fee);
