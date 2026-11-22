@@ -1855,11 +1855,12 @@ contract can code against it directly:
 ```rust
 #[contractclient(name = "TipHookClient")]
 pub trait TipHook {
-    fn on_tip(env: Env, jar_id: String, from: Address, amount: i128);
+    fn on_tip(env: Env, jar_id: String, from: Address, amount: i128, token: Address);
 }
 ```
 
-`on_tip` receives the jar id, the tipper, and the tip amount. It is called
+`on_tip` receives the jar id, the tipper, the tip amount, and the token paid.
+It is called
 with no authorisation requested and its return value is ignored.
 
 ### When and how it is called
