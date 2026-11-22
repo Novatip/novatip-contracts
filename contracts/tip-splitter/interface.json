@@ -252,6 +252,34 @@
     }
   },
   {
+    "udt_struct_v0": {
+      "lib": "",
+      "name": "PendingRemoval",
+      "fields": [
+        {
+          "name": "ready_ledger",
+          "type_": "u32"
+        },
+        {
+          "name": "recipient",
+          "type_": "address"
+        },
+        {
+          "name": "splits",
+          "type_": {
+            "vec": {
+              "element_type": {
+                "udt": {
+                  "name": "Split"
+                }
+              }
+            }
+          }
+        }
+      ]
+    }
+  },
+  {
     "udt_error_enum_v0": {
       "lib": "",
       "name": "Error",
@@ -425,8 +453,24 @@
           "value": 42
         },
         {
+          "name": "NonDefaultToken",
+          "value": 43
+        },
+        {
           "name": "NotAuthorized",
-          "value": 40
+          "value": 44
+        },
+        {
+          "name": "SameOwner",
+          "value": 45
+        },
+        {
+          "name": "RemovalNotRequested",
+          "value": 46
+        },
+        {
+          "name": "RemovalNotReady",
+          "value": 47
         }
       ]
     }
@@ -467,6 +511,46 @@
               }
             }
           }
+        },
+        {
+          "name": "version",
+          "type_": "u32"
+        }
+      ]
+    }
+  },
+  {
+    "udt_struct_v0": {
+      "lib": "",
+      "name": "RemovalRequestedEvent",
+      "fields": [
+        {
+          "name": "ready_ledger",
+          "type_": "u32"
+        },
+        {
+          "name": "recipient",
+          "type_": "address"
+        },
+        {
+          "name": "version",
+          "type_": "u32"
+        }
+      ]
+    }
+  },
+  {
+    "udt_struct_v0": {
+      "lib": "",
+      "name": "RemovalCancelledEvent",
+      "fields": [
+        {
+          "name": "caller",
+          "type_": "address"
+        },
+        {
+          "name": "recipient",
+          "type_": "address"
         },
         {
           "name": "version",
@@ -1137,6 +1221,50 @@
   },
   {
     "function_v0": {
+      "name": "request_recipient_removal",
+      "inputs": [
+        {
+          "name": "jar_id",
+          "type_": "string"
+        },
+        {
+          "name": "recipient",
+          "type_": "address"
+        }
+      ],
+      "outputs": []
+    }
+  },
+  {
+    "function_v0": {
+      "name": "cancel_recipient_removal",
+      "inputs": [
+        {
+          "name": "jar_id",
+          "type_": "string"
+        },
+        {
+          "name": "caller",
+          "type_": "address"
+        }
+      ],
+      "outputs": []
+    }
+  },
+  {
+    "function_v0": {
+      "name": "execute_recipient_removal",
+      "inputs": [
+        {
+          "name": "jar_id",
+          "type_": "string"
+        }
+      ],
+      "outputs": []
+    }
+  },
+  {
+    "function_v0": {
       "name": "is_splits_locked",
       "inputs": [
         {
@@ -1351,6 +1479,36 @@
         }
       ],
       "outputs": []
+    }
+  },
+  {
+    "function_v0": {
+      "name": "set_jar_tokens_default_only",
+      "inputs": [
+        {
+          "name": "jar_id",
+          "type_": "string"
+        },
+        {
+          "name": "default_only",
+          "type_": "bool"
+        }
+      ],
+      "outputs": []
+    }
+  },
+  {
+    "function_v0": {
+      "name": "get_jar_tokens_default_only",
+      "inputs": [
+        {
+          "name": "jar_id",
+          "type_": "string"
+        }
+      ],
+      "outputs": [
+        "bool"
+      ]
     }
   },
   {

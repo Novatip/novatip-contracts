@@ -314,8 +314,19 @@ fn transfer_jar_ownership_rejects_current_owner() {
     );
 
     env.mock_all_auths();
-    let res = client.try_transfer_jar_ownership(&jar_id, &owner);
-    assert!(res.is_err(), "transferring to the current owner is invalid");
+    // A no-op handoff has its own code, distinct from the contract/token one.
+    assert_eq!(
+        client.try_transfer_jar_ownership(&jar_id, &owner),
+        Err(Ok(Error::SameOwner.into()))
+    );
+    assert_eq!(
+        client.try_transfer_jar_ownership(&jar_id, &s.contract),
+        Err(Ok(Error::InvalidRecipient.into()))
+    );
+    assert_eq!(
+        client.try_transfer_jar_ownership(&jar_id, &s.token),
+        Err(Ok(Error::InvalidRecipient.into()))
+    );
     assert_eq!(client.get_jar(&jar_id).owner, owner);
 }
 
@@ -1815,6 +1826,9 @@ fn change_recipient_rejects_duplicate_invalid_and_non_recipient() {
     assert_eq!(
         client.try_change_recipient(&jar_id, &stranger, &Address::generate(env)),
         Err(Ok(Error::NotRecipient.into()))
+    );
+}
+
 // ---------------------------------------------------------------------------
 // #262 — every jar-taking public function rejects non-canonical jar IDs
 // ---------------------------------------------------------------------------
@@ -1984,3 +1998,4 @@ fn max_tip_amount_caps_tips_and_previews() {
 
     client.set_max_tip_amount(&jar_id, &None);
     assert_eq!(client.get_max_tip_amount(&jar_id), None);
+}

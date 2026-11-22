@@ -17,7 +17,7 @@ set -euo pipefail
 #              bps values must sum to 10000; at most 20 recipients
 #
 # Validation rules (enforced locally before the transaction, #124):
-#   - SLUG is 1–64 bytes
+#   - SLUG is 4–33 bytes (`@` plus 3–32 characters)
 #   - Each split entry: `to` is a non-empty string, `bps` is an integer 1..10000
 #   - No duplicate `to` addresses
 #   - bps values sum to 10000
@@ -33,10 +33,10 @@ set -euo pipefail
 require_env NETWORK SOURCE OWNER SLUG
 require_contract_id
 
-# Validate SLUG: 1–64 bytes (#124).
+# Validate SLUG: 4–33 bytes (#124).
 SLUG_LEN=$(printf '%s' "${SLUG}" | wc -c)
-if [ "${SLUG_LEN}" -lt 1 ] || [ "${SLUG_LEN}" -gt 64 ]; then
-  echo "error: SLUG must be 1–64 bytes (got ${SLUG_LEN})" >&2
+if [ "${SLUG_LEN}" -lt 4 ] || [ "${SLUG_LEN}" -gt 33 ]; then
+  echo "error: SLUG must be 4–33 bytes (got ${SLUG_LEN})" >&2
   exit 1
 fi
 

@@ -6,6 +6,7 @@ All notable changes to `novatip-contracts` are documented here.
 
 ### Documentation
 
+- `InvalidAmount` (5) is documented as retired in code and in the error and `preview_tip` tables, naming codes 25–29 as its replacements (#240).
 - Rewrote "Detecting the interface version" as a table with one row per interface version from 1 to 10 (#271).
 - Added Events sections for `pause`, `resume`, `upgrade`, `tk_allow`, `tk_dis` and `fee_set`, example payloads for `adm_xfer` and `jar_rnm`, and `jar_rnm` support in `scripts/events.sh` (#272).
 - Added a table of which state-changing entry points the contract pause and the jar pause block; `pause` now names `tip_many` (#273).
@@ -17,6 +18,8 @@ All notable changes to `novatip-contracts` are documented here.
 - Documented the split rounding rule with a worked example: the last recipient absorbs the remainder, so entry order matters (#60).
 
 ### Added
+- `version()` is now `11`: a locked jar can recover from one unreachable recipient with `request_recipient_removal`, `cancel_recipient_removal` and `execute_recipient_removal` (owner announces, `rm_req` event, 120 960-ledger delay during which the recipient can veto, then the share moves to the last recipient and the lock stays on), with new errors `RemovalNotRequested` (46) and `RemovalNotReady` (47) (#239).
+- `transfer_jar_ownership` to the jar's current owner now fails with the new `SameOwner` (45) instead of `InvalidRecipient`, which is kept for the contract and token addresses (#241).
 - `version()` is now `10`: `change_recipient(jar_id, old, new)` lets a recipient replace their own address in a jar without the owner, keeping bps, position and any lock, and publishes a `splits` event (#310); `withdraw_held_to(recipient, to)` pays a held balance to another address with a `wd_to` event carrying both (#311); `set_fee_recipient(Option<Address>)` (admin only) and `get_fee_recipient()` send protocol fees to a configurable address, defaulting to the admin, with a `fee_rcpt` event, and the fee self-transfer rule now compares the tipper with the fee recipient (#312). No new error codes
 - `scripts/upgrade.sh` uploads a wasm, checks its hash, confirms on mainnet, calls `upgrade`, verifies the deployed wasm and prints `version()` before and after (#294)
 - `scripts/recurring.sh` creates, shows, cancels and collects recurring tips, printing the token `approve` command and explaining `NotDue` with the next due ledger (#290)
@@ -66,6 +69,8 @@ All notable changes to `novatip-contracts` are documented here.
 - `tip` withholds a recipient's share when that recipient is also the tipper
 
 ### Fixed
+- `NotAuthorized` was numbered 40, colliding with `TooManyAllowedTokens`, and `MigratedEvent` was missing its closing brace, so the crate did not compile; `NotAuthorized` is now 44 (#239, #241).
+- Removed the unreachable `MAX_JAR_ID_LEN` (64) check from `is_valid_jar_id`; the canonical 4–33 byte rule is checked once (#242).
 - The E2E job can run: the local Stellar network is started by a step with `--local` (a `services:` container cannot pass arguments to an image entrypoint, so quickstart defaulted to a public network and never passed its health check), the token is now deployed with `stellar contract asset deploy` because no bundled `stellar_asset.wasm` ships with the CLI any more, the CLI version is read from `scripts/lib/cli.sh` instead of pinned below the scripts' own floor, recipients are funded and given trustlines so their shares are paid rather than held, jar ids use the canonical `@`-prefixed form, and CLI output is read with `-q` so the assertions parse JSON instead of progress lines
 - `scripts/tip.sh` calls `tip` with its `from` and `message` arguments, which the contract has always required; the script was written against an older signature and every invocation failed with `Missing required argument 'from'`
 - Workspace wasm builds and `cargo deny check` work again: `examples/tip-forwarder` declares `no_std` outside tests (the wasm builds failed with `E0152: duplicate lang item panic_impl`), both crates declare the workspace MIT license, and the path dependency carries a version instead of a wildcard

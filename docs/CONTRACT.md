@@ -30,8 +30,8 @@ withdrawal.
   — exactly the backend's `SLUG_REGEX`. Anything else (upper case, whitespace,
   control bytes, a missing `@`, or a length outside that range) is rejected with
   `InvalidJarId`, so lookalikes cannot exist next to a real creator's slug.
-  The storage bound is also `MAX_JAR_ID_LEN` (64 bytes) — it doubles as a
-  storage key, an event topic, and a public URL slug.
+  A slug doubles as a storage key, an event topic, and a public URL slug,
+  which is why the canonical length range is the only length bound.
 - **Split** — a recipient `Address` and its [share](#glossary-share) in basis points ([`bps`](#glossary-bps)).
   Every split must have `bps >= 1`, all splits in a jar must sum to exactly
   `10_000` (= 100%), and no address may appear more than once.
@@ -77,6 +77,7 @@ entries archive independently.
 | `FeeBps` | Instance | `set_fee_bps` | `get_fee_bps` and tip settlement | With the shared instance TTL | Restore the instance; absent fee state defaults to zero. |
 | `WasmHash` | Instance | Successful `upgrade` | The next `upgrade` event | With the shared instance TTL | Restore the instance; absent history is reported as `previous_hash: None`. |
 | `MaxTip(jar_id)` | Persistent | `set_max_tip_amount`, clear, and `rename_jar` | Tip validation, previews and maximum-tip reads | Set/read and tip paths extend the entry | Restore to recover the cap; a never-set maximum is `None`. |
+| `PendingRemoval(jar_id)` | Persistent | `request_recipient_removal`; cleared by `cancel_recipient_removal`, `execute_recipient_removal`, `delete_jar` and `rename_jar` | `cancel_recipient_removal`, `execute_recipient_removal` | Extended when the request is written | Restore to recover the request; losing it only means the owner must announce it again. |
 | `AllowedTokens` | Instance | `__constructor`, `allow_token`, `disallow_token` | `get_allowed_tokens` | With the shared instance TTL | Restore the instance; older deployments without the list fall back to the default token. |
 | `SchemaVersion` | Instance | `migrate` | `migrate` | With the shared instance TTL | Restore the instance; an absent version is treated as zero so migration can run. |
 
@@ -142,13 +143,18 @@ one belongs to a jar, the other to a `(jar, supporter)` pair.
 | `update_splits(jar_id, splits)` | jar `owner`, plus every current recipient whose share **decreases or is removed** when the jar is locked | Replace a jar's splits. Subject to the same validation as `create_jar`. On a locked jar the owner alone cannot cut a collaborator — see [`lock_splits`](#locking-a-jars-splits). Emits a `splits` event. |
 | `change_recipient(jar_id, old, new)` | `old` | Replace `old` with `new` in the jar's splits, keeping the same bps and position (#310). The owner is not needed, and it works on a locked jar (the lock is kept). Rejects a `new` already in the jar (`DuplicateRecipient`), the contract or token address (`InvalidRecipient`), and an `old` that is not a recipient (`NotRecipient`). Emits a `splits` event. |
 | `lock_splits(jar_id)` | jar `owner` | Lock a jar so `update_splits` needs each reduced/removed recipient's consent. Emits a `lock` event with `JarLockEvent { version, locked: true }` data. |
-| `unlock_splits(jar_id)` | jar `owner` **and every current recipient** | Remove the lock. Consent mirrors a reduction: all recipients must sign, or the owner could disarm the lock and then cut shares. Emits a `lock` event with `JarLockEvent { version, locked: false }` data. |
+| `unlock_splits(jar_id)` | jar `owner` **and every current recipient** | Remove the lock. Consent mirrors a reduction: all recipients must sign, or the owner could disarm the lock and then cut shares. A recipient who cannot sign is removed with [`request_recipient_removal`](#recovering-a-locked-jar-from-an-unreachable-recipient-239) instead. Emits a `lock` event with `JarLockEvent { version, locked: false }` data. |
+| `request_recipient_removal(jar_id, recipient)` | jar `owner` | Announce that `recipient`, who cannot sign, is to be removed after `RECIPIENT_REMOVAL_DELAY_LEDGERS` (120 960 ledgers, about 7 days) (#239). Rejects a non-recipient (`NotRecipient`) and the only recipient (`SoleRecipient`). One request per jar; a new one replaces it and restarts the delay. Emits `rm_req`. |
+| `cancel_recipient_removal(jar_id, caller)` | `caller`: the named recipient or the jar `owner` | Cancel the pending removal (#239). `RemovalNotRequested` if none, `NotAuthorized` for anyone else. Emits `rm_cancel`. |
+| `execute_recipient_removal(jar_id)` | jar `owner` | Remove the announced recipient once the delay has passed (#239). `RemovalNotRequested` if none or the splits changed since; `RemovalNotReady` if early. The share goes to the last remaining recipient, as in `leave_jar`; the lock stays on. Emits `splits`. |
 | `is_splits_locked(jar_id) -> bool` | — | Whether the jar's splits are locked. Panics with `JarNotFound` if the slug is free. |
 | `set_jar_paused(jar_id, paused)` | jar `owner` | Pause (`true`) or resume (`false`) tipping for one jar (#45). While paused, every tip entry point rejects the jar with `JarPaused`; reads stay available. The flag survives `transfer_jar_ownership`. Emits a `jar_pause` event with `JarPausedEvent { version, paused }` data. See [pausing a jar](#pausing-a-jar-45). |
 | `is_jar_paused(jar_id) -> bool` | — | Whether tipping is currently paused for the jar. Panics with `JarNotFound` if the slug is free. |
 | `leave_jar(jar_id, recipient)` | `recipient` | Remove `recipient` from the jar's splits. Their share is added to the last remaining entry so the splits still sum to 10 000. Rejected with `SoleRecipient` (only entry) or `NotRecipient` (not in the jar). Emits a `splits` event. |
 | `set_min_tip_amount(jar_id, min_amount)` | jar `owner` | Set or clear an optional minimum tip amount for a jar. `min_amount` must be strictly positive (`> 0`) or `None` to clear. Emits a `min_tip` event. |
 | `set_max_tip_amount(jar_id, max_amount)` | jar `owner` | Set or clear an optional maximum tip amount for a jar (#323). `max_amount` must be positive and no lower than the jar's minimum (`InvalidMaximumAmount`), or `None` to clear. Tips in the default token and previews above it are rejected with `AboveMaxTipAmount`. Emits a `max_tip` event with `MaxTipEvent { version, amount }` data. |
+| `set_jar_tokens_default_only(jar_id, default_only)` | jar `owner` | Make `tip_in_token` accept only the default token for this jar (#313); other tokens fail with `NonDefaultToken`. `false` clears the flag. The flag survives `rename_jar` and `transfer_jar_ownership`. |
+| `get_jar_tokens_default_only(jar_id) -> bool` | — | Whether the jar accepts only the default token. `false` when unset. |
 | `get_max_tip_amount(jar_id) -> Option<i128>` | — | Read a jar's optional maximum tip amount. Panics with `JarNotFound` if the slug is free. |
 | `transfer_jar_ownership(jar_id, new_owner)` | current jar `owner` and `new_owner` | Hand control of a jar to `new_owner`. The exact `(jar_id, new_owner)` pair must be signed by both parties; a transfer to the current owner is rejected. Splits are unchanged. Emits a `jar_xfer` event carrying both owners. |
 | `admin_recover_jar(jar_id, new_owner)` | contract admin | Reassign a jar whose owner key is lost. No owner signature is required; shares and jar flags are preserved. Emits `jar_recov`. |
@@ -235,7 +241,7 @@ written as raised only when every earlier check has passed.
 | `create_jar(owner, jar_id, splits)` | `owner` (+ registrar co-auth when set) | `InvalidJarId` → `JarExists` → `SplitsEmpty` → `TooManyRecipients` → `SplitOutOfRange` / `DuplicateRecipient` (per entry) → `SplitSumNot100Pct` → Soroban auth error (missing registrar co-signature, #178) | Register a new jar. Fails if the slug is not a canonical `@`-prefixed `[a-z0-9_-]{3,32}` slug, already exists, or splits are invalid. The registrar's co-signature is demanded only after validation passes, so a malformed request never burns one. Emits a `jar_crtd` event. |
 | `update_splits(jar_id, splits)` | jar `owner` | `JarNotFound` → `SplitsEmpty` → `TooManyRecipients` → `SplitOutOfRange` / `DuplicateRecipient` (per entry) → `SplitSumNot100Pct` | Replace a jar's splits. Subject to the same validation as `create_jar`. Emits a `splits` event. |
 | `set_min_tip_amount(jar_id, min_amount)` | jar `owner` | `JarNotFound` → `InvalidMinimumAmount` | Set or clear an optional minimum tip amount for a jar. `min_amount` must be strictly positive (`> 0`) or `None` to clear. Emits a `min_tip` event. |
-| `transfer_jar_ownership(jar_id, new_owner)` | current jar `owner` and `new_owner` | `JarNotFound` → `InvalidRecipient` (new owner is the current owner, the contract itself, or the token) | Hand control of a jar to `new_owner`. The exact `(jar_id, new_owner)` pair is signed by both owners. Splits are unchanged. Emits a `jar_xfer` event carrying both owners. |
+| `transfer_jar_ownership(jar_id, new_owner)` | current jar `owner` and `new_owner` | `JarNotFound` → `InvalidRecipient` (new owner is the contract itself or the token) → `SameOwner` (new owner is the current owner) | Hand control of a jar to `new_owner`. The exact `(jar_id, new_owner)` pair is signed by both owners. Splits are unchanged. Emits a `jar_xfer` event carrying both owners. |
 | `admin_recover_jar(jar_id, new_owner)` | contract admin | `JarNotFound` → `InvalidRecipient` (new owner is current owner, contract, or token) | Reassign a jar after owner-key loss. Preserves splits and flags; emits `jar_recov`. |
 | `delete_jar(jar_id)` | current jar `owner` | `JarNotFound` | Delete a registered jar and free its slug for reuse. Removes the jar, its stats, and the associated minimum-tip value. Emits a `jar_del` event with the jar id as a topic. |
 | `rename_jar(jar_id, new_jar_id)` | jar `owner` | `InvalidJarId` (new id not a canonical `@`-prefixed `[a-z0-9_-]{3,32}` slug) → `JarNotFound` → `JarIdInUse` | Move a jar, its stats and its minimum to `new_jar_id`. The old id stops resolving once the move is complete. Emits a `jar_rnm` event with the old jar id as a topic and `JarRenamedEvent { version, jar_id, new_jar_id }` data. |
@@ -245,7 +251,7 @@ written as raised only when every earlier check has passed.
 | `get_split_count(jar_id) -> u32` | — | `JarNotFound` | How many recipients a jar pays. Panics with `JarNotFound` if the slug is free. |
 | `preview_split(jar_id, amount) -> Vec<i128>` | — | `AmountZero` / `AmountNegative` → `JarNotFound` → `BelowMinTipAmount` → `SplitAmountTooSmall` / `AmountOverflow` | What each recipient would receive from a tip of `amount`, in split order. Rejects amounts below the jar's minimum with `BelowMinTipAmount` as well as the amounts `tip` rejects, in the same order; panics with `JarNotFound` if the slug is free. |
 | `preview_tip(jar_id, from, amount) -> Vec<i128>` | — | `AmountZero` (amount = 0) / `AmountNegative` (amount < 0) → `JarNotFound` → `BelowMinTipAmount` → `SplitAmountTooSmall` / `AmountOverflow` | The sender-aware preview (#177): exactly the amounts `tip` will transfer for `from`, helper-shared with the payout. |
-| `preview_tip(jar_id, from, amount) -> Vec<i128>` | — | `InvalidAmount` (amount ≤ 0) → `JarNotFound` → `BelowMinTipAmount` → `InvalidAmount` (a share truncates to zero, or `amount * bps` overflows) | The sender-aware preview (#177): exactly the amounts `tip` will transfer for `from`, helper-shared with the payout. |
+| `preview_tip(jar_id, from, amount) -> Vec<i128>` | — | `AmountZero` / `AmountNegative` → `JarNotFound` → `BelowMinTipAmount` → `SplitAmountTooSmall` (a share truncates to zero) / `AmountOverflow` (`amount * bps` overflows) | The sender-aware preview (#177): exactly the amounts `tip` will transfer for `from`, helper-shared with the payout. |
 | `tip_many(from, tips, token) -> Vec<u64>` | `from` | Soroban auth error (missing `from` signature) → `ContractPaused` → `BatchEmpty` → `BatchTooLarge` → `NotInitialized` → `TokenNotAllowed`, then per entry the same sequence as `tip`: `AmountZero` / `AmountNegative` → `MessageTooLong` → `JarNotFound` → `BelowMinTipAmount` → `AboveMaxTipAmount` → `SplitAmountTooSmall` / `AmountOverflow` → `InsufficientBalance` → the token contract's own error | Tip several jars in one transaction (#84). The batch-size and pause checks run first, before any jar is looked up; each entry is then settled exactly as `tip` would settle it (including the per-jar `JarPaused` check), and a failure in any entry reverts the whole call. |
 | `collect_recurring(id)` | — | `RecurringNotFound` → `NotDue` → `JarNotFound` → `NotInitialized` → `InsufficientAllowance` → `InsufficientBalance` | Collect one due period of a recurring schedule through the supporter's token allowance (#175). Publishes the same `tip` event and fires the post-tip hook. |
 | `jar_exists(jar_id) -> bool` | — | — | Whether the slug is already registered. Reads one key and returns a plain `bool`; never panics on a free slug. |
@@ -310,8 +316,8 @@ transaction has no way to read them. The result was that every client carried
 its own copy — the tip form capped messages at its own number, the splits editor
 hardcoded the twenty recipient limit — and changing a bound here silently
 desynchronised the stack.
-`BPS_DENOM`, `MAX_RECIPIENTS`, `MAX_MESSAGE_LEN`, `MAX_JAR_SLUG_LEN` and
-`MAX_JAR_ID_LEN` are private constants, so a client that wants to validate
+`BPS_DENOM`, `MAX_RECIPIENTS`, `MAX_MESSAGE_LEN` and `MAX_JAR_SLUG_LEN` are
+private constants, so a client that wants to validate
 input before paying for a transaction has no way to read them. The result was
 that every client carried its own copy — the tip form capped messages at its
 own number, the splits editor hardcoded the twenty recipient limit, the
@@ -336,12 +342,11 @@ All of them are compile-time constants, so the view reads no storage and costs
 the same regardless of contract state. A client can fetch it once at startup
 and cache it for the session.
 
-`max_jar_id_len` is the **effective** input bound, not the 64-byte
-`MAX_JAR_ID_LEN` storage cap. The canonical rule in
-[`jar_id` validation](#jar_id-validation) already caps an id at a leading `@`
-plus 32 characters, so a longer value is rejected with `InvalidJarId` long
-before the storage cap matters; reporting 64 would let an onboarding form
-submit a slug the contract refuses.
+`max_jar_id_len` is the input bound: the canonical rule in
+[`jar_id` validation](#jar_id-validation) caps an id at a leading `@` plus 32
+characters, and a longer value is rejected with `InvalidJarId`. The contract has
+no separate, looser storage cap; one earlier existed (64 bytes) but could never
+be reached, so it was removed.
 
 **Consumer-facing change:** `max_jar_id_len` is a new field in the map
 `get_limits` returns (#98). A decoder typed against the previous three-field
@@ -641,11 +646,9 @@ missing `@`, or a body outside the length range. The rule matches
 accepted, and no lookalike (`@Alice`, `@alice `) can be registered next to a
 real creator's slug.
 
-The id is also used as a storage key, an event topic, and a public URL slug.
-The storage bound is `MAX_JAR_ID_LEN` (64 bytes); the canonical rule is
-stricter, so any id that passes it is well inside that bound. `jar_exists`
-returns `false` for ids `create_jar` would reject rather than panicking on
-them.
+The id is also used as a storage key, an event topic, and a public URL slug;
+the canonical rule keeps it at most 33 bytes. `jar_exists` returns `false` for
+ids `create_jar` would reject rather than panicking on them.
 
 ### Validation rules
 
@@ -958,11 +961,11 @@ exactly the way issue #87 found it had.
 | 2 | `JarExists` | Slug already registered. |
 | 3 | `JarNotFound` | Slug not registered. |
 | 4 | `InvalidSplits` | **No longer raised.** Split validation now reports the specific failure as code 10, 11 or 12. The variant is retained so existing codes keep their values. |
-| 5 | `InvalidAmount` | **No longer raised.** Amount validation reports the specific failure: `AmountZero` (25), `AmountNegative` (26), `SplitAmountTooSmall` (27), `AmountOverflow` (28), or `InvalidMinimumAmount` (29). The variant is retained so existing codes keep their values. |
+| 5 | `InvalidAmount` | **Retired; never raised.** Kept for code stability only. Amount validation reports the specific failure: `AmountZero` (25), `AmountNegative` (26), `SplitAmountTooSmall` (27), `AmountOverflow` (28), or `InvalidMinimumAmount` (29). A client that still maps code 5 should map 25–29 instead. |
 | 6 | `TooManyRecipients` | More than 20 recipients. |
 | 7 | `DuplicateRecipient` | The same address appears more than once in the splits. |
 | 8 | `MessageTooLong` | Tip message exceeds 280 bytes. |
-| 9 | `InvalidJarId` | `jar_id` is not a canonical slug: not `@` followed by 3–32 characters from `[a-z0-9_-]` (or over the 64-byte `MAX_JAR_ID_LEN` storage bound). |
+| 9 | `InvalidJarId` | `jar_id` is not a canonical slug: not `@` followed by 3–32 characters from `[a-z0-9_-]`. |
 | 10 | `SplitsEmpty` | The splits list is empty. |
 | 11 | `SplitOutOfRange` | An entry has `bps == 0` or `bps > 10_000`. Checked per entry, before the sum. |
 | 12 | `SplitSumNot100Pct` | The shares sum to something other than exactly 10 000 bps, including a sum that would overflow `u32`. |
@@ -984,7 +987,7 @@ exactly the way issue #87 found it had.
 | 28 | `AmountOverflow` | `amount * bps` (or `amount * fee_bps`) would overflow `i128`. |
 | 29 | `InvalidMinimumAmount` | `set_min_tip_amount` was given a minimum that is zero or negative. |
 | 30 | `NoFundsMoved` | A tip where every share was skipped (every recipient is the tipper) would move no funds. |
-| 31 | `InvalidRecipient` | A split recipient or jar owner is the contract itself or its token. |
+| 31 | `InvalidRecipient` | A split recipient or jar owner is the contract itself or its token. A transfer to the jar's current owner is `SameOwner` (45), not this. |
 | 32 | `AdminExists` | `transfer_admin` was called with the current admin's address. |
 | 33 | `ContractPaused` | A tip was attempted while the contract is paused. |
 | 34 | `JarIdInUse` | `rename_jar` was given a jar id that is already in use. |
@@ -996,7 +999,11 @@ exactly the way issue #87 found it had.
 | 40 | `TooManyAllowedTokens` | `allow_token` was given a new token while the allowlist already holds `MAX_ALLOWED_TOKENS` (10) tokens (#321). |
 | 41 | `AboveMaxTipAmount` | A tip in the default token, or a preview, exceeded the jar's maximum set with `set_max_tip_amount` (#323). Raised before any transfer. |
 | 42 | `InvalidMaximumAmount` | `set_max_tip_amount` was given a maximum that is zero, negative or below the jar's minimum, or `set_min_tip_amount` a minimum above the jar's maximum (#323). |
-| 40 | `NotAuthorized` | `cancel_recurring` was called by an address that is neither the schedule's supporter nor the owner of its jar (#324). |
+| 43 | `NonDefaultToken` | `tip_in_token` was called with a non-default token for a jar that accepts only the default token (#313). |
+| 44 | `NotAuthorized` | `cancel_recurring` was called by an address that is neither the schedule's supporter nor the owner of its jar (#324), or `cancel_recipient_removal` by one that is neither the named recipient nor the jar's owner (#239). Numbered 44 because it first collided with `TooManyAllowedTokens` (40). |
+| 45 | `SameOwner` | `transfer_jar_ownership` named the jar's current owner as the new owner. A no-op handoff, distinct from `InvalidRecipient` (31). |
+| 46 | `RemovalNotRequested` | `execute_recipient_removal` found no pending removal for the jar, or the jar's splits changed since it was announced (#239). |
+| 47 | `RemovalNotReady` | `execute_recipient_removal` was called before the 120 960-ledger delay elapsed (#239). |
 
 Error codes are part of the public interface: `@novatip/sdk` and the frontend
 both map these numbers to user-facing messages. New variants are **appended**
@@ -1101,7 +1108,8 @@ events alone.
 `prev_owner` is the address that previously controlled the jar, and the
 contract now requires both sides of the handoff to authorize the exact
 `(jar_id, new_owner)` pair. A transfer to the current owner is rejected with
-`InvalidRecipient`, so the event log never records a no-op handoff. Splits are
+`SameOwner`, so the event log never records a no-op handoff; the contract or
+token address still fails with `InvalidRecipient`. Splits are
 unchanged by a transfer, so no `splits` event accompanies this one.
 
 > **Consumer impact.** Event data is a named map. Decoders should read fields
@@ -1250,6 +1258,15 @@ unchanged and remains the positional call the SDK and the web tip form use.
 Lets an indexer cache whether a jar protects its collaborators against a
 unilateral owner edit (#173). The flag is named and versioned, so a decoder
 reads it by field rather than relying on the payload being a bare `bool`.
+
+### `rm_req` and `rm_cancel` — recipient removal on a locked jar (#239)
+
+- **Topics:** `(symbol "rm_req", jar_id: String)` / `(symbol "rm_cancel", jar_id: String)`
+- **Data:** `RemovalRequestedEvent { version: u32, recipient: Address, ready_ledger: u32 }`
+  / `RemovalCancelledEvent { version: u32, recipient: Address, caller: Address }`
+
+`rm_req` is the announcement recipients react to; a successful execution
+publishes the ordinary `splits` event.
 
 ### `jar_pause` — published on every `set_jar_paused`
 
@@ -1444,6 +1461,29 @@ who is removed must also authorize.** Recipients who are unchanged or increased,
 and newly added recipients, do not sign — the lock only guards against being cut
 out behind your back.
 
+### Recovering a locked jar from an unreachable recipient (#239)
+
+`unlock_splits` needs every recipient, so one lost key (or a recipient that is
+a contract and cannot sign) would otherwise freeze a locked jar for good: it
+could neither be unlocked nor have that share reduced. The recovery rule keeps
+the lock's promise while removing that single point of failure:
+
+1. The owner calls `request_recipient_removal(jar_id, recipient)`. This stores
+   the request together with a snapshot of the current splits and publishes
+   `rm_req` with the `ready_ledger` (now + 120 960 ledgers, about 7 days).
+2. During the delay the named recipient, if reachable, calls
+   `cancel_recipient_removal` and the request is gone; the owner can cancel too.
+   Because every recipient is watching the `rm_req` event, the owner cannot cut
+   a reachable recipient: one signature from them defeats it.
+3. After `ready_ledger` the owner calls `execute_recipient_removal`. The
+   recipient's share goes to the last remaining recipient (the `leave_jar`
+   rule), a `splits` event is published, and the jar **stays locked**.
+
+The request is void if the recipients changed after it was announced
+(`update_splits`, `leave_jar`, `change_recipient`); executing then fails with
+`RemovalNotRequested`. `delete_jar` and `rename_jar` drop it. The only recipient
+of a jar cannot be removed (`SoleRecipient`).
+
 `unlock_splits(jar_id)` restores unilateral owner control, and because unlocking
 re-enables reductions it requires authorization from **all** current recipients,
 not just the owner; otherwise an owner could disarm the lock and cut shares a
@@ -1512,6 +1552,7 @@ moves nothing.
 | `create_jar`, `rename_jar`, `delete_jar` | No | No |
 | `update_splits`, `change_recipient`, `leave_jar` | No | No |
 | `lock_splits`, `unlock_splits` | No | No |
+| `request_recipient_removal`, `cancel_recipient_removal`, `execute_recipient_removal` | No | No |
 | `set_jar_paused` | No | No (it is the switch) |
 | `set_min_tip_amount`, `set_max_tip_amount`, `set_jar_tokens_default_only` | No | No |
 | `transfer_jar_ownership`, `admin_recover_jar` | No | No |
@@ -2003,6 +2044,7 @@ This build ships `version() == 10`. Every bump since `version()` was added:
 | 8 | Adds `update_recurring` and the `recr_upd` event, `get_jar_info`, `get_allowed_tokens` with the `TooManyAllowedTokens` error (40), `set_max_tip_amount` / `get_max_tip_amount` with the `max_tip` event and errors 41 and 42, and `migrate` with the `migrate` event. `recr_add` publishes `RecurringAddedEvent` with the jar in its topics. `cancel_recurring` takes the caller, which may be the jar owner, and `recr_del` reports who cancelled. `tip_many` takes a batch `token` and `TipRequest` gains `reference`. `get_limits` reports `min_jar_id_len` and `max_fee_bps`. | #316, #317, #318, #319, #320, #321, #322, #323, #324, #325 |
 | 9 | Adds admin-only `admin_recover_jar` and the `jar_recov` event. | #52 |
 | 10 | Adds `change_recipient` (publishes `splits`), `withdraw_held_to` with the `wd_to` event, and `set_fee_recipient` / `get_fee_recipient` with the `fee_rcpt` event. No new error codes. | #310, #311, #312 |
+| 11 | Adds `request_recipient_removal`, `cancel_recipient_removal` and `execute_recipient_removal` with the `rm_req` / `rm_cancel` events, and appends error codes 45–47. `NotAuthorized` moves from the colliding 40 to 44. | #239, #241 |
 
 `CHANGELOG.md` has the full entry for each change.
 
