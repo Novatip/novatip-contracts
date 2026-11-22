@@ -478,6 +478,7 @@ mod jars;
 mod interaction_regressions;
 mod lifecycle_regressions;
 mod properties;
+mod property_regressions;
 mod recurring;
 mod splits;
 mod tips;
