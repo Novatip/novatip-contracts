@@ -394,6 +394,9 @@ pub enum Error {
     /// `tip_in_token` was called with a non-default token for a jar that
     /// accepts only the default token (#313). Appended, never renumbered.
     NonDefaultToken = 43,
+    /// The allowlist or constructor was given an address that is not a SAC.
+    InvalidToken = 44,
+    NotAuthorized = 40,
     /// `cancel_recurring` was called by neither the supporter nor the jar
     /// owner (#324). Appended after 43; it previously collided with 40.
     NotAuthorized = 44,
@@ -410,7 +413,7 @@ pub enum Error {
 
 #[contractclient(name = "TipHookClient")]
 pub trait TipHook {
-    fn on_tip(env: Env, jar_id: String, from: Address, amount: i128);
+    fn on_tip(env: Env, jar_id: String, from: Address, amount: i128, token: Address);
 }
 
 #[contract]
@@ -665,8 +668,9 @@ impl TipSplitter {
         // so catching this misconfiguration at construction prevents deploying a permanently
         // bricked contract requiring complete redeployment and migration of jars.
         if admin == token {
-            panic!("admin and token cannot be the same address");
+            panic_with_error!(&env, Error::InvalidToken);
         }
+        Self::require_token_contract(&env, &token);
         env.storage().instance().set(&DataKey::Admin, &admin);
         env.storage().instance().set(&DataKey::Token, &token);
         env.storage()
@@ -686,6 +690,26 @@ impl TipSplitter {
             .unwrap_or_else(|| Vec::from_array(env, [Self::get_token(env.clone())]))
     }
 
+    /// Ensure an allowlisted address is a Stellar Asset Contract.  Calling
+    /// the mandatory SAC `decimals` method through the fallible host API
+    /// rejects arbitrary contracts and accounts without trapping the caller.
+    fn require_token_contract(env: &Env, token: &Address) {
+        if *token == env.current_contract_address() {
+            panic_with_error!(env, Error::InvalidToken);
+        }
+        let args: Vec<Val> = Vec::new(env);
+        if env
+            .try_invoke_contract::<u32, soroban_sdk::Error>(
+                token,
+                &symbol_short!("decimals"),
+                args,
+            )
+            .is_err()
+        {
+            panic_with_error!(env, Error::InvalidToken);
+        }
+    }
+
     /// The contract admin, which every admin-gated entry point requires.
     /// Returns the address so the caller can name it in an event.
     fn require_admin(env: &Env) -> Address {
@@ -696,6 +720,7 @@ impl TipSplitter {
 
     pub fn allow_token(env: Env, token: Address) {
         let admin = Self::require_admin(&env);
+        Self::require_token_contract(&env, &token);
         let mut list = Self::allowed_tokens(&env);
         if !list.contains(&token) {
             if list.len() >= MAX_ALLOWED_TOKENS {
@@ -1984,7 +2009,7 @@ impl TipSplitter {
         // Post-tip hook (#176): only now, after the funds and the event are
         // finalised, so a hook can never observe — or prevent — a tip that did
         // not settle.
-        Self::call_tip_hook(env, jar_id, from, amount);
+        Self::call_tip_hook(env, jar_id, from, amount, &token_addr);
 
         seq
     }
@@ -2020,7 +2045,13 @@ impl TipSplitter {
     /// funds and published its event. A failed invocation is discarded rather
     /// than propagated — the whole point is that a broken badge contract cannot
     /// stop a creator being paid.
-    fn call_tip_hook(env: &Env, jar_id: &String, from: &Address, amount: i128) {
+    fn call_tip_hook(
+        env: &Env,
+        jar_id: &String,
+        from: &Address,
+        amount: i128,
+        token: &Address,
+    ) {
         let Some(hook): Option<Address> = env.storage().instance().get(&DataKey::TipHook) else {
             return;
         };
@@ -2028,6 +2059,7 @@ impl TipSplitter {
         args.push_back(jar_id.clone().into_val(env));
         args.push_back(from.clone().into_val(env));
         args.push_back(amount.into_val(env));
+        args.push_back(token.clone().into_val(env));
         let _ = env.try_invoke_contract::<(), soroban_sdk::Error>(
             &hook,
             &symbol_short!("on_tip"),

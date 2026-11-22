@@ -1598,6 +1598,15 @@ fn jar_ttl(env: &Env, contract: &Address, jar_id: &String) -> u32 {
     })
 }
 
+fn min_tip_ttl(env: &Env, contract: &Address, jar_id: &String) -> u32 {
+    use soroban_sdk::testutils::storage::Persistent as _;
+    env.as_contract(contract, || {
+        env.storage()
+            .persistent()
+            .get_ttl(&DataKey::MinTip(jar_id.clone()))
+    })
+}
+
 /// Keep the contract's own instance and code alive across a large ledger
 /// advance, so a failure can only come from the jar entry under test.
 fn keep_instance_alive(env: &Env, contract: &Address) {
@@ -1696,6 +1705,25 @@ fn jar_access_extends_ttl_only_below_the_threshold() {
     assert_eq!(jar_ttl(env, &s.contract, &jar_id), JAR_TTL_THRESHOLD - 1);
     client.get_jar(&jar_id);
     assert_eq!(jar_ttl(env, &s.contract, &jar_id), JAR_TTL_LEDGERS);
+}
+
+#[test]
+fn jar_access_extends_minimum_tip_ttl_with_the_jar() {
+    let s = setup();
+    let env = &s.env;
+    let client = TipSplitterClient::new(env, &s.contract);
+    let owner = Address::generate(env);
+    let jar_id = single_recipient_jar(env, &client, &owner, "@min-ttl");
+    client.set_min_tip_amount(&jar_id, &Some(100));
+    keep_instance_alive(env, &s.contract);
+
+    let start = env.ledger().sequence();
+    let below = JAR_TTL_LEDGERS - JAR_TTL_THRESHOLD + 1;
+    env.ledger().set_sequence_number(start + below);
+    client.get_jar(&jar_id);
+
+    assert_eq!(jar_ttl(env, &s.contract, &jar_id), JAR_TTL_LEDGERS);
+    assert_eq!(min_tip_ttl(env, &s.contract, &jar_id), JAR_TTL_LEDGERS);
 }
 
 /// A jar flagged default-token-only (#313) rejects `tip_in_token` for any

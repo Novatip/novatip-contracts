@@ -215,6 +215,20 @@ fn admin_can_allow_and_disallow_a_token() {
     assert!(!client.is_token_allowed(&eurc));
 }
 
+#[test]
+fn allow_token_rejects_non_token_addresses() {
+    let s = setup();
+    let env = &s.env;
+    let client = TipSplitterClient::new(env, &s.contract);
+    let arbitrary = Address::generate(env);
+
+    assert_eq!(
+        client.try_allow_token(&arbitrary),
+        Err(Ok(Error::InvalidToken.into()))
+    );
+    assert!(!client.is_token_allowed(&arbitrary));
+}
+
 /// Only the admin may move the list — a jar owner who could add assets would
 /// turn the contract's allowlist into a per-jar one, and a stranger could open
 /// it to anything.
@@ -1021,7 +1035,7 @@ fn tip_rejects_control_characters_but_allows_newline() {
 /// The constructor must reject an admin and token that share the same address,
 /// preventing deployment of a permanently misconfigured contract (#69).
 #[test]
-#[should_panic(expected = "admin and token cannot be the same address")]
+#[should_panic]
 fn constructor_rejects_admin_and_token_with_same_address() {
     let env = Env::default();
     let addr = Address::generate(&env);

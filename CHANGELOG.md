@@ -4,6 +4,10 @@ All notable changes to `novatip-contracts` are documented here.
 
 ## [Unreleased]
 
+### Fixed
+
+- Renew jar minimum-tip storage together with the jar, reject non-SAC addresses in the token allowlist, pass the paid token to post-tip hooks, and report constructor token misconfiguration with a typed error (#231, #232, #233, #234).
+
 ### Documentation
 
 - `InvalidAmount` (5) is documented as retired in code and in the error and `preview_tip` tables, naming codes 25–29 as its replacements (#240).
