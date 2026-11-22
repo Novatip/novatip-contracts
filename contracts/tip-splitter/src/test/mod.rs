@@ -471,12 +471,14 @@ fn hook_jar<'a>(env: &'a Env, s: &'a Setup) -> (TipSplitterClient<'a>, Address, 
 }
 
 mod admin;
+mod auth_properties;
 mod escrow;
 mod fees;
 mod jars;
 mod interaction_regressions;
 mod lifecycle_regressions;
 mod properties;
+mod property_regressions;
 mod recurring;
 mod splits;
 mod tips;
