@@ -28,7 +28,7 @@ set -euo pipefail
 # rather than always passing `--min_amount`.
 #
 # The consequence of getting this wrong is silent: `--min_amount 0` is rejected
-# by the contract with `InvalidAmount`, and leaving the flag out is the only
+# by the contract with `InvalidMinimumAmount`, and leaving the flag out is the only
 # way back to the "no floor" default.
 
 : "${NETWORK:?set NETWORK}"
@@ -56,7 +56,7 @@ else
     exit 1
   fi
   if [ "${MIN_TIP}" = "0" ]; then
-    echo "error: MIN_TIP=0 would be rejected with InvalidAmount; use 'none' (or unset MIN_TIP) to clear the minimum" >&2
+    echo "error: MIN_TIP=0 would be rejected with InvalidMinimumAmount; use 'none' (or unset MIN_TIP) to clear the minimum" >&2
     exit 1
   fi
   # Strip leading zeros so the echo below and the CLI both see a canonical
