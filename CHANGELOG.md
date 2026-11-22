@@ -4,6 +4,10 @@ All notable changes to `novatip-contracts` are documented here.
 
 ## [Unreleased]
 
+### Fixed
+
+- Renew jar minimum-tip storage together with the jar, reject non-SAC addresses in the token allowlist, pass the paid token to post-tip hooks, and report constructor token misconfiguration with a typed error (#231, #232, #233, #234).
+
 ### Documentation
 
 - Rewrote "Detecting the interface version" as a table with one row per interface version from 1 to 10 (#271).
