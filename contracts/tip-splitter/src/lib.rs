@@ -1338,6 +1338,10 @@ impl TipSplitter {
         if current_admin == new_admin {
             panic_with_error!(&env, Error::AdminExists);
         }
+        // Require the proposed administrator's signature before changing the
+        // control key. A typo or stale address therefore cannot strand admin
+        // access or redirect protocol fees (#230).
+        new_admin.require_auth();
         env.storage()
             .instance()
             .set(&DataKey::Admin, &new_admin.clone());
@@ -1847,7 +1851,24 @@ impl TipSplitter {
         // with the SAC's own number (10/11/13), which collides with ours —
         // an empty wallet would surface as `SplitsEmpty`. Checked once, before
         // any transfer, so a failed tip never moves partial funds.
-        if client.balance(from) < amount {
+        // A tipper who is also a recipient keeps that recipient share, so only
+        // the fee and the other shares need to be funded (#229).
+        let (fee, net) = Self::split_fee(env, amount);
+        let plan = Self::payout_amounts(env, &jar.splits, from, net);
+        let mut required = 0i128;
+        for i in 0..plan.len() {
+            required = required
+                .checked_add(plan.get(i).unwrap())
+                .unwrap_or_else(|| panic_with_error!(env, Error::AmountOverflow));
+        }
+        if let Some(payee) = Self::fee_payee(env, from, fee) {
+            if payee != *from {
+                required = required
+                    .checked_add(fee)
+                    .unwrap_or_else(|| panic_with_error!(env, Error::AmountOverflow));
+            }
+        }
+        if client.balance(from) < required {
             panic_with_error!(env, Error::InsufficientBalance);
         }
 
@@ -2580,6 +2601,9 @@ impl TipSplitter {
         }
 
         let jar = Self::load_jar(&env, &jar_id);
+        if jar.paused {
+            panic_with_error!(&env, Error::JarPaused);
+        }
 
         let min_key = DataKey::MinTip(jar_id.clone());
         if let Some(min_amount) = env.storage().persistent().get::<DataKey, i128>(&min_key) {
@@ -2597,7 +2621,24 @@ impl TipSplitter {
     }
 
     pub fn preview_split_details(env: Env, jar_id: String, amount: i128) -> Vec<PreviewSplit> {
+        if amount == 0 {
+            panic_with_error!(&env, Error::AmountZero);
+        }
+        if amount < 0 {
+            panic_with_error!(&env, Error::AmountNegative);
+        }
         let jar = Self::load_jar(&env, &jar_id);
+        if jar.paused {
+            panic_with_error!(&env, Error::JarPaused);
+        }
+        let min_key = DataKey::MinTip(jar_id.clone());
+        if let Some(min_amount) = env.storage().persistent().get::<DataKey, i128>(&min_key) {
+            if amount < min_amount {
+                panic_with_error!(&env, Error::BelowMinTipAmount);
+            }
+            env.storage().persistent().extend_ttl(&min_key, JAR_TTL_THRESHOLD, JAR_TTL_LEDGERS);
+        }
+        Self::check_max_tip(&env, &jar_id, amount);
         let (_, net) = Self::split_fee(&env, amount);
         let amounts = Self::compute_shares(&env, &jar.splits, net);
         let mut result = Vec::new(&env);
@@ -2621,6 +2662,9 @@ impl TipSplitter {
             panic_with_error!(&env, Error::AmountNegative);
         }
         let jar = Self::load_jar(&env, &jar_id);
+        if jar.paused {
+            panic_with_error!(&env, Error::JarPaused);
+        }
 
         let min_key = DataKey::MinTip(jar_id.clone());
         if let Some(min_amount) = env.storage().persistent().get::<DataKey, i128>(&min_key) {
