@@ -6,6 +6,7 @@ All notable changes to `novatip-contracts` are documented here.
 
 ### Fixed
 
+- `create_recurring` and `collect_recurring` reject a plan that moves no funds with `NoFundsMoved`, so a supporter who is a jar's only recipient can no longer inflate totals, sequence numbers and `tip` events (#221).
 - Held balances are keyed by `(recipient, token)`: `get_held` and `withdraw_held` take the token, `withdraw_held` pays only that token's balance, and the `withdraw` event is now version 2 with a `token` field. `version()` is now `12`. Balances held under the previous single-token key are not migrated (#219).
 
 - Tippers who are also recipients are charged only for funds that leave their account (#229).

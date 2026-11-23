@@ -164,7 +164,7 @@ one belongs to a jar, the other to a `(jar, supporter)` pair.
 | `get_held(recipient, token) -> i128` | — | How much the contract is holding ([held](#glossary-held)) for `recipient` in `token` because a past tip could not deliver their share. `0` when nothing is held. |
 | `withdraw_held(recipient, token)` | `recipient` | Pay a recipient their balance held in `token` once they can receive again. Pays only that token's balance. Rejected with `NothingHeld` when nothing is owed in `token`. Emits a `withdraw` event with `HeldWithdrawnEvent { version, amount, token }` data. |
 | `withdraw_held_to(recipient, to)` | `recipient` | Pay `recipient`'s balance held in the default token to `to` instead (#311), for an account that can no longer receive the token. Rejects `to` equal to the contract or the token (`InvalidRecipient`) and `NothingHeld` when nothing is owed. Emits a `wd_to` event with topics `(wd_to, recipient)` and `HeldWithdrawnToEvent { version, amount, to }` data. |
-| `create_recurring(supporter, jar_id, amount, period_ledgers, message) -> u128` | `supporter` | Register a recurring-tip schedule. Validates the jar exists and the amount/message pass the same checks `tip` applies; `period_ledgers` must be non-zero. Assigns a fresh id, stores the entry with its first `next_due_ledger`, and emits a `recr_add` event. Returns the id. The schedule moves funds through `collect_recurring`: the supporter must have approved this contract as a token spender for at least `amount` per period. |
+| `create_recurring(supporter, jar_id, amount, period_ledgers, message) -> u128` | `supporter` | Register a recurring-tip schedule. Validates the jar exists and the amount/message pass the same checks `tip` applies; `period_ledgers` must be non-zero. Assigns a fresh id, stores the entry with its first `next_due_ledger`, and emits a `recr_add` event. Returns the id. Rejects a schedule that would move no funds with `NoFundsMoved`. The schedule moves funds through `collect_recurring`: the supporter must have approved this contract as a token spender for at least `amount` per period. |
 | `cancel_recurring(caller, id)` | `caller`: the entry's `supporter` or the jar's `owner` | Remove a recurring-tip record. Either party may cancel (#324); anyone else gets `NotAuthorized`. Emits a `recr_del` event naming who cancelled. |
 | `cancel_recurring(id)` | the entry's `supporter` | Remove a recurring-tip record. Emits a `recr_del` event. |
 | `update_recurring(id, amount, message)` | the entry's `supporter` | Change a recurring tip's amount and message in place (#316). Keeps the id and `next_due_ledger`. Validated like `create_recurring` (`AmountZero` / `AmountNegative` → `MessageTooLong` / `InvalidMessage` → `JarNotFound` → `BelowMinTipAmount` → split arithmetic); `RecurringNotFound` for an unknown id. Emits a `recr_upd` event. |
@@ -808,7 +808,10 @@ self-tip rule.
 
 **A tipper who is the jar's only recipient moves nothing**, and the call is
 rejected with `NoFundsMoved` (30) rather than publishing a `tip` event that
-claims a tip happened at no cost.
+claims a tip happened at no cost. The same rule applies to recurring tips
+(#221): `create_recurring` rejects a schedule that would move nothing, so it is
+never stored, and `collect_recurring` rejects a collection that would move
+nothing (for example after the jar's splits changed) before any state changes.
 
 To see these amounts before signing, use
 [`preview_tip(jar_id, from, amount)`](#previewing-a-tip-for-a-known-sender): it
@@ -986,7 +989,7 @@ exactly the way issue #87 found it had.
 | 27 | `SplitAmountTooSmall` | The amount — after the protocol fee, when one is set — is small enough that some recipient's share would truncate to zero (`net * bps < 10_000`). `get_min_accepted_tip` reports the smallest amount that clears it. |
 | 28 | `AmountOverflow` | `amount * bps` (or `amount * fee_bps`) would overflow `i128`. |
 | 29 | `InvalidMinimumAmount` | `set_min_tip_amount` was given a minimum that is zero or negative. |
-| 30 | `NoFundsMoved` | A tip where every share was skipped (every recipient is the tipper) would move no funds. |
+| 30 | `NoFundsMoved` | A tip, recurring schedule or recurring collection where every share would be skipped (every recipient is the tipper) and no fee is paid would move no funds. |
 | 31 | `InvalidRecipient` | A split recipient or jar owner is the contract itself or its token. A transfer to the jar's current owner is `SameOwner` (45), not this. |
 | 32 | `AdminExists` | `transfer_admin` was called with the current admin's address. |
 | 33 | `ContractPaused` | A tip was attempted while the contract is paused. |

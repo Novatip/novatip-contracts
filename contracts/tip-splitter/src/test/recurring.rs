@@ -577,3 +577,84 @@ fn recr_del_records_who_cancelled() {
     assert_eq!(cancelled, id);
     assert_eq!(cancelled_by, owner);
 }
+
+/// #221 — a schedule whose supporter is the jar's only recipient moves no
+/// funds, so it is refused when created, and a schedule that becomes one after
+/// the jar's splits change is refused at collection with no state change.
+#[test]
+fn recurring_that_moves_no_funds_is_rejected() {
+    let s = setup();
+    let env = &s.env;
+    let client = TipSplitterClient::new(env, &s.contract);
+    let owner = Address::generate(env);
+    let supporter = Address::generate(env);
+    let alice = Address::generate(env);
+
+    let self_jar = String::from_str(env, "@selfjar");
+    client.create_jar(
+        &owner,
+        &self_jar,
+        &vec![
+            env,
+            Split {
+                to: supporter.clone(),
+                bps: 10000,
+            },
+        ],
+    );
+    assert_eq!(
+        client.try_create_recurring(
+            &supporter,
+            &self_jar,
+            &500,
+            &100,
+            &String::from_str(env, "self")
+        ),
+        Err(Ok(Error::NoFundsMoved.into()))
+    );
+
+    // A schedule stored while the jar paid someone else.
+    let jar = String::from_str(env, "@rotate");
+    client.create_jar(
+        &owner,
+        &jar,
+        &vec![
+            env,
+            Split {
+                to: alice.clone(),
+                bps: 10000,
+            },
+        ],
+    );
+    let token = token::Client::new(env, &s.token);
+    token::StellarAssetClient::new(env, &s.token).mint(&supporter, &1_000);
+    token.approve(&supporter, &s.contract, &1_000, &(env.ledger().sequence() + 100_000));
+    let id = client.create_recurring(&supporter, &jar, &500, &100, &String::from_str(env, "m"));
+    let due = client.get_recurring(&id).next_due_ledger;
+
+    // The owner now points the jar at the supporter alone.
+    client.update_splits(
+        &jar,
+        &vec![
+            env,
+            Split {
+                to: supporter.clone(),
+                bps: 10000,
+            },
+        ],
+    );
+    env.ledger().set_sequence_number(due);
+
+    assert_eq!(
+        client.try_collect_recurring(&id),
+        Err(Ok(Error::NoFundsMoved.into()))
+    );
+    assert_eq!(client.get_recurring(&id).next_due_ledger, due);
+    assert_eq!(client.get_tip_count(), 0);
+    assert_eq!(client.get_jar_stats(&jar).tip_count, 0);
+    assert_eq!(client.get_jar_stats(&jar).total, 0);
+    let stats = client.get_supporter_stats(&jar, &supporter);
+    assert_eq!(stats.tip_count, 0);
+    assert_eq!(stats.total, 0);
+    assert_eq!(token.balance(&supporter), 1_000);
+}

@@ -1991,9 +1991,8 @@ impl TipSplitter {
         // Issue #93: reject a tip where no funds actually moved. When every
         // recipient is the tipper themselves, all shares are skipped and the
         // event would claim a tip occurred at zero cost — forgeable and
-        // misleading for indexers, leaderboards, and notifications. Applied to
-        // direct tips only, as before; the recurring path's guard is tracked
-        // in its own bug issue.
+        // misleading for indexers, leaderboards, and notifications. The
+        // recurring path checks the same plan up front (#221).
         if spender.is_none() && total_transferred == 0 {
             panic_with_error!(env, Error::NoFundsMoved);
         }
@@ -2184,6 +2183,20 @@ impl TipSplitter {
             .unwrap_or_else(|| panic_with_error!(env, Error::AmountOverflow))
             / BPS_DENOM as i128;
         (fee, amount - fee)
+    }
+
+    /// Whether a tip of `amount` from `from` through `splits` moves any funds:
+    /// some recipient other than the tipper gets a share, or a fee is paid to
+    /// someone other than the tipper (#221). The same plan `pay_out` executes.
+    fn plan_moves_funds(env: &Env, from: &Address, splits: &Vec<Split>, amount: i128) -> bool {
+        let (fee, net) = Self::split_fee(env, amount);
+        let plan = Self::payout_amounts(env, splits, from, net);
+        for i in 0..plan.len() {
+            if plan.get(i).unwrap() > 0 {
+                return true;
+            }
+        }
+        Self::fee_payee(env, from, fee).is_some()
     }
 
     /// Who a fee of `fee` should be transferred to, or `None` when nothing
@@ -2379,6 +2392,13 @@ impl TipSplitter {
         let (_, net) = Self::split_fee(&env, amount);
         let _ = Self::compute_shares(&env, &jar.splits, net);
 
+        // A schedule that would move nothing (the supporter is the jar's only
+        // recipient and no fee leaves their account) is never stored (#221);
+        // `collect_recurring` repeats the check in case the jar changes later.
+        if !Self::plan_moves_funds(&env, &supporter, &jar.splits, amount) {
+            panic_with_error!(&env, Error::NoFundsMoved);
+        }
+
         let count_key = DataKey::RecurringCount;
         let count: u128 = env.storage().persistent().get(&count_key).unwrap_or(0);
         let id = count + 1;
@@ -2518,6 +2538,13 @@ impl TipSplitter {
         }
 
         let jar = Self::load_jar(&env, &entry.jar_id);
+
+        // Same rule as a direct tip (#93), checked before any state changes:
+        // a collection that would move no funds must not publish a `tip`
+        // event, bump the totals or consume a sequence number (#221).
+        if !Self::plan_moves_funds(&env, &entry.supporter, &jar.splits, entry.amount) {
+            panic_with_error!(&env, Error::NoFundsMoved);
+        }
 
         // A recurring schedule is a promise about the *default* token: it was
         // registered against `tip`'s token and minimum, and it is collected
