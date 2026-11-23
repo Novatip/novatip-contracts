@@ -6,6 +6,12 @@ All notable changes to `novatip-contracts` are documented here.
 
 ### Fixed
 
+- Tippers who are also recipients are charged only for funds that leave their account (#229).
+- `transfer_admin` now requires the proposed administrator's authorization before changing control (#230).
+- `preview_split_details` applies the same amount, minimum, maximum and paused-jar validation as tipping previews (#227, #228).
+
+### Fixed
+
 - `NotAuthorized` is now error code 44. It had been added at 40, colliding with `TooManyAllowedTokens`; as the last appended variant it takes the next free number, so no existing code is renumbered. The docs table, `interface.json` and the pinned-code test were updated to match.
 - Repaired test modules that did not compile after prior merges (unclosed `MigratedEvent` and test functions, an interleaved escrow test and a stale `tip_many` call), and refreshed assertions that had drifted from the contract's behavior.
 - Renew jar minimum-tip storage together with the jar, reject non-SAC addresses in the token allowlist, pass the paid token to post-tip hooks, and report constructor token misconfiguration with a typed error (#231, #232, #233, #234).
