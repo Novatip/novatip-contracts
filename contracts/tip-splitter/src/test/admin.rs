@@ -183,7 +183,7 @@ fn version_matches_the_interface_constant() {
     assert_eq!(client.version(), INTERFACE_VERSION);
     assert_eq!(
         client.version(),
-        13,
+        14,
         "the published version is part of the public interface; bump \
          INTERFACE_VERSION when the shape changes, do not edit this test \
          to match a silent change"

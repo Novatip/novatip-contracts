@@ -678,6 +678,30 @@
   {
     "udt_struct_v0": {
       "lib": "",
+      "name": "FeeHeldEvent",
+      "fields": [
+        {
+          "name": "amount",
+          "type_": "i128"
+        },
+        {
+          "name": "payee",
+          "type_": "address"
+        },
+        {
+          "name": "token",
+          "type_": "address"
+        },
+        {
+          "name": "version",
+          "type_": "u32"
+        }
+      ]
+    }
+  },
+  {
+    "udt_struct_v0": {
+      "lib": "",
       "name": "HeldWithdrawnToEvent",
       "fields": [
         {

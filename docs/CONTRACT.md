@@ -1675,6 +1675,16 @@ extends it, but if it lapses, the entry is archived. Restore it before
 withdrawing; see [Storage model and idle jars](#storage-model-and-idle-jars-56).
 The event log alone cannot recreate a spendable balance.
 
+### A fee that cannot be paid
+
+The protocol fee follows the same rule as a recipient's share (#226). If the
+payee (the admin, or the fee recipient) cannot receive the token, the fee is
+held under `Held(payee, token)`, the tip still settles, and a `fee_held` event
+`(sym, jar_id)` with `FeeHeldEvent { version, payee, token, amount }` is
+published after the transfer attempt. The `tip` event's `fee` still reports the
+fee that left the tipper. The payee collects it with `withdraw_held(payee,
+token)` once they can receive the token. `collect_recurring` behaves the same.
+
 ### Held balances are per token
 
 A held share is keyed by the recipient **and** the token it was paid in
@@ -2052,7 +2062,7 @@ changes. Do not bump it for an internal refactor, a new storage key, or a doc
 edit — none of those are visible to a consumer, and a version that changes when
 nothing observable did is a version consumers stop trusting.
 
-This build ships `version() == 13`. Every bump since `version()` was added:
+This build ships `version() == 14`. Every bump since `version()` was added:
 
 | Version | What it added or changed | Issues |
 |---------|--------------------------|--------|
@@ -2069,6 +2079,7 @@ This build ships `version() == 13`. Every bump since `version()` was added:
 | 11 | Adds `request_recipient_removal`, `cancel_recipient_removal` and `execute_recipient_removal` with the `rm_req` / `rm_cancel` events, and appends error codes 45–47. `NotAuthorized` moves from the colliding 40 to 44. | #239, #241 |
 | 12 | Held balances are keyed by token: `get_held(recipient, token)` and `withdraw_held(recipient, token)` take the token, and the `withdraw` event is version 2 with a `token` field. Held balances written under the old single-token key are not migrated. No new error codes. | #219 |
 | 13 | Recurring schedules are bound to the jar they were created for, with the new `JarChanged` error (48). No function signature changed. | #222 |
+| 14 | A protocol fee the payee cannot receive is escrowed for them (`Held(payee, token)`, collected with `withdraw_held`) instead of failing the tip, and the new `fee_held` event records it. No new error codes. | #226 |
 
 `CHANGELOG.md` has the full entry for each change.
 
@@ -2444,6 +2455,7 @@ the same as a quiet contract.
 | `jar_xfer` | `(sym, jar_id)` | `JarTransferredEvent { version, previous_owner, new_owner }` |
 | `jar_del` | `(sym, jar_id)` | `JarDeletedEvent { version, jar_id }` |
 | `jar_rnm` | `(sym, old jar_id)` | `JarRenamedEvent { version, jar_id, new_jar_id }` |
+| `fee_held` | `(sym, jar_id)` | `FeeHeldEvent { version, payee, token, amount }` (the protocol fee could not be paid and was escrowed, #226) |
 | `min_tip` | `(sym, jar_id)` | `MinTipEvent { version, amount }` |
 | `max_tip` | `(sym, jar_id)` | `MaxTipEvent { version, amount }` |
 | `tip` | `(sym, jar_id)` | `TipEvent { version, from, amount, fee, message, breakdown, token, seq, reference }` |

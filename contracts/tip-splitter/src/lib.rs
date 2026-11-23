@@ -144,7 +144,7 @@ const INSTANCE_TTL_THRESHOLD: u32 = JAR_TTL_THRESHOLD;
 ///
 /// This is a per-contract number for client feature detection. It complements
 /// the per-event schema version proposed in #83 rather than replacing it.
-const INTERFACE_VERSION: u32 = 13;
+const INTERFACE_VERSION: u32 = 14;
 
 /// Storage schema this build expects. Bump it together with a new step in
 /// `migrate` whenever stored state needs transforming after an upgrade (#325).
@@ -508,6 +508,17 @@ pub struct HeldWithdrawnEvent {
     pub version: u32,
     pub amount: i128,
     pub token: Address,
+}
+
+// Data published by `fee_held` (#226) when the protocol fee could not be paid
+// and was escrowed for the payee instead; the topics are the symbol and the jar.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FeeHeldEvent {
+    pub version: u32,
+    pub payee: Address,
+    pub token: Address,
+    pub amount: i128,
 }
 
 // Data published by `wd_to` (#311); the topic carries the recipient.
@@ -1959,8 +1970,31 @@ impl TipSplitter {
         let (fee, net) = Self::split_fee(env, amount);
         let plan = Self::payout_amounts(env, splits, from, net);
         let fee_moved = match Self::fee_payee(env, from, fee) {
-            Some(admin) => {
-                send(&admin, &fee);
+            Some(payee) => {
+                if !try_send(&payee, &fee) {
+                    // The payee cannot receive the token (no trustline, or
+                    // deauthorised). Escrow the fee for them, as for a recipient's
+                    // share, instead of reverting every tip (#226); they collect
+                    // it with `withdraw_held`.
+                    send(&contract_addr, &fee);
+                    let held_key = DataKey::Held(payee.clone(), token_addr.clone());
+                    let held: i128 = env.storage().persistent().get(&held_key).unwrap_or(0);
+                    env.storage().persistent().set(&held_key, &(held + fee));
+                    env.storage().persistent().extend_ttl(
+                        &held_key,
+                        JAR_TTL_THRESHOLD,
+                        JAR_TTL_LEDGERS,
+                    );
+                    env.events().publish(
+                        (symbol_short!("fee_held"), jar_id.clone()),
+                        FeeHeldEvent {
+                            version: 1,
+                            payee,
+                            token: token_addr.clone(),
+                            amount: fee,
+                        },
+                    );
+                }
                 fee
             }
             None => 0,
