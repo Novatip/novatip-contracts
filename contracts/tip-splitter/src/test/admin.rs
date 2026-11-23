@@ -183,7 +183,7 @@ fn version_matches_the_interface_constant() {
     assert_eq!(client.version(), INTERFACE_VERSION);
     assert_eq!(
         client.version(),
-        12,
+        13,
         "the published version is part of the public interface; bump \
          INTERFACE_VERSION when the shape changes, do not edit this test \
          to match a silent change"
@@ -626,6 +626,7 @@ fn error_codes_are_pinned_to_the_public_interface() {
         (Error::SameOwner, 45),
         (Error::RemovalNotRequested, 46),
         (Error::RemovalNotReady, 47),
+        (Error::JarChanged, 48),
     ];
 
     for (variant, expected) in codes {

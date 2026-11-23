@@ -658,3 +658,80 @@ fn recurring_that_moves_no_funds_is_rejected() {
     assert_eq!(stats.total, 0);
     assert_eq!(token.balance(&supporter), 1_000);
 }
+
+/// #222 — a schedule belongs to the jar it was created for, not to whoever
+/// later claims the slug.
+#[test]
+fn recurring_does_not_pay_a_jar_created_under_a_freed_slug() {
+    let s = setup();
+    let env = &s.env;
+    let (client, alice, _bob, supporter, jar_id, id) = recurring_fixture(env, &s, 1_000, 1_000);
+    let token = token::Client::new(env, &s.token);
+    let due = client.get_recurring(&id).next_due_ledger;
+
+    // The owner deletes the jar and a stranger registers the same slug.
+    client.delete_jar(&jar_id);
+    let stranger = Address::generate(env);
+    client.create_jar(
+        &Address::generate(env),
+        &jar_id,
+        &vec![
+            env,
+            Split {
+                to: stranger.clone(),
+                bps: 10000,
+            },
+        ],
+    );
+    env.ledger().set_sequence_number(due);
+
+    assert_eq!(
+        client.try_collect_recurring(&id),
+        Err(Ok(Error::JarChanged.into()))
+    );
+    assert_eq!(token.balance(&stranger), 0);
+    assert_eq!(token.balance(&alice), 0);
+    assert_eq!(token.balance(&supporter), 10_000);
+    assert_eq!(client.get_recurring(&id).next_due_ledger, due);
+    assert_eq!(client.get_jar_stats(&jar_id).tip_count, 0);
+}
+
+#[test]
+fn recurring_never_pays_whoever_claims_a_renamed_jars_old_slug() {
+    let s = setup();
+    let env = &s.env;
+    let (client, _alice, _bob, supporter, jar_id, id) = recurring_fixture(env, &s, 1_000, 1_000);
+    let token = token::Client::new(env, &s.token);
+    let due = client.get_recurring(&id).next_due_ledger;
+
+    let new_slug = String::from_str(env, "@renamed");
+    client.rename_jar(&jar_id, &new_slug);
+    env.ledger().set_sequence_number(due);
+
+    // The old slug is free: the schedule fails with a typed error.
+    assert_eq!(
+        client.try_collect_recurring(&id),
+        Err(Ok(Error::JarNotFound.into()))
+    );
+
+    // Someone claims the old slug; the schedule still refuses to pay them.
+    let squatter = Address::generate(env);
+    client.create_jar(
+        &Address::generate(env),
+        &jar_id,
+        &vec![
+            env,
+            Split {
+                to: squatter.clone(),
+                bps: 10000,
+            },
+        ],
+    );
+    assert_eq!(
+        client.try_collect_recurring(&id),
+        Err(Ok(Error::JarChanged.into()))
+    );
+    assert_eq!(token.balance(&squatter), 0);
+    assert_eq!(token.balance(&supporter), 10_000);
+}
+

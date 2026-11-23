@@ -66,6 +66,7 @@ entries archive independently.
 | `MinTip(jar_id)` | Persistent | `set_min_tip_amount`, clear, and `rename_jar` | Tip validation, previews and minimum-tip reads | Set/clear, minimum reads, and `load_jar` renew it alongside the jar | Restore it to recover the configured floor; a never-set floor is `None`. |
 | `Held(recipient, token)` | Persistent | `pay_out` when a recipient cannot receive a share | `get_held`, `withdraw_held` | A new held credit and positive `get_held` reads extend it | Restore to withdraw the balance; the event log alone cannot recreate a spendable held balance. |
 | `Recurring(id)` | Persistent | `create_recurring`, `update_recurring`, `collect_recurring` | `get_recurring`, `cancel_recurring`, `update_recurring`, `collect_recurring` | Creation, update, read and collection extend it | Restore the schedule; otherwise collection reports `RecurringNotFound`. |
+| `JarUid(slug)`, `RecurringJar(id)` | Persistent | `create_jar`, `rename_jar` (moves the uid), `create_recurring` | `collect_recurring` | Extended with the jar and the schedule | Absent for jars created before #222 until a schedule is registered against them; a schedule with no `RecurringJar` entry is not checked. |
 | `RecurringCount` | Persistent | `create_recurring` | `create_recurring` | Extended when a schedule is created | Restore the counter to preserve the next id; an absent counter is read as zero. |
 | `Stats(jar_id)` | Persistent | Successful tips through `bump_totals`; `rename_jar` moves an existing entry | `get_jar_stats`, combined jar info | A successful tip and a positive stats read extend it | Restore to recover totals; if no stats entry has ever been written, the getter returns zero totals. |
 | `Supporter(jar_id, supporter)` | Persistent | Successful tips through `bump_totals` | `get_supporter_stats` | A successful tip and a positive stats read extend it | Restore to recover totals; a never-written entry reads as zero totals. |
@@ -164,7 +165,7 @@ one belongs to a jar, the other to a `(jar, supporter)` pair.
 | `get_held(recipient, token) -> i128` | — | How much the contract is holding ([held](#glossary-held)) for `recipient` in `token` because a past tip could not deliver their share. `0` when nothing is held. |
 | `withdraw_held(recipient, token)` | `recipient` | Pay a recipient their balance held in `token` once they can receive again. Pays only that token's balance. Rejected with `NothingHeld` when nothing is owed in `token`. Emits a `withdraw` event with `HeldWithdrawnEvent { version, amount, token }` data. |
 | `withdraw_held_to(recipient, to)` | `recipient` | Pay `recipient`'s balance held in the default token to `to` instead (#311), for an account that can no longer receive the token. Rejects `to` equal to the contract or the token (`InvalidRecipient`) and `NothingHeld` when nothing is owed. Emits a `wd_to` event with topics `(wd_to, recipient)` and `HeldWithdrawnToEvent { version, amount, to }` data. |
-| `create_recurring(supporter, jar_id, amount, period_ledgers, message) -> u128` | `supporter` | Register a recurring-tip schedule. Validates the jar exists and the amount/message pass the same checks `tip` applies; `period_ledgers` must be non-zero. Assigns a fresh id, stores the entry with its first `next_due_ledger`, and emits a `recr_add` event. Returns the id. Rejects a schedule that would move no funds with `NoFundsMoved`. The schedule moves funds through `collect_recurring`: the supporter must have approved this contract as a token spender for at least `amount` per period. |
+| `create_recurring(supporter, jar_id, amount, period_ledgers, message) -> u128` | `supporter` | Register a recurring-tip schedule. Validates the jar exists and the amount/message pass the same checks `tip` applies; `period_ledgers` must be non-zero. Assigns a fresh id, stores the entry with its first `next_due_ledger`, and emits a `recr_add` event. Returns the id. Rejects a schedule that would move no funds with `NoFundsMoved`. The schedule is bound to the jar's internal uid, not just its slug (see [recurring tips and jar changes](#recurring-tips-and-jar-changes)). The schedule moves funds through `collect_recurring`: the supporter must have approved this contract as a token spender for at least `amount` per period. |
 | `cancel_recurring(caller, id)` | `caller`: the entry's `supporter` or the jar's `owner` | Remove a recurring-tip record. Either party may cancel (#324); anyone else gets `NotAuthorized`. Emits a `recr_del` event naming who cancelled. |
 | `cancel_recurring(id)` | the entry's `supporter` | Remove a recurring-tip record. Emits a `recr_del` event. |
 | `update_recurring(id, amount, message)` | the entry's `supporter` | Change a recurring tip's amount and message in place (#316). Keeps the id and `next_due_ledger`. Validated like `create_recurring` (`AmountZero` / `AmountNegative` → `MessageTooLong` / `InvalidMessage` → `JarNotFound` → `BelowMinTipAmount` → split arithmetic); `RecurringNotFound` for an unknown id. Emits a `recr_upd` event. |
@@ -1008,6 +1009,7 @@ exactly the way issue #87 found it had.
 | 45 | `SameOwner` | `transfer_jar_ownership` named the jar's current owner as the new owner. A no-op handoff, distinct from `InvalidRecipient` (31). |
 | 46 | `RemovalNotRequested` | `execute_recipient_removal` found no pending removal for the jar, or the jar's splits changed since it was announced (#239). |
 | 47 | `RemovalNotReady` | `execute_recipient_removal` was called before the 120 960-ledger delay elapsed (#239). |
+| 48 | `JarChanged` | `collect_recurring` found that the schedule's slug now names a different jar than the one it was created for, after the jar was deleted and the slug re-created (#222). |
 
 Error codes are part of the public interface: `@novatip/sdk` and the frontend
 both map these numbers to user-facing messages. New variants are **appended**
@@ -1681,6 +1683,23 @@ token is therefore withdrawn with `withdraw_held(recipient, token)` and paid in
 that same token; it never touches the default token's balance. Withdraw each
 token separately. `withdraw_held_to` pays only the default-token balance.
 
+## Recurring tips and jar changes
+
+A recurring schedule stores the jar's slug, and `collect_recurring` needs no
+signature from the supporter, so it must never follow a slug to a different
+jar (#222). Every jar has an internal uid that `create_jar` assigns, `rename_jar`
+keeps and `delete_jar` removes. `create_recurring` records the uid of the jar it
+was created for.
+
+- **Delete, then re-create the slug:** the new jar has a new uid, so collecting
+  the older schedule fails with `JarChanged` (48) and moves no funds.
+- **Rename:** the schedule still names the old slug. While the old slug is free
+  collection fails with `JarNotFound`; if someone claims it, collection fails
+  with `JarChanged`. The schedule does not follow the jar to its new slug.
+  Cancel it and register a new one against the new slug.
+- **Schedules created before this change** carry no uid binding and are not
+  checked.
+
 ## Reading tip totals
 
 Two views report what has actually settled on-chain:
@@ -2033,7 +2052,7 @@ changes. Do not bump it for an internal refactor, a new storage key, or a doc
 edit — none of those are visible to a consumer, and a version that changes when
 nothing observable did is a version consumers stop trusting.
 
-This build ships `version() == 12`. Every bump since `version()` was added:
+This build ships `version() == 13`. Every bump since `version()` was added:
 
 | Version | What it added or changed | Issues |
 |---------|--------------------------|--------|
@@ -2049,6 +2068,7 @@ This build ships `version() == 12`. Every bump since `version()` was added:
 | 10 | Adds `change_recipient` (publishes `splits`), `withdraw_held_to` with the `wd_to` event, and `set_fee_recipient` / `get_fee_recipient` with the `fee_rcpt` event. No new error codes. | #310, #311, #312 |
 | 11 | Adds `request_recipient_removal`, `cancel_recipient_removal` and `execute_recipient_removal` with the `rm_req` / `rm_cancel` events, and appends error codes 45–47. `NotAuthorized` moves from the colliding 40 to 44. | #239, #241 |
 | 12 | Held balances are keyed by token: `get_held(recipient, token)` and `withdraw_held(recipient, token)` take the token, and the `withdraw` event is version 2 with a `token` field. Held balances written under the old single-token key are not migrated. No new error codes. | #219 |
+| 13 | Recurring schedules are bound to the jar they were created for, with the new `JarChanged` error (48). No function signature changed. | #222 |
 
 `CHANGELOG.md` has the full entry for each change.
 

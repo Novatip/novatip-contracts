@@ -144,7 +144,7 @@ const INSTANCE_TTL_THRESHOLD: u32 = JAR_TTL_THRESHOLD;
 ///
 /// This is a per-contract number for client feature detection. It complements
 /// the per-event schema version proposed in #83 rather than replacing it.
-const INTERFACE_VERSION: u32 = 12;
+const INTERFACE_VERSION: u32 = 13;
 
 /// Storage schema this build expects. Bump it together with a new step in
 /// `migrate` whenever stored state needs transforming after an upgrade (#325).
@@ -266,6 +266,13 @@ pub enum DataKey {
     /// token the share was paid in (#219); value is the amount owed them in
     /// that token.
     Held(Address, Address),
+    /// Immutable internal id of the jar currently under a slug (#222). Assigned
+    /// by `create_jar`, moved by `rename_jar`, removed by `delete_jar`.
+    JarUid(String),
+    /// Monotonic counter of issued jar uids. Instance storage.
+    JarCount,
+    /// The jar uid a recurring schedule was created against (#222).
+    RecurringJar(u128),
     /// A recurring-tip schedule keyed by its assigned id.
     Recurring(u128),
     /// Monotonic counter of issued recurring-tip ids.
@@ -411,6 +418,9 @@ pub enum Error {
     /// `execute_recipient_removal` was called before the announced delay
     /// (`RECIPIENT_REMOVAL_DELAY_LEDGERS`) elapsed.
     RemovalNotReady = 47,
+    /// `collect_recurring` found that the slug the schedule was created for now
+    /// names a different jar (deleted and re-created, #222).
+    JarChanged = 48,
 }
 
 #[contractclient(name = "TipHookClient")]
@@ -835,6 +845,7 @@ impl TipSplitter {
                 paused: false,
             },
         );
+        Self::assign_jar_uid(&env, &jar_id);
 
         // Issue #91: extend instance TTL on jar creation so the contract stays
         // alive alongside its jars.
@@ -1329,6 +1340,9 @@ impl TipSplitter {
         env.storage()
             .persistent()
             .remove(&DataKey::PendingRemoval(jar_id.clone()));
+        env.storage()
+            .persistent()
+            .remove(&DataKey::JarUid(jar_id.clone()));
 
         env.events().publish(
             (symbol_short!("jar_del"), jar_id.clone()),
@@ -1473,6 +1487,18 @@ impl TipSplitter {
         env.storage()
             .persistent()
             .remove(&DataKey::PendingRemoval(jar_id.clone()));
+
+        // The jar keeps its uid under the new slug, so a schedule created for the
+        // old slug can no longer be mistaken for one that follows the jar (#222).
+        let old_uid_key = DataKey::JarUid(jar_id.clone());
+        if let Some(uid) = env.storage().persistent().get::<_, u128>(&old_uid_key) {
+            let new_uid_key = DataKey::JarUid(new_jar_id.clone());
+            env.storage().persistent().set(&new_uid_key, &uid);
+            env.storage()
+                .persistent()
+                .extend_ttl(&new_uid_key, JAR_TTL_THRESHOLD, JAR_TTL_LEDGERS);
+            env.storage().persistent().remove(&old_uid_key);
+        }
 
         // Move stats too
         let old_stats_key = DataKey::Stats(jar_id.clone());
@@ -2426,6 +2452,14 @@ impl TipSplitter {
         env.storage()
             .persistent()
             .extend_ttl(&count_key, JAR_TTL_THRESHOLD, JAR_TTL_LEDGERS);
+        // Bind the schedule to this jar, not just to its slug (#222).
+        let bound_key = DataKey::RecurringJar(id);
+        env.storage()
+            .persistent()
+            .set(&bound_key, &Self::jar_uid(&env, &jar_id));
+        env.storage()
+            .persistent()
+            .extend_ttl(&bound_key, JAR_TTL_THRESHOLD, JAR_TTL_LEDGERS);
 
         env.events().publish(
             (symbol_short!("recr_add"), supporter, jar_id.clone()),
@@ -2456,6 +2490,7 @@ impl TipSplitter {
         caller.require_auth();
 
         env.storage().persistent().remove(&rec_key);
+        env.storage().persistent().remove(&DataKey::RecurringJar(id));
         env.events()
             .publish((symbol_short!("recr_del"), entry.supporter), (id, caller));
     }
@@ -2538,6 +2573,25 @@ impl TipSplitter {
         }
 
         let jar = Self::load_jar(&env, &entry.jar_id);
+
+        // The slug may have been freed and claimed by someone else since the
+        // supporter registered this schedule (#222). Fail with a typed error
+        // before any state changes rather than paying the new jar. Schedules
+        // registered before jar uids existed carry no binding and are not
+        // checked.
+        let bound_key = DataKey::RecurringJar(id);
+        if let Some(bound_uid) = env.storage().persistent().get::<_, u128>(&bound_key) {
+            let current: Option<u128> = env
+                .storage()
+                .persistent()
+                .get(&DataKey::JarUid(entry.jar_id.clone()));
+            if current != Some(bound_uid) {
+                panic_with_error!(&env, Error::JarChanged);
+            }
+            env.storage()
+                .persistent()
+                .extend_ttl(&bound_key, JAR_TTL_THRESHOLD, JAR_TTL_LEDGERS);
+        }
 
         // Same rule as a direct tip (#93), checked before any state changes:
         // a collection that would move no funds must not publish a `tip`
@@ -3012,6 +3066,37 @@ impl TipSplitter {
             .unwrap_or_else(|| panic_with_error!(env, Error::JarNotFound));
         Self::extend_jar_and_min_ttl(env, jar_id);
         jar
+    }
+
+    /// Gives the jar under `jar_id` a fresh uid and returns it (#222).
+    fn assign_jar_uid(env: &Env, jar_id: &String) -> u128 {
+        let count_key = DataKey::JarCount;
+        let uid: u128 = env
+            .storage()
+            .instance()
+            .get::<_, u128>(&count_key)
+            .unwrap_or(0)
+            + 1;
+        env.storage().instance().set(&count_key, &uid);
+        let key = DataKey::JarUid(jar_id.clone());
+        env.storage().persistent().set(&key, &uid);
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, JAR_TTL_THRESHOLD, JAR_TTL_LEDGERS);
+        uid
+    }
+
+    /// The uid of the jar under `jar_id`. A jar created before uids existed gets
+    /// one the first time a schedule is registered against it.
+    fn jar_uid(env: &Env, jar_id: &String) -> u128 {
+        match env
+            .storage()
+            .persistent()
+            .get::<_, u128>(&DataKey::JarUid(jar_id.clone()))
+        {
+            Some(uid) => uid,
+            None => Self::assign_jar_uid(env, jar_id),
+        }
     }
 
     /// Store a jar and extend its TTL. Every jar write goes through here (#327).
