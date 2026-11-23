@@ -32,9 +32,8 @@ fn admin_recover_jar_reassigns_owner_and_emits_a_distinct_event() {
     }]);
     client.admin_recover_jar(&jar_id, &new_owner);
 
-    let jar = client.get_jar(&jar_id);
-    assert_eq!(jar.owner, new_owner);
-    assert_eq!(jar.splits, splits);
+    // The test env exposes only the last invocation's events, so read them
+    // before the `get_jar` call below.
     let expected_topics = vec![
         env,
         symbol_short!("jar_recov").into_val(env),
@@ -53,6 +52,10 @@ fn admin_recover_jar_reassigns_owner_and_emits_a_distinct_event() {
     assert_eq!(event.admin, s.admin);
     assert_eq!(event.previous_owner, owner);
     assert_eq!(event.new_owner, new_owner);
+
+    let jar = client.get_jar(&jar_id);
+    assert_eq!(jar.owner, new_owner);
+    assert_eq!(jar.splits, splits);
 }
 
 #[test]
@@ -180,6 +183,7 @@ fn version_matches_the_interface_constant() {
     assert_eq!(client.version(), INTERFACE_VERSION);
     assert_eq!(
         client.version(),
+        10,
         11,
         "the published version is part of the public interface; bump \
          INTERFACE_VERSION when the shape changes, do not edit this test \
@@ -614,6 +618,7 @@ fn error_codes_are_pinned_to_the_public_interface() {
         (Error::BatchEmpty, 37),
         (Error::BatchTooLarge, 38),
         (Error::JarPaused, 39),
+        (Error::NotAuthorized, 44),
         (Error::TooManyAllowedTokens, 40),
         (Error::AboveMaxTipAmount, 41),
         (Error::InvalidMaximumAmount, 42),
@@ -767,7 +772,13 @@ fn upgrade_preserves_jar_held_totals_counter_and_fee() {
     client.create_jar(
         &owner,
         &jar_id,
-        &vec![env, Split { to: alice.clone(), bps: 10000 }],
+        &vec![
+            env,
+            Split {
+                to: alice.clone(),
+                bps: 10000,
+            },
+        ],
     );
     client.set_min_tip_amount(&jar_id, &Some(50));
     client.set_fee_bps(&100);
@@ -778,7 +789,9 @@ fn upgrade_preserves_jar_held_totals_counter_and_fee() {
     let fee_before = client.get_fee_bps();
     let held_credit = 13_i128;
     env.as_contract(&s.contract, || {
-        env.storage().persistent().set(&DataKey::Held(alice.clone()), &held_credit);
+        env.storage()
+            .persistent()
+            .set(&DataKey::Held(alice.clone()), &held_credit);
     });
 
     // Same Soroban-host-compatible WASM envelope as the existing upgrade
@@ -786,20 +799,19 @@ fn upgrade_preserves_jar_held_totals_counter_and_fee() {
     let minimal_wasm = soroban_sdk::Bytes::from_slice(
         env,
         &[
-            0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00,
-            0x00, 0x1e,
-            0x11, b'c', b'o', b'n', b't', b'r', b'a', b'c', b't', b'e', b'n', b'v', b'm', b'e',
-            b't', b'a', b'v', b'0',
-            0x00, 0x00, 0x00, 0x00,
-            0x00, 0x00, 0x00, 0x16,
-            0x00, 0x00, 0x00, 0x00,
+            0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x00, 0x1e, 0x11, b'c', b'o', b'n',
+            b't', b'r', b'a', b'c', b't', b'e', b'n', b'v', b'm', b'e', b't', b'a', b'v', b'0',
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x16, 0x00, 0x00, 0x00, 0x00,
         ],
     );
     let hash = env.deployer().upload_contract_wasm(minimal_wasm);
     client.upgrade(&hash);
 
     let expected_topics = vec![env, symbol_short!("upgrade").into_val(env)];
-    let events: std::vec::Vec<_> = env.events().all().iter()
+    let events: std::vec::Vec<_> = env
+        .events()
+        .all()
+        .iter()
         .filter(|e| e.0 == s.contract && e.1 == expected_topics)
         .collect();
     assert_eq!(events.len(), 1);
@@ -810,28 +822,38 @@ fn upgrade_preserves_jar_held_totals_counter_and_fee() {
     assert_eq!(event.previous_hash, None);
 
     env.as_contract(&s.contract, || {
-        let stored_jar: Jar = env.storage().persistent()
-            .get(&DataKey::Jar(jar_id.clone())).unwrap();
+        let stored_jar: Jar = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Jar(jar_id.clone()))
+            .unwrap();
         assert_eq!(stored_jar.owner, jar_before.owner);
         assert_eq!(stored_jar.splits, jar_before.splits);
         assert_eq!(stored_jar.locked, jar_before.locked);
         assert_eq!(stored_jar.paused, jar_before.paused);
-        let stats: JarStats = env.storage().persistent()
-            .get(&DataKey::Stats(jar_id.clone())).unwrap();
+        let stats: JarStats = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Stats(jar_id.clone()))
+            .unwrap();
         assert_eq!(stats, stats_before);
-        let min: i128 = env.storage().persistent()
-            .get(&DataKey::MinTip(jar_id.clone())).unwrap();
+        let min: i128 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::MinTip(jar_id.clone()))
+            .unwrap();
         assert_eq!(min, 50);
-        let held: i128 = env.storage().persistent()
-            .get(&DataKey::Held(alice.clone())).unwrap();
+        let held: i128 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Held(alice.clone()))
+            .unwrap();
         assert_eq!(held, held_credit);
-        let counter: u64 = env.storage().instance()
-            .get(&DataKey::TipCount).unwrap();
+        let counter: u64 = env.storage().instance().get(&DataKey::TipCount).unwrap();
         assert_eq!(counter, counter_before);
         let fee: u32 = env.storage().instance().get(&DataKey::FeeBps).unwrap();
         assert_eq!(fee, fee_before);
-        let recorded_hash: BytesN<32> = env.storage().instance()
-            .get(&DataKey::WasmHash).unwrap();
+        let recorded_hash: BytesN<32> = env.storage().instance().get(&DataKey::WasmHash).unwrap();
         assert_eq!(recorded_hash, hash);
     });
 }
@@ -1301,4 +1323,191 @@ fn hostile_hooks_panic_error_and_reentry_do_not_disrupt_tip() {
         let (client, tipper, alice, jar_id) = hook_jar(&s.env, &s);
         assert_tip_settles_once_despite_hook(&s, &client, &tipper, &alice, &jar_id, hook);
     }
+}
+
+// ---------------------------------------------------------------------------
+// #246 — transfer_admin hands over every key-gated power, including fee payout
+// ---------------------------------------------------------------------------
+
+#[test]
+fn transfer_admin_moves_admin_powers_and_fee_payee_to_the_new_key() {
+    let s = setup();
+    let env = &s.env;
+    let client = TipSplitterClient::new(env, &s.contract);
+    let new_admin = Address::generate(env);
+
+    // Transferring to the current admin is a typed no-op.
+    assert_eq!(
+        client.try_transfer_admin(&s.admin),
+        Err(Ok(Error::AdminExists.into()))
+    );
+    assert_eq!(client.get_admin(), s.admin);
+
+    client.transfer_admin(&new_admin);
+    let evs = events_for(env, &s.contract, symbol_short!("adm_xfer"));
+    assert_eq!(evs.len(), 1);
+    assert_eq!(evs[0].0.len(), 1, "admin events carry only the name topic");
+    let event: AdminTransferredEvent = TryFromVal::try_from_val(env, &evs[0].1).unwrap();
+    assert_eq!(event.version, 1);
+    assert_eq!(event.admin, s.admin);
+    assert_eq!(event.new_admin, new_admin);
+    assert_eq!(client.get_admin(), new_admin);
+
+    // Only the new key can now call an admin-only function.
+    env.mock_auths(&[MockAuth {
+        address: &new_admin,
+        invoke: &MockAuthInvoke {
+            contract: &s.contract,
+            fn_name: "set_fee_bps",
+            args: (100u32,).into_val(env),
+            sub_invokes: &[],
+        },
+    }]);
+    client.set_fee_bps(&100);
+    assert_eq!(client.get_fee_bps(), 100);
+
+    env.mock_auths(&[MockAuth {
+        address: &s.admin,
+        invoke: &MockAuthInvoke {
+            contract: &s.contract,
+            fn_name: "set_fee_bps",
+            args: (200u32,).into_val(env),
+            sub_invokes: &[],
+        },
+    }]);
+    assert!(client.try_set_fee_bps(&200).is_err());
+    assert_eq!(client.get_fee_bps(), 100);
+
+    // The fee payee falls back to the admin, so it follows the handover.
+    env.mock_all_auths();
+    assert_eq!(client.get_fee_recipient(), new_admin);
+    let (jar_id, _, _, tipper) = fee_jar(&s, "@xferfee", 1_000);
+    client.tip(&tipper, &jar_id, &1_000, &String::from_str(env, "fee"));
+    let token = token::Client::new(env, &s.token);
+    assert_eq!(token.balance(&new_admin), 10);
+    assert_eq!(token.balance(&s.admin), 0);
+}
+
+// ---------------------------------------------------------------------------
+// #245 — contract-wide pause and resume
+// ---------------------------------------------------------------------------
+
+#[test]
+fn pause_blocks_every_tip_entry_point_and_resume_restores_tipping() {
+    let s = setup();
+    let env = &s.env;
+    let client = TipSplitterClient::new(env, &s.contract);
+    let token = token::Client::new(env, &s.token);
+    let token_admin = token::StellarAssetClient::new(env, &s.token);
+    let owner = Address::generate(env);
+    let recipient = Address::generate(env);
+    let tipper = Address::generate(env);
+    token_admin.mint(&tipper, &1_000);
+    let jar_id = String::from_str(env, "@paused");
+    client.create_jar(
+        &owner,
+        &jar_id,
+        &vec![
+            env,
+            Split {
+                to: recipient.clone(),
+                bps: 10_000,
+            },
+        ],
+    );
+    let msg = String::from_str(env, "hi");
+    let batch = vec![
+        env,
+        TipRequest {
+            jar_id: jar_id.clone(),
+            amount: 100,
+            message: msg.clone(),
+            reference: None,
+        },
+    ];
+
+    assert!(!client.is_paused());
+    client.pause();
+    let evs = events_for(env, &s.contract, symbol_short!("pause"));
+    assert_eq!(evs.len(), 1);
+    assert_eq!(evs[0].0.len(), 1, "admin events carry only the name topic");
+    let paused: PauseEvent = TryFromVal::try_from_val(env, &evs[0].1).unwrap();
+    assert_eq!(paused.version, 1);
+    assert_eq!(paused.admin, s.admin);
+    assert!(paused.paused);
+    assert!(client.is_paused());
+
+    macro_rules! paused_error {
+        () => {
+            Err(Ok(Error::ContractPaused.into()))
+        };
+    }
+    assert_eq!(
+        client.try_tip(&tipper, &jar_id, &100, &msg),
+        paused_error!()
+    );
+    assert_eq!(
+        client.try_tip_with_ref(&tipper, &jar_id, &100, &msg, &None),
+        paused_error!()
+    );
+    assert_eq!(
+        client.try_tip_in_token(&tipper, &jar_id, &s.token, &100, &msg),
+        paused_error!()
+    );
+    assert_eq!(client.try_tip_many(&tipper, &batch, &None), paused_error!());
+
+    assert_eq!(token.balance(&recipient), 0);
+    assert_eq!(token.balance(&tipper), 1_000);
+    assert_eq!(token.balance(&s.contract), 0);
+
+    // Reads and owner calls keep working while the contract is paused.
+    assert_eq!(client.get_jar_owner(&jar_id), owner);
+    client.set_min_tip_amount(&jar_id, &Some(10));
+    assert_eq!(client.get_min_tip_amount(&jar_id), Some(10));
+
+    client.resume();
+    let evs = events_for(env, &s.contract, symbol_short!("resume"));
+    assert_eq!(evs.len(), 1);
+    assert_eq!(evs[0].0.len(), 1, "admin events carry only the name topic");
+    let resumed: PauseEvent = TryFromVal::try_from_val(env, &evs[0].1).unwrap();
+    assert_eq!(resumed.version, 1);
+    assert_eq!(resumed.admin, s.admin);
+    assert!(!resumed.paused);
+    assert!(!client.is_paused());
+
+    client.tip(&tipper, &jar_id, &100, &msg);
+    assert_eq!(token.balance(&recipient), 100);
+    assert_eq!(token.balance(&tipper), 900);
+}
+
+#[test]
+fn non_admin_cannot_pause_or_resume() {
+    let s = setup();
+    let env = &s.env;
+    let client = TipSplitterClient::new(env, &s.contract);
+    let outsider = Address::generate(env);
+
+    env.mock_auths(&[MockAuth {
+        address: &outsider,
+        invoke: &MockAuthInvoke {
+            contract: &s.contract,
+            fn_name: "pause",
+            args: ().into_val(env),
+            sub_invokes: &[],
+        },
+    }]);
+    assert!(client.try_pause().is_err());
+    assert!(!client.is_paused());
+
+    env.mock_auths(&[MockAuth {
+        address: &outsider,
+        invoke: &MockAuthInvoke {
+            contract: &s.contract,
+            fn_name: "resume",
+            args: ().into_val(env),
+            sub_invokes: &[],
+        },
+    }]);
+    assert!(client.try_resume().is_err());
+    assert!(!client.is_paused());
 }

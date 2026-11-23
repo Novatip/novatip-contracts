@@ -604,11 +604,11 @@ fn tip_event_breakdown_reports_zero_for_a_skipped_self_transfer() {
 /// entry in the order the entries were given.
 #[test]
 fn tip_many_pays_every_jar_and_returns_a_seq_per_entry() {
-    let s = setup();
+    let s = TestSetup::new();
     let env = &s.env;
-    let client = TipSplitterClient::new(env, &s.contract);
-    let token = token::Client::new(env, &s.token);
-    let token_admin = token::StellarAssetClient::new(env, &s.token);
+    let client = s.client();
+    let token = s.token_client();
+    let token_admin = s.token_admin_client();
 
     let owner = Address::generate(env);
     let alice = Address::generate(env);
@@ -618,32 +618,14 @@ fn tip_many_pays_every_jar_and_returns_a_seq_per_entry() {
 
     // Jar one pays alice in full; jar two splits evenly between alice and bob.
     let jar_one = String::from_str(env, "@one");
-    client.create_jar(
-        &owner,
-        &jar_one,
-        &vec![
-            env,
-            Split {
-                to: alice.clone(),
-                bps: 10_000,
-            },
-        ],
-    );
+    solo_jar(env, &client, "@one", &owner, &alice);
     let jar_two = String::from_str(env, "@two");
-    client.create_jar(
+    jar_with(
+        env,
+        &client,
+        "@two",
         &owner,
-        &jar_two,
-        &vec![
-            env,
-            Split {
-                to: alice.clone(),
-                bps: 5_000,
-            },
-            Split {
-                to: bob.clone(),
-                bps: 5_000,
-            },
-        ],
+        &[(alice.clone(), 5_000), (bob.clone(), 5_000)],
     );
 
     let seqs = client.tip_many(
@@ -704,11 +686,11 @@ fn tip_many_pays_every_jar_and_returns_a_seq_per_entry() {
 /// keeps every stroop.
 #[test]
 fn tip_many_rolls_back_every_entry_when_one_fails() {
-    let s = setup();
+    let s = TestSetup::new();
     let env = &s.env;
-    let client = TipSplitterClient::new(env, &s.contract);
-    let token = token::Client::new(env, &s.token);
-    let token_admin = token::StellarAssetClient::new(env, &s.token);
+    let client = s.client();
+    let token = s.token_client();
+    let token_admin = s.token_admin_client();
 
     let owner = Address::generate(env);
     let alice = Address::generate(env);
@@ -716,17 +698,7 @@ fn tip_many_rolls_back_every_entry_when_one_fails() {
     token_admin.mint(&tipper, &100);
 
     let good = String::from_str(env, "@good");
-    client.create_jar(
-        &owner,
-        &good,
-        &vec![
-            env,
-            Split {
-                to: alice.clone(),
-                bps: 10_000,
-            },
-        ],
-    );
+    solo_jar(env, &client, "@good", &owner, &alice);
 
     // The first entry is valid and would pay alice; the second names a jar that
     // was never created.
@@ -763,10 +735,10 @@ fn tip_many_rolls_back_every_entry_when_one_fails() {
 /// Both batch-size guards are typed errors raised before any transfer.
 #[test]
 fn tip_many_rejects_empty_and_oversized_batches() {
-    let s = setup();
+    let s = TestSetup::new();
     let env = &s.env;
-    let client = TipSplitterClient::new(env, &s.contract);
-    let token_admin = token::StellarAssetClient::new(env, &s.token);
+    let client = s.client();
+    let token_admin = s.token_admin_client();
 
     let owner = Address::generate(env);
     let alice = Address::generate(env);
@@ -774,17 +746,7 @@ fn tip_many_rejects_empty_and_oversized_batches() {
     token_admin.mint(&tipper, &1_000);
 
     let jar_id = String::from_str(env, "@guards");
-    client.create_jar(
-        &owner,
-        &jar_id,
-        &vec![
-            env,
-            Split {
-                to: alice.clone(),
-                bps: 10_000,
-            },
-        ],
-    );
+    solo_jar(env, &client, "@guards", &owner, &alice);
 
     assert_eq!(
         client.try_tip_many(&tipper, &Vec::new(env), &None),
@@ -1801,10 +1763,10 @@ fn tip_many_cost_budget_max_batch_with_full_jars() {
     const MAX_BATCH_READ_BYTES: u32 = 30_000;
     const MAX_BATCH_WRITE_BYTES: u32 = 65_536;
 
-    let s = setup();
+    let s = TestSetup::new();
     let env = &s.env;
-    let client = TipSplitterClient::new(env, &s.contract);
-    let token_admin = token::StellarAssetClient::new(env, &s.token);
+    let client = s.client();
+    let token_admin = s.token_admin_client();
     let owner = Address::generate(env);
     let tipper = Address::generate(env);
 
@@ -1814,14 +1776,10 @@ fn tip_many_cost_budget_max_batch_with_full_jars() {
     for j in 0..MAX_BATCH_TIPS {
         let slug = std::format!("@batch20_{j:02}");
         let jar_id = String::from_str(env, &slug);
-        let mut jar_splits: Vec<Split> = Vec::new(env);
-        for _ in 0..MAX_RECIPIENTS {
-            jar_splits.push_back(Split {
-                to: Address::generate(env),
-                bps: 500, // 500 * 20 = 10_000
-            });
-        }
-        client.create_jar(&owner, &jar_id, &jar_splits);
+        let recipients: std::vec::Vec<(Address, u32)> = (0..MAX_RECIPIENTS)
+            .map(|_| (Address::generate(env), 500)) // 500 * 20 = 10_000
+            .collect();
+        jar_with(env, &client, &slug, &owner, &recipients);
         batch.push_back(TipRequest {
             jar_id,
             amount: 1_000,
@@ -2494,13 +2452,20 @@ fn tip_tipper_holding_final_share_preserves_all_balances() {
 /// #318: each `tip_many` entry's `tip` event echoes its own reference.
 #[test]
 fn tip_many_entries_echo_their_reference() {
-    let s = setup();
+    let s = TestSetup::new();
     let env = &s.env;
-    let client = TipSplitterClient::new(env, &s.contract);
-    let token_admin = token::StellarAssetClient::new(env, &s.token);
+    let client = s.client();
+    let token_admin = s.token_admin_client();
     let tipper = Address::generate(env);
     token_admin.mint(&tipper, &100);
-    let (_, _, jar_id) = one_recipient_jar(env, &client, "@refs");
+    let jar_id = String::from_str(env, "@refs");
+    solo_jar(
+        env,
+        &client,
+        "@refs",
+        &Address::generate(env),
+        &Address::generate(env),
+    );
 
     let reference = sample_reference(env, 7);
     client.tip_many(
@@ -2526,14 +2491,16 @@ fn tip_many_entries_echo_their_reference() {
 /// any transfer, and skips the minimum for a non-default token.
 #[test]
 fn tip_many_pays_in_an_allowed_token() {
-    let s = setup();
+    let s = TestSetup::new();
     let env = &s.env;
-    let client = TipSplitterClient::new(env, &s.contract);
+    let client = s.client();
     let eurc = second_asset(env, &s.admin);
     let eurc_client = token::Client::new(env, &eurc);
     let tipper = Address::generate(env);
     token::StellarAssetClient::new(env, &eurc).mint(&tipper, &100);
-    let (_, recipient, jar_id) = one_recipient_jar(env, &client, "@eurc");
+    let recipient = Address::generate(env);
+    let jar_id = String::from_str(env, "@eurc");
+    solo_jar(env, &client, "@eurc", &Address::generate(env), &recipient);
     client.set_min_tip_amount(&jar_id, &Some(1_000));
     let batch = vec![
         env,
