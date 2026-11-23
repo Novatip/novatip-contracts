@@ -1,60 +1,56 @@
 //! Shared test fixtures and helpers (#144).
 //!
-//! Extracted from the 2983-line `test.rs` to eliminate repeated boilerplate:
-//! - `Setup` extends with contract client and token clients
-//! - `solo_jar` / `jar_with` for common jar configurations
-//! - `events_for` for generic event filtering and decoding
+//! `TestSetup` replaces the repeated env/token/contract boilerplate;
+//! `solo_jar` / `jar_with` build the jars the tipping tests share, and
+//! `events_for` filters an invocation's events by topic so a test can decode
+//! the payload it expects.
 
 #![cfg(test)]
 
 use super::*;
-use soroban_sdk::{Address, Env, Vec};
 
-/// Extended test setup with all commonly used clients.
+/// A fresh env, a deployed TipSplitter and its default token.
+///
+/// All auths are mocked, so a test only has to grant the specific signatures
+/// it wants to exercise by calling `env.mock_auths` itself.
 pub struct TestSetup {
     pub env: Env,
     pub admin: Address,
     pub contract: Address,
-    pub client: TipSplitterClient<'static>,
-    pub token_admin: Address,
     pub token: Address,
-    pub token_client: TokenClient<'static>,
-    pub token_admin_client: TokenAdminClient<'static>,
 }
 
 impl TestSetup {
-    /// Create a fresh setup with contract and token initialized.
     pub fn new() -> Self {
         let env = Env::default();
+        env.mock_all_auths();
         let admin = Address::generate(&env);
-        let contract = env.register(TipSplitter, ());
-        let client = TipSplitterClient::new(&env, &contract);
-
-        // Setup token
-        let token_admin = Address::generate(&env);
-        let token = env.register_stellar_asset_contract_v2(token_admin.clone());
-        let token_admin_client = TokenAdminClient::new(&env, &token.address());
-        let token_client = TokenClient::new(&env, &token.address());
-
-        // Initialize contract
-        client.init(&admin, &token.address());
-
-        // Need 'static lifetimes for client - use Box::leak in real impl
-        // This is a simplified version showing the pattern
+        let token = env
+            .register_stellar_asset_contract_v2(Address::generate(&env))
+            .address();
+        let contract = env.register(TipSplitter, (admin.clone(), token.clone()));
         Self {
             env,
             admin,
             contract,
-            client,
-            token_admin,
-            token: token.address(),
-            token_client,
-            token_admin_client,
+            token,
         }
+    }
+
+    pub fn client(&self) -> TipSplitterClient {
+        TipSplitterClient::new(&self.env, &self.contract)
+    }
+
+    pub fn token_client(&self) -> token::Client {
+        token::Client::new(&self.env, &self.token)
+    }
+
+    pub fn token_admin_client(&self) -> token::StellarAssetClient {
+        token::StellarAssetClient::new(&self.env, &self.token)
     }
 }
 
-/// Create a single-recipient jar with 100% to one address.
+/// A jar paying 100% to one recipient.
 pub fn solo_jar(
     env: &Env,
     client: &TipSplitterClient,
@@ -62,17 +58,16 @@ pub fn solo_jar(
     owner: &Address,
     recipient: &Address,
 ) {
-    let splits = Vec::from_array(
+    jar_with(
         env,
-        [Split {
-            to: recipient.clone(),
-            bps: 10000,
-        }],
+        client,
+        jar_id,
+        owner,
+        &[(recipient.clone(), BPS_DENOM)],
     );
-    client.create_jar(owner, &jar_id, &splits);
 }
 
-/// Create a jar with arbitrary splits.
+/// A jar with the given `(recipient, bps)` shares.
 pub fn jar_with(
     env: &Env,
     client: &TipSplitterClient,
@@ -80,54 +75,25 @@ pub fn jar_with(
     owner: &Address,
     recipients: &[(Address, u32)],
 ) {
-    let splits: Vec<Split> = recipients
-        .iter()
-        .map(|(to, bps)| Split {
+    let mut splits: Vec<Split> = Vec::new(env);
+    for (to, bps) in recipients {
+        splits.push_back(Split {
             to: to.clone(),
             bps: *bps,
-        })
-        .collect();
-    client.create_jar(owner, &jar_id, &splits);
+        });
+    }
+    client.create_jar(owner, &String::from_str(env, jar_id), &splits);
 }
 
-/// Filter events by topic and optionally jar_id, returning decoded payloads.
-pub fn events_for(
-    env: &Env,
-    contract: &Address,
-    topic: &str,
-    jar_id: Option<&str>,
-) -> Vec<(Vec<soroban_sdk::xdr::ScVal>, soroban_sdk::xdr::ScVal)> {
-    let all = env.events().all();
-    let mut result = Vec::new(env);
-
-    for event in all.iter() {
-        if event.contract != *contract {
-            continue;
-        }
-
-        let topics = event.topics;
-        if topics.is_empty() {
-            continue;
-        }
-
-        // Check topic matches
-        let topic_str = topics.get(0).unwrap().to_string();
-        if topic_str != topic {
-            continue;
-        }
-
-        // Check jar_id if specified
-        if let Some(expected_jar) = jar_id {
-            if topics.len() > 1 {
-                let jar_val = topics.get(1).unwrap().to_string();
-                if jar_val != expected_jar {
-                    continue;
-                }
-            }
-        }
-
-        result.push_back((topics, event.data));
-    }
-
-    result
+/// Events published by `contract` whose first topic is `topic`, in publication
+/// order. Callers decode the data into the struct the event publishes.
+pub fn events_for(env: &Env, contract: &Address, topic: Symbol) -> std::vec::Vec<(Vec<Val>, Val)> {
+    env.events()
+        .all()
+        .iter()
+        .filter(|(addr, topics, _)| {
+            *addr == *contract && topic_is_symbol(env, topics, 0, topic.clone())
+        })
+        .map(|(_, topics, data)| (topics, data))
+        .collect()
 }

@@ -26,6 +26,21 @@ make build
 
 `make test` runs natively and does not need it.
 
+### Wasm smoke test
+
+The smoke tests in `src/test/wasm_smoke.rs` run against the compiled wasm
+through the client generated from its spec, so a difference between the native
+build and the deployed artifact is caught. Build the artifact first — the
+module imports it at compile time — then enable the `wasm-test` feature:
+
+```bash
+cargo build --target wasm32v1-none --release
+cargo test --features wasm-test
+```
+
+The first command writes `target/wasm32v1-none/release/tip_splitter.wasm`; the
+second fails to compile without it.
+
 ## Before you push
 
 Run everything CI checks with one command:

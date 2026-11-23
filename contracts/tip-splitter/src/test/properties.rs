@@ -6,7 +6,7 @@ use soroban_sdk::vec;
 /// Config for every property test: a fixed seed, so the snapshots their envs
 /// write are identical on every run and `cargo test` leaves the checkout clean
 /// (#264). Set `PROPTEST_RNG_SEED` to run a different set of cases.
-fn snapshot_stable(cases: u32) -> ProptestConfig {
+pub(super) fn snapshot_stable(cases: u32) -> ProptestConfig {
     let mut config = ProptestConfig::with_cases(cases);
     if std::env::var_os("PROPTEST_RNG_SEED").is_none() {
         config.rng_seed = proptest::test_runner::RngSeed::Fixed(0x6e6f_7661_7469_7073);

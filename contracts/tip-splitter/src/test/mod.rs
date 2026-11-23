@@ -73,12 +73,23 @@ impl TestToken {
     }
 
     /// A controllable allowance for recurring payout regression tests.
-    pub fn approve(env: Env, from: Address, spender: Address, amount: i128, _expiration_ledger: u32) {
-        env.storage().persistent().set(&TestTokenKey::Allowance(from, spender), &amount);
+    pub fn approve(
+        env: Env,
+        from: Address,
+        spender: Address,
+        amount: i128,
+        _expiration_ledger: u32,
+    ) {
+        env.storage()
+            .persistent()
+            .set(&TestTokenKey::Allowance(from, spender), &amount);
     }
 
     pub fn allowance(env: Env, from: Address, spender: Address) -> i128 {
-        env.storage().persistent().get(&TestTokenKey::Allowance(from, spender)).unwrap_or(0)
+        env.storage()
+            .persistent()
+            .get(&TestTokenKey::Allowance(from, spender))
+            .unwrap_or(0)
     }
 
     pub fn transfer_from(env: Env, spender: Address, from: Address, to: Address, amount: i128) {
@@ -128,6 +139,7 @@ struct SetupHostile {
     env: Env,
     contract: Address,
     token: Address,
+    admin: Address,
 }
 
 fn setup_hostile() -> SetupHostile {
@@ -140,6 +152,7 @@ fn setup_hostile() -> SetupHostile {
         env,
         contract,
         token,
+        admin,
     }
 }
 
@@ -481,8 +494,9 @@ mod admin;
 mod auth_properties;
 mod escrow;
 mod fees;
-mod jars;
+mod helpers;
 mod interaction_regressions;
+mod jars;
 mod lifecycle_regressions;
 mod properties;
 mod property_regressions;
@@ -490,3 +504,9 @@ mod recurring;
 mod splits;
 mod tips;
 mod views;
+#[cfg(feature = "wasm-test")]
+mod wasm_smoke;
+
+use fees::fee_jar;
+pub use helpers::{events_for, jar_with, solo_jar, TestSetup};
+use properties::snapshot_stable;

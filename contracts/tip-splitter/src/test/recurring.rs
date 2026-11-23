@@ -177,7 +177,9 @@ fn update_recurring_keeps_id_and_due_date_and_recr_add_has_payload() {
         Err(Ok(Error::AmountZero.into()))
     );
     env.mock_auths(&[]);
-    assert!(client.try_update_recurring(&id, &900, &String::from_str(env, "")).is_err());
+    assert!(client
+        .try_update_recurring(&id, &900, &String::from_str(env, ""))
+        .is_err());
     assert_eq!(client.get_recurring(&id).amount, 700);
 }
 

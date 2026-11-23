@@ -34,12 +34,23 @@ fn generate_splits(
     supporter: &Address,
     sender_index: Option<usize>,
 ) -> (Vec<Split>, std::vec::Vec<Address>) {
-    let recipients: std::vec::Vec<Address> = bps.iter().enumerate().map(|(idx, _)| {
-        if sender_index == Some(idx) { supporter.clone() } else { Address::generate(env) }
-    }).collect();
+    let recipients: std::vec::Vec<Address> = bps
+        .iter()
+        .enumerate()
+        .map(|(idx, _)| {
+            if sender_index == Some(idx) {
+                supporter.clone()
+            } else {
+                Address::generate(env)
+            }
+        })
+        .collect();
     let mut splits = vec![env];
     for (address, share) in recipients.iter().zip(bps) {
-        splits.push_back(Split { to: address.clone(), bps: *share });
+        splits.push_back(Split {
+            to: address.clone(),
+            bps: *share,
+        });
     }
     (splits, recipients)
 }
@@ -175,7 +186,12 @@ proptest! {
             .map(|(i, r)| token.balance(r) - before_recur[i]).collect();
         let recurring_admin_delta = token.balance(&s.admin) - before_recur_admin;
         let recurring_sender_debit = before_recur_sender - token.balance(&supporter);
-        prop_assert_eq!(token.allowance(&supporter, &s.contract), 0);
+        // Only funds that actually moved draw down the allowance: when the
+        // supporter is also a recipient their own share is never transferred.
+        prop_assert_eq!(
+            token.allowance(&supporter, &s.contract),
+            amount - recurring_sender_debit
+        );
         let before_manual: std::vec::Vec<i128> = recipients.iter().map(|r| token.balance(r)).collect();
         let before_manual_admin = token.balance(&s.admin);
         let before_manual_sender = token.balance(&supporter);

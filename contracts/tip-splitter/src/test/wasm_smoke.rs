@@ -1,138 +1,161 @@
 //! Wasm smoke test (#143).
 //!
-//! Runs tests against the compiled wasm instead of the native build.
-//! Requires `tip_splitter.wasm` to be built first:
+//! Exercises the deployed wasm through the client generated from its spec, so
+//! a difference between the native build and the artifact actually shipped is
+//! caught. Build the artifact first (see CONTRIBUTING.md):
 //!
 //! ```bash
 //! cargo build --target wasm32v1-none --release
 //! cargo test --features wasm-test
 //! ```
 
-#![cfg(all(test, feature = "wasm-test"))]
-
 use super::*;
-use soroban_sdk::testutils::{Address as _, AuthorizedFunction, Events};
-use soroban_sdk::{Address, Env, Vec};
+use soroban_sdk::vec;
 
-/// Import the compiled wasm.
-/// This requires `tip_splitter.wasm` to exist in the target directory.
 mod wasm {
     soroban_sdk::contractimport!(file = "../../target/wasm32v1-none/release/tip_splitter.wasm");
 }
 
-fn setup_wasm() -> (
-    Env,
-    Address,
-    Address,
-    wasm::Client<'static>,
-    Address,
-    wasm::TokenClient<'static>,
-) {
-    let env = Env::default();
+/// The wasm artifact, its default token and the admin both were deployed with.
+struct WasmSetup {
+    env: Env,
+    contract: Address,
+    token: Address,
+    admin: Address,
+}
 
-    // Register the compiled wasm
-    let contract = env.register(wasm::Wasm, ());
-    let client = wasm::Client::new(&env, &contract);
+impl WasmSetup {
+    fn new() -> Self {
+        let env = Env::default();
+        env.mock_all_auths();
+        let admin = Address::generate(&env);
+        let token = env
+            .register_stellar_asset_contract_v2(Address::generate(&env))
+            .address();
+        let contract = env.register(wasm::WASM, (admin.clone(), token.clone()));
+        Self {
+            env,
+            contract,
+            token,
+            admin,
+        }
+    }
 
-    let admin = Address::generate(&env);
-    let token_admin = Address::generate(&env);
-    let token = env.register_stellar_asset_contract_v2(token_admin.clone());
-    let token_client = wasm::TokenClient::new(&env, &token.address());
-
-    client.init(&admin, &token.address());
-
-    // Leak to get 'static lifetime for test convenience
-    let env = Box::leak(Box::new(env));
-    let client = Box::leak(Box::new(client));
-
-    (
-        env.clone(),
-        admin,
-        contract,
-        client.clone(),
-        token.address(),
-        token_client.clone(),
-    )
+    fn client(&self) -> wasm::Client {
+        wasm::Client::new(&self.env, &self.contract)
+    }
 }
 
 #[test]
 fn wasm_create_tip_and_read() {
-    let (env, admin, contract, client, token, token_client) = setup_wasm();
+    let s = WasmSetup::new();
+    let env = &s.env;
+    let client = s.client();
 
-    // Create a two-recipient jar
-    let owner = Address::generate(&env);
-    let alice = Address::generate(&env);
-    let bob = Address::generate(&env);
+    let owner = Address::generate(env);
+    let alice = Address::generate(env);
+    let bob = Address::generate(env);
+    let tipper = Address::generate(env);
+    token::StellarAssetClient::new(env, &s.token).mint(&tipper, &1_000_000);
 
-    let splits = Vec::from_array(
-        &env,
-        [
-            wasm::Split {
-                to: alice.clone(),
-                bps: 7000,
-            },
-            wasm::Split {
-                to: bob.clone(),
-                bps: 3000,
-            },
-        ],
+    let jar_id = String::from_str(env, "@wasmjar");
+    client.create_jar(
+        &owner,
+        &jar_id,
+        &Vec::from_array(
+            env,
+            [
+                wasm::Split {
+                    to: alice.clone(),
+                    bps: 7_000,
+                },
+                wasm::Split {
+                    to: bob.clone(),
+                    bps: 3_000,
+                },
+            ],
+        ),
+    );
+    client.tip(
+        &tipper,
+        &jar_id,
+        &1_000,
+        &String::from_str(env, "great work"),
     );
 
-    client.create_jar(&owner, &"test-jar", &splits);
-
-    // Fund the tipper
-    let tipper = Address::generate(&env);
-    token_admin_client.mint(&tipper, &1000000);
-
-    // Tip
-    client.tip(&tipper, &"test-jar", &1000, &Some("great work".into()));
-
-    // Check balances
-    assert_eq!(token_client.balance(&alice), 700);
-    assert_eq!(token_client.balance(&bob), 300);
-
-    // Check the tip event
-    let events = env.events().all();
-    assert!(!events.is_empty());
-
-    // Verify tip event exists
-    let tip_events: Vec<_> = events
+    // The test env keeps only the last invocation's events, so decode the tip
+    // event before the balance and view calls below.
+    let expected_topics = vec![
+        env,
+        symbol_short!("tip").into_val(env),
+        jar_id.clone().into_val(env),
+    ];
+    let tip_events: std::vec::Vec<_> = env
+        .events()
+        .all()
         .iter()
-        .filter(|e| e.topics.get(0).unwrap().to_string() == "tip")
+        .filter(|e| e.0 == s.contract && e.1 == expected_topics)
         .collect();
     assert_eq!(tip_events.len(), 1);
+    let event: wasm::TipEvent =
+        TryFromVal::try_from_val(env, &tip_events[0].2).expect("tip event data shape");
+    assert_eq!(event.version, 1);
+    assert_eq!(event.from, tipper);
+    assert_eq!(event.amount, 1_000);
+    assert_eq!(event.message, String::from_str(env, "great work"));
+    assert_eq!(event.breakdown.len(), 2);
+    assert_eq!(event.breakdown.get(0).unwrap(), (alice.clone(), 700, false));
+    assert_eq!(event.breakdown.get(1).unwrap(), (bob.clone(), 300, false));
+
+    // Balances and state read back through the wasm clients.
+    let token = token::Client::new(env, &s.token);
+    assert_eq!(token.balance(&alice), 700);
+    assert_eq!(token.balance(&bob), 300);
+    assert_eq!(token.balance(&tipper), 999_000);
+    assert_eq!(client.get_jar_owner(&jar_id), owner);
+    assert_eq!(client.get_jar_stats(&jar_id).tip_count, 1);
+    assert_eq!(client.get_admin(), s.admin);
 }
 
 #[test]
 fn wasm_validation_error_splits_empty() {
-    let (env, admin, contract, client, token, token_client) = setup_wasm();
+    let s = WasmSetup::new();
+    let env = &s.env;
+    let client = s.client();
 
-    let owner = Address::generate(&env);
-    let empty_splits = Vec::new(&env);
-
-    // Should fail with SplitsEmpty (code 10)
-    let result = client.try_create_jar(&owner, &"empty-jar", &empty_splits);
-    assert!(result.is_err());
+    let result = client.try_create_jar(
+        &Address::generate(env),
+        &String::from_str(env, "@empty"),
+        &Vec::new(env),
+    );
+    assert_eq!(result, Err(Ok(wasm::Error::SplitsEmpty.into())));
 }
 
 #[test]
 fn wasm_auth_failure_not_owner() {
-    let (env, admin, contract, client, token, token_client) = setup_wasm();
-
-    let owner = Address::generate(&env);
-    let stranger = Address::generate(&env);
-
+    let s = WasmSetup::new();
+    let env = &s.env;
+    let client = s.client();
+    let jar_id = String::from_str(env, "@authjar");
     let splits = Vec::from_array(
-        &env,
+        env,
         [wasm::Split {
-            to: Address::generate(&env),
-            bps: 10000,
+            to: Address::generate(env),
+            bps: 10_000,
         }],
     );
+    client.create_jar(&Address::generate(env), &jar_id, &splits);
 
-    client.create_jar(&owner, &"auth-jar", &splits);
-
-    // Non-owner tries to update splits - should fail with auth error
-    let result = client.try_update_splits(&stranger, &"auth-jar", &splits);
-    assert!(result.is_err());
+    // Only the stranger signs; `update_splits` needs the jar owner's auth.
+    let stranger = Address::generate(env);
+    env.mock_auths(&[MockAuth {
+        address: &stranger,
+        invoke: &MockAuthInvoke {
+            contract: &s.contract,
+            fn_name: "update_splits",
+            args: (jar_id.clone(), splits.clone()).into_val(env),
+            sub_invokes: &[],
+        },
+    }]);
+    assert!(client.try_update_splits(&jar_id, &splits).is_err());
 }
