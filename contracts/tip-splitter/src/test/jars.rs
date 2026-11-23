@@ -902,11 +902,12 @@ fn paused_jar_rejects_tips_until_unpaused() {
     assert_eq!(token.balance(&alice), 100);
     assert_eq!(token.balance(&tipper), 900);
 
-    // Reads stay available while paused.
+    // Metadata remains readable while paused, but previews mirror the tip
+    // entry point and reject a paused jar.
     assert_eq!(client.get_jar(&jar_id).splits.get(0).unwrap().to, alice);
     assert_eq!(
-        client.preview_split(&jar_id, &100).get(0).unwrap(),
-        100_i128
+        client.try_preview_split(&jar_id, &100),
+        Err(Ok(Error::JarPaused.into()))
     );
 
     // Unpausing reopens the jar and the next tip settles normally.
