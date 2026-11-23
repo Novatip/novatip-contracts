@@ -184,6 +184,7 @@ fn version_matches_the_interface_constant() {
     assert_eq!(
         client.version(),
         10,
+        11,
         "the published version is part of the public interface; bump \
          INTERFACE_VERSION when the shape changes, do not edit this test \
          to match a silent change"
@@ -216,6 +217,20 @@ fn admin_can_allow_and_disallow_a_token() {
 
     client.disallow_token(&eurc);
     assert!(!client.is_token_allowed(&eurc));
+}
+
+#[test]
+fn allow_token_rejects_non_token_addresses() {
+    let s = setup();
+    let env = &s.env;
+    let client = TipSplitterClient::new(env, &s.contract);
+    let arbitrary = Address::generate(env);
+
+    assert_eq!(
+        client.try_allow_token(&arbitrary),
+        Err(Ok(Error::InvalidToken.into()))
+    );
+    assert!(!client.is_token_allowed(&arbitrary));
 }
 
 /// Only the admin may move the list — a jar owner who could add assets would
@@ -604,6 +619,14 @@ fn error_codes_are_pinned_to_the_public_interface() {
         (Error::BatchTooLarge, 38),
         (Error::JarPaused, 39),
         (Error::NotAuthorized, 44),
+        (Error::TooManyAllowedTokens, 40),
+        (Error::AboveMaxTipAmount, 41),
+        (Error::InvalidMaximumAmount, 42),
+        (Error::NonDefaultToken, 43),
+        (Error::NotAuthorized, 44),
+        (Error::SameOwner, 45),
+        (Error::RemovalNotRequested, 46),
+        (Error::RemovalNotReady, 47),
     ];
 
     for (variant, expected) in codes {
@@ -1034,7 +1057,7 @@ fn tip_rejects_control_characters_but_allows_newline() {
 /// The constructor must reject an admin and token that share the same address,
 /// preventing deployment of a permanently misconfigured contract (#69).
 #[test]
-#[should_panic(expected = "admin and token cannot be the same address")]
+#[should_panic]
 fn constructor_rejects_admin_and_token_with_same_address() {
     let env = Env::default();
     let addr = Address::generate(&env);

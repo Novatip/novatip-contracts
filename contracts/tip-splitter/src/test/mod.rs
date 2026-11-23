@@ -265,11 +265,11 @@ mod recording_hook {
     impl RecordingHook {
         /// Implements the `TipHook` interface: counts calls and echoes the
         /// arguments into its own event.
-        pub fn on_tip(env: Env, jar_id: String, from: Address, amount: i128) {
+        pub fn on_tip(env: Env, jar_id: String, from: Address, amount: i128, token: Address) {
             let n: u32 = env.storage().persistent().get(&HookKey::Hits).unwrap_or(0);
             env.storage().persistent().set(&HookKey::Hits, &(n + 1));
             env.events()
-                .publish((symbol_short!("on_tip"), jar_id), (from, amount));
+                .publish((symbol_short!("on_tip"), jar_id), (from, amount, token));
         }
 
         pub fn hits(env: Env) -> u32 {
@@ -288,7 +288,13 @@ mod panicky_hook {
 
     #[contractimpl]
     impl PanickyHook {
-        pub fn on_tip(_env: Env, _jar_id: String, _from: Address, _amount: i128) {
+        pub fn on_tip(
+            _env: Env,
+            _jar_id: String,
+            _from: Address,
+            _amount: i128,
+            _token: Address,
+        ) {
             panic!("the badge contract blew up");
         }
     }
@@ -423,6 +429,7 @@ mod erroring_hook {
             _jar_id: String,
             _from: Address,
             _amount: i128,
+            _token: Address,
         ) -> Result<(), HookErr> {
             Err(HookErr::Rejected)
         }
@@ -447,7 +454,7 @@ mod reentrant_hook {
             env.storage().instance().set(&ReentrantKey::Target, &target);
         }
 
-        pub fn on_tip(env: Env, jar_id: String, from: Address, amount: i128) {
+        pub fn on_tip(env: Env, jar_id: String, from: Address, amount: i128, _token: Address) {
             let target: Address = env
                 .storage()
                 .instance()

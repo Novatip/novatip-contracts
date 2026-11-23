@@ -78,7 +78,7 @@ if [ -n "${AMOUNT:-}" ]; then
     if grep -q 'Error(Contract, #13)' <<<"${PREVIEW}"; then
       echo "error: a tip of ${AMOUNT} is below ${SLUG}'s minimum — nothing to preview" >&2
     elif grep -q 'Error(Contract, #5)' <<<"${PREVIEW}"; then
-      echo "error: preview_split rejected the amount ${AMOUNT} (InvalidAmount: too small to split, or overflow)" >&2
+      echo "error: preview_split rejected the amount ${AMOUNT} (SplitAmountTooSmall or AmountOverflow: too small to split, or overflow)" >&2
     else
       echo "error: previewing the tip failed:" >&2
       echo "${PREVIEW}" >&2

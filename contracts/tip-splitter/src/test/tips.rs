@@ -1517,7 +1517,7 @@ fn tip_event_names_the_token_paid_in() {
     assert_eq!(decoded.breakdown.get(0).unwrap(), (recipient, 400, false));
 }
 
-/// With a hook set, `tip` calls `on_tip(jar_id, from, amount)` on it exactly
+/// With a hook set, `tip` calls `on_tip(jar_id, from, amount, token)` on it exactly
 /// once, and the call is *recorded* only after the tip itself settled: the
 /// hook sees the same jar id, sender, and amount the event carries.
 #[test]
@@ -1564,10 +1564,11 @@ fn tip_calls_the_hook_after_the_transfers_and_event() {
         tip_idx < hook_idx,
         "the hook must be called after the tip event"
     );
-    let (from, amount): (Address, i128) =
+    let (from, amount, token): (Address, i128, Address) =
         TryFromVal::try_from_val(env, &all[hook_idx].2).expect("hook event data");
     assert_eq!(from, tipper);
     assert_eq!(amount, 100);
+    assert_eq!(token, s.token);
     assert_eq!(
         topic_at::<String>(env, &all[hook_idx].1, 1),
         jar_id,
