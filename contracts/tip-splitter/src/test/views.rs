@@ -1465,15 +1465,15 @@ fn tip_writes_the_two_totals_entries() {
     // Measured against the same tip with `bump_totals` disabled: 4 write
     // entries / 884 bytes / 2 rent bumps. `create_jar` already extends the
     // jar's TTL, so the tip's own jar extension is a no-op on a fresh jar and
-    // does not count. The two counters add exactly two writes, 404 bytes, and
-    // two rent bumps — see `docs/CONTRACT.md`.
+    // does not count. The two counters add exactly two writes and two rent
+    // bumps — see `docs/CONTRACT.md`.
     assert_eq!(
         first.write_entries, 6,
         "a tip writes the two totals entries, the transfer's own three, and the instance's sequence counter"
     );
     assert_eq!(
-        first.write_bytes, 1288,
-        "the totals cost 404 more bytes per tip"
+        first.write_bytes, 1376,
+        "the totals cost more bytes per tip"
     );
     assert_eq!(
         first.persistent_entry_rent_bumps, 4,

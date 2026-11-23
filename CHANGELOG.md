@@ -4,6 +4,11 @@ All notable changes to `novatip-contracts` are documented here.
 
 ## [Unreleased]
 
+### Fixed
+
+- `NotAuthorized` is now error code 44. It had been added at 40, colliding with `TooManyAllowedTokens`; as the last appended variant it takes the next free number, so no existing code is renumbered. The docs table, `interface.json` and the pinned-code test were updated to match.
+- Repaired test modules that did not compile after prior merges (unclosed `MigratedEvent` and test functions, an interleaved escrow test and a stale `tip_many` call), and refreshed assertions that had drifted from the contract's behavior.
+
 ### Documentation
 
 - Rewrote "Detecting the interface version" as a table with one row per interface version from 1 to 10 (#271).

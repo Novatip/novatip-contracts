@@ -996,7 +996,7 @@ exactly the way issue #87 found it had.
 | 40 | `TooManyAllowedTokens` | `allow_token` was given a new token while the allowlist already holds `MAX_ALLOWED_TOKENS` (10) tokens (#321). |
 | 41 | `AboveMaxTipAmount` | A tip in the default token, or a preview, exceeded the jar's maximum set with `set_max_tip_amount` (#323). Raised before any transfer. |
 | 42 | `InvalidMaximumAmount` | `set_max_tip_amount` was given a maximum that is zero, negative or below the jar's minimum, or `set_min_tip_amount` a minimum above the jar's maximum (#323). |
-| 40 | `NotAuthorized` | `cancel_recurring` was called by an address that is neither the schedule's supporter nor the owner of its jar (#324). |
+| 44 | `NotAuthorized` | `cancel_recurring` was called by an address that is neither the schedule's supporter nor the owner of its jar (#324). |
 
 Error codes are part of the public interface: `@novatip/sdk` and the frontend
 both map these numbers to user-facing messages. New variants are **appended**
@@ -1695,7 +1695,7 @@ with the counters disabled:
 | | without totals | with totals | difference |
 |---|---|---|---|
 | Ledger writes | 4 | 6 | **+2 entries** |
-| Bytes written | 884 | 1288 | **+404 bytes** |
+| Bytes written | 884 | 1376 | **+492 bytes** |
 | Persistent rent bumps | 2 | 4 | **+2** |
 
 The write columns were re-measured against the merged payout path — the

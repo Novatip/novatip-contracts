@@ -8,9 +8,18 @@ fn three_recipient_jar(env: &Env, client: &TipSplitterClient, slug: &str) -> (St
     let id = String::from_str(env, slug);
     let splits = vec![
         env,
-        Split { to: Address::generate(env), bps: 3333 },
-        Split { to: Address::generate(env), bps: 3333 },
-        Split { to: Address::generate(env), bps: 3334 },
+        Split {
+            to: Address::generate(env),
+            bps: 3333,
+        },
+        Split {
+            to: Address::generate(env),
+            bps: 3333,
+        },
+        Split {
+            to: Address::generate(env),
+            bps: 3334,
+        },
     ];
     client.create_jar(&owner, &id, &splits);
     (id, splits)
@@ -43,12 +52,15 @@ fn preview_split_details_pairs_recipients_and_allocates_dust_after_fees() {
             total += entry.amount;
         }
         assert_eq!(total, expected_net);
-        assert_eq!(details.get(2).unwrap().amount, expected_net - details.get(0).unwrap().amount - details.get(1).unwrap().amount);
+        assert_eq!(
+            details.get(2).unwrap().amount,
+            expected_net - details.get(0).unwrap().amount - details.get(1).unwrap().amount
+        );
     }
 }
 
-/// Random amounts cover fee rounding and residual dust without requiring
-/// external transfers or manipulating persistent state.
+// Random amounts cover fee rounding and residual dust without requiring
+// external transfers or manipulating persistent state.
 proptest! {
     #![proptest_config(snapshot_stable(32))]
 
@@ -89,7 +101,13 @@ fn delete_jar_clears_stats_minimum_and_event_and_allows_a_new_owner() {
     let recipient = Address::generate(env);
     let tipper = Address::generate(env);
     let id = String::from_str(env, "@recycle");
-    let splits = vec![env, Split { to: recipient.clone(), bps: 10000 }];
+    let splits = vec![
+        env,
+        Split {
+            to: recipient.clone(),
+            bps: 10000,
+        },
+    ];
     token_admin.mint(&tipper, &1_000);
     client.create_jar(&old_owner, &id, &splits);
     client.set_min_tip_amount(&id, &Some(20));
@@ -97,9 +115,17 @@ fn delete_jar_clears_stats_minimum_and_event_and_allows_a_new_owner() {
     assert_eq!(client.get_jar_stats(&id).total, 100);
 
     client.delete_jar(&id);
-    let expected_topics = vec![env, symbol_short!("jar_del").into_val(env), id.clone().into_val(env)];
-    let deletion: std::vec::Vec<_> = env.events().all().iter()
-        .filter(|e| e.0 == s.contract && e.1 == expected_topics).collect();
+    let expected_topics = vec![
+        env,
+        symbol_short!("jar_del").into_val(env),
+        id.clone().into_val(env),
+    ];
+    let deletion: std::vec::Vec<_> = env
+        .events()
+        .all()
+        .iter()
+        .filter(|e| e.0 == s.contract && e.1 == expected_topics)
+        .collect();
     assert_eq!(deletion.len(), 1);
     let payload: JarDeletedEvent = TryFromVal::try_from_val(env, &deletion[0].2).unwrap();
     assert_eq!(payload.version, 1);
@@ -107,7 +133,10 @@ fn delete_jar_clears_stats_minimum_and_event_and_allows_a_new_owner() {
 
     assert!(!client.jar_exists(&id));
     assert!(client.try_get_jar(&id).is_err());
-    assert_eq!(client.try_tip(&tipper, &id, &100, &String::from_str(env, "again")), Err(Ok(Error::JarNotFound.into())));
+    assert_eq!(
+        client.try_tip(&tipper, &id, &100, &String::from_str(env, "again")),
+        Err(Ok(Error::JarNotFound.into()))
+    );
     env.as_contract(&s.contract, || {
         assert!(!env.storage().persistent().has(&DataKey::Stats(id.clone())));
         assert!(!env.storage().persistent().has(&DataKey::MinTip(id.clone())));
@@ -128,7 +157,17 @@ fn delete_jar_requires_owner_authorization_and_retains_original_state_on_failure
     let stranger = Address::generate(env);
     let recipient = Address::generate(env);
     let id = String::from_str(env, "@no_delete");
-    client.create_jar(&owner, &id, &vec![env, Split { to: recipient, bps: 10000 }]);
+    client.create_jar(
+        &owner,
+        &id,
+        &vec![
+            env,
+            Split {
+                to: recipient,
+                bps: 10000,
+            },
+        ],
+    );
     client.set_min_tip_amount(&id, &Some(50));
 
     env.mock_auths(&[MockAuth {
@@ -144,7 +183,10 @@ fn delete_jar_requires_owner_authorization_and_retains_original_state_on_failure
     assert_eq!(client.get_jar(&id).owner, owner);
     assert_eq!(client.get_min_tip_amount(&id), Some(50));
     env.mock_all_auths();
-    assert_eq!(client.try_delete_jar(&String::from_str(env, "@missing")), Err(Ok(Error::JarNotFound.into())));
+    assert_eq!(
+        client.try_delete_jar(&String::from_str(env, "@missing")),
+        Err(Ok(Error::JarNotFound.into()))
+    );
 }
 
 #[test]
@@ -158,7 +200,17 @@ fn delete_jar_does_not_remove_recipient_held_balances() {
     let tipper = Address::generate(env);
     let id = String::from_str(env, "@held_del");
     token.mint(&tipper, &1_000);
-    client.create_jar(&owner, &id, &vec![env, Split { to: held_recipient.clone(), bps: 10000 }]);
+    client.create_jar(
+        &owner,
+        &id,
+        &vec![
+            env,
+            Split {
+                to: held_recipient.clone(),
+                bps: 10000,
+            },
+        ],
+    );
     token.block(&held_recipient);
     client.tip(&tipper, &id, &100, &String::from_str(env, "escrow"));
     assert_eq!(client.get_held(&held_recipient), 100);
@@ -186,7 +238,17 @@ fn rename_jar_moves_stats_minimum_and_flags_and_emits_event() {
     let old = String::from_str(env, "@before");
     let new = String::from_str(env, "@after");
     token_admin.mint(&tipper, &1_000);
-    client.create_jar(&owner, &old, &vec![env, Split { to: recipient.clone(), bps: 10000 }]);
+    client.create_jar(
+        &owner,
+        &old,
+        &vec![
+            env,
+            Split {
+                to: recipient.clone(),
+                bps: 10000,
+            },
+        ],
+    );
     client.set_min_tip_amount(&old, &Some(50));
     client.tip(&tipper, &old, &100, &String::from_str(env, "before"));
     client.lock_splits(&old);
@@ -195,9 +257,17 @@ fn rename_jar_moves_stats_minimum_and_flags_and_emits_event() {
     let stats = client.get_jar_stats(&old);
 
     client.rename_jar(&old, &new);
-    let expected_topics = vec![env, symbol_short!("jar_rnm").into_val(env), old.clone().into_val(env)];
-    let renames: std::vec::Vec<_> = env.events().all().iter()
-        .filter(|e| e.0 == s.contract && e.1 == expected_topics).collect();
+    let expected_topics = vec![
+        env,
+        symbol_short!("jar_rnm").into_val(env),
+        old.clone().into_val(env),
+    ];
+    let renames: std::vec::Vec<_> = env
+        .events()
+        .all()
+        .iter()
+        .filter(|e| e.0 == s.contract && e.1 == expected_topics)
+        .collect();
     assert_eq!(renames.len(), 1);
     let payload: JarRenamedEvent = TryFromVal::try_from_val(env, &renames[0].2).unwrap();
     assert_eq!(payload.jar_id, old);
@@ -215,7 +285,10 @@ fn rename_jar_moves_stats_minimum_and_flags_and_emits_event() {
     assert_eq!(client.get_min_tip_amount(&new), Some(50));
     env.as_contract(&s.contract, || {
         assert!(!env.storage().persistent().has(&DataKey::Stats(old.clone())));
-        assert!(!env.storage().persistent().has(&DataKey::MinTip(old.clone())));
+        assert!(!env
+            .storage()
+            .persistent()
+            .has(&DataKey::MinTip(old.clone())));
     });
     client.set_jar_paused(&new, &false);
     client.tip(&tipper, &new, &75, &String::from_str(env, "after"));
@@ -234,11 +307,23 @@ fn rename_jar_rejects_existing_missing_and_unauthorized_slugs() {
     let old = String::from_str(env, "@rename_src");
     let taken = String::from_str(env, "@rename_dst");
     let missing = String::from_str(env, "@rename_missing");
-    let splits = vec![env, Split { to: recipient, bps: 10000 }];
+    let splits = vec![
+        env,
+        Split {
+            to: recipient,
+            bps: 10000,
+        },
+    ];
     client.create_jar(&owner, &old, &splits);
     client.create_jar(&owner, &taken, &splits);
-    assert_eq!(client.try_rename_jar(&old, &taken), Err(Ok(Error::JarIdInUse.into())));
-    assert_eq!(client.try_rename_jar(&missing, &String::from_str(env, "@newslug")), Err(Ok(Error::JarNotFound.into())));
+    assert_eq!(
+        client.try_rename_jar(&old, &taken),
+        Err(Ok(Error::JarIdInUse.into()))
+    );
+    assert_eq!(
+        client.try_rename_jar(&missing, &String::from_str(env, "@newslug")),
+        Err(Ok(Error::JarNotFound.into()))
+    );
 
     env.mock_auths(&[MockAuth {
         address: &stranger,
@@ -249,7 +334,9 @@ fn rename_jar_rejects_existing_missing_and_unauthorized_slugs() {
             sub_invokes: &[],
         },
     }]);
-    assert!(client.try_rename_jar(&old, &String::from_str(env, "@unauth")).is_err());
+    assert!(client
+        .try_rename_jar(&old, &String::from_str(env, "@unauth"))
+        .is_err());
     assert_eq!(client.get_jar(&old).owner, owner);
     assert!(client.jar_exists(&taken));
 }

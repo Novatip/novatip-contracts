@@ -377,7 +377,7 @@ pub enum Error {
     /// `tip_in_token` was called with a non-default token for a jar that
     /// accepts only the default token (#313). Appended, never renumbered.
     NonDefaultToken = 43,
-    NotAuthorized = 40,
+    NotAuthorized = 44,
 }
 
 #[contractclient(name = "TipHookClient")]
@@ -585,6 +585,8 @@ pub struct MigratedEvent {
     pub admin: Address,
     pub from_version: u32,
     pub to_version: u32,
+}
+
 // Data published by `recr_add` (#317). Topics: `("recr_add", supporter, jar_id)`.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1294,9 +1296,11 @@ impl TipSplitter {
         if let Some(flag) = env.storage().persistent().get::<_, bool>(&old_flag_key) {
             let new_flag_key = DataKey::DefaultTokenOnly(new_jar_id.clone());
             env.storage().persistent().set(&new_flag_key, &flag);
-            env.storage()
-                .persistent()
-                .extend_ttl(&new_flag_key, JAR_TTL_THRESHOLD, JAR_TTL_LEDGERS);
+            env.storage().persistent().extend_ttl(
+                &new_flag_key,
+                JAR_TTL_THRESHOLD,
+                JAR_TTL_LEDGERS,
+            );
             env.storage().persistent().remove(&old_flag_key);
         }
 
@@ -2431,7 +2435,11 @@ impl TipSplitter {
     }
 
     pub fn get_max_tip_amount(env: Env, jar_id: String) -> Option<i128> {
-        if !env.storage().persistent().has(&DataKey::Jar(jar_id.clone())) {
+        if !env
+            .storage()
+            .persistent()
+            .has(&DataKey::Jar(jar_id.clone()))
+        {
             panic_with_error!(&env, Error::JarNotFound);
         }
         env.storage().persistent().get(&DataKey::MaxTip(jar_id))

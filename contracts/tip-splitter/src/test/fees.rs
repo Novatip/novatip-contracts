@@ -8,7 +8,7 @@ use soroban_sdk::vec;
 // ===========================================================================
 
 /// A 70/30 jar between two fresh recipients, with `tipper` funded by `mint`.
-fn fee_jar(s: &Setup, jar_id: &str, mint: i128) -> (String, Address, Address, Address) {
+pub(super) fn fee_jar(s: &Setup, jar_id: &str, mint: i128) -> (String, Address, Address, Address) {
     let env = &s.env;
     let client = TipSplitterClient::new(env, &s.contract);
     let token_admin = token::StellarAssetClient::new(env, &s.token);
