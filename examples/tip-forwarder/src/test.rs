@@ -308,5 +308,5 @@ fn forwarded_tip_fails_when_a_recipients_share_must_be_held() {
     assert_eq!(token_client.balance(&bob), 0);
     assert_eq!(token_client.balance(&s.splitter), 0);
     assert_eq!(token_client.balance(&s.forwarder), 1_000);
-    assert_eq!(TipSplitterClient::new(env, &s.splitter).get_held(&bob), 0);
+    assert_eq!(TipSplitterClient::new(env, &s.splitter).get_held(&bob, &s.token), 0);
 }

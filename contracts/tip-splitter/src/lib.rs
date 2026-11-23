@@ -144,7 +144,7 @@ const INSTANCE_TTL_THRESHOLD: u32 = JAR_TTL_THRESHOLD;
 ///
 /// This is a per-contract number for client feature detection. It complements
 /// the per-event schema version proposed in #83 rather than replacing it.
-const INTERFACE_VERSION: u32 = 11;
+const INTERFACE_VERSION: u32 = 12;
 
 /// Storage schema this build expects. Bump it together with a new step in
 /// `migrate` whenever stored state needs transforming after an upgrade (#325).
@@ -262,9 +262,10 @@ pub enum DataKey {
     /// Optional minimum tip amount for a jar keyed by its public slug.
     MinTip(String),
     /// A recipient's undeliverable share, held by the contract until they can
-    /// receive it again (see #171). Keyed by the recipient address; value is
-    /// the amount owed them in the jar token.
-    Held(Address),
+    /// receive it again (see #171). Keyed by the recipient address and the
+    /// token the share was paid in (#219); value is the amount owed them in
+    /// that token.
+    Held(Address, Address),
     /// A recurring-tip schedule keyed by its assigned id.
     Recurring(u128),
     /// Monotonic counter of issued recurring-tip ids.
@@ -496,6 +497,7 @@ pub struct JarPausedEvent {
 pub struct HeldWithdrawnEvent {
     pub version: u32,
     pub amount: i128,
+    pub token: Address,
 }
 
 // Data published by `wd_to` (#311); the topic carries the recipient.
@@ -1974,7 +1976,7 @@ impl TipSplitter {
                 // recipient can receive again (#171).
                 send(&contract_addr, &share);
                 total_transferred += share;
-                let held_key = DataKey::Held(split.to.clone());
+                let held_key = DataKey::Held(split.to.clone(), token_addr.clone());
                 let held: i128 = env.storage().persistent().get(&held_key).unwrap_or(0);
                 env.storage().persistent().set(&held_key, &(held + share));
                 env.storage().persistent().extend_ttl(
@@ -2273,8 +2275,9 @@ impl TipSplitter {
             .extend_ttl(&supporter_key, JAR_TTL_THRESHOLD, JAR_TTL_LEDGERS);
     }
 
-    pub fn get_held(env: Env, recipient: Address) -> i128 {
-        let held_key = DataKey::Held(recipient);
+    /// What the contract holds for `recipient` in `token` (#219).
+    pub fn get_held(env: Env, recipient: Address, token: Address) -> i128 {
+        let held_key = DataKey::Held(recipient, token);
         let held: i128 = env.storage().persistent().get(&held_key).unwrap_or(0);
         if held > 0 {
             env.storage()
@@ -2284,16 +2287,16 @@ impl TipSplitter {
         held
     }
 
-    pub fn withdraw_held(env: Env, recipient: Address) {
+    /// Pay `recipient` what is held for them in `token` only (#219).
+    pub fn withdraw_held(env: Env, recipient: Address, token: Address) {
         recipient.require_auth();
-        let held_key = DataKey::Held(recipient.clone());
+        let held_key = DataKey::Held(recipient.clone(), token.clone());
         let held: i128 = env.storage().persistent().get(&held_key).unwrap_or(0);
         if held <= 0 {
             panic_with_error!(&env, Error::NothingHeld);
         }
 
-        let token_addr: Address = Self::get_token(env.clone());
-        let client = token::Client::new(&env, &token_addr);
+        let client = token::Client::new(&env, &token);
         let contract_addr = env.current_contract_address();
 
         // Clear the balance before the transfer so the withdrawal cannot be
@@ -2305,14 +2308,16 @@ impl TipSplitter {
         env.events().publish(
             (symbol_short!("withdraw"), recipient),
             HeldWithdrawnEvent {
-                version: 1,
+                version: 2,
                 amount: held,
+                token,
             },
         );
     }
 
     /// Like `withdraw_held`, but pays `to` (#311), for a recipient account
-    /// that can no longer receive the token. Authorized by `recipient`.
+    /// that can no longer receive the token. Authorized by `recipient`. Pays
+    /// only the balance held in the default token.
     pub fn withdraw_held_to(env: Env, recipient: Address, to: Address) {
         recipient.require_auth();
         let contract_addr = env.current_contract_address();
@@ -2320,7 +2325,7 @@ impl TipSplitter {
         if to == contract_addr || to == token_addr {
             panic_with_error!(&env, Error::InvalidRecipient);
         }
-        let held_key = DataKey::Held(recipient.clone());
+        let held_key = DataKey::Held(recipient.clone(), token_addr.clone());
         let held: i128 = env.storage().persistent().get(&held_key).unwrap_or(0);
         if held <= 0 {
             panic_with_error!(&env, Error::NothingHeld);
@@ -3360,12 +3365,12 @@ pub mod examples {
     //! let seqs: Vec<u64> = client.tip_many(&supporter, &tips, &None);
     //! ```
     //!
-    //! `withdraw_held(recipient)` pays out a share that could not be delivered
-    //! at tip time; `get_held(recipient)` reports what is owed.
+    //! `withdraw_held(recipient, token)` pays out a share that could not be
+    //! delivered at tip time; `get_held(recipient, token)` reports what is owed.
     //!
     //! ```ignore
-    //! if client.get_held(&bob) > 0 {
-    //!     client.withdraw_held(&bob);
+    //! if client.get_held(&bob, &token) > 0 {
+    //!     client.withdraw_held(&bob, &token);
     //! }
     //! ```
     //!

@@ -661,6 +661,10 @@
           "type_": "i128"
         },
         {
+          "name": "token",
+          "type_": "address"
+        },
+        {
           "name": "version",
           "type_": "u32"
         }
@@ -1763,6 +1767,10 @@
         {
           "name": "recipient",
           "type_": "address"
+        },
+        {
+          "name": "token",
+          "type_": "address"
         }
       ],
       "outputs": [
@@ -1776,6 +1784,10 @@
       "inputs": [
         {
           "name": "recipient",
+          "type_": "address"
+        },
+        {
+          "name": "token",
           "type_": "address"
         }
       ],

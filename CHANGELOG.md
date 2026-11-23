@@ -6,6 +6,8 @@ All notable changes to `novatip-contracts` are documented here.
 
 ### Fixed
 
+- Held balances are keyed by `(recipient, token)`: `get_held` and `withdraw_held` take the token, `withdraw_held` pays only that token's balance, and the `withdraw` event is now version 2 with a `token` field. `version()` is now `12`. Balances held under the previous single-token key are not migrated (#219).
+
 - Tippers who are also recipients are charged only for funds that leave their account (#229).
 - `transfer_admin` now requires the proposed administrator's authorization before changing control (#230).
 - `preview_split_details` applies the same amount, minimum, maximum and paused-jar validation as tipping previews (#227, #228).

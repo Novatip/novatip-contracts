@@ -78,13 +78,13 @@ fn tip_holds_share_of_deauthorised_recipient_and_withdraw_pays_it() {
     assert_eq!(token.balance(&bob), 0);
     // Bob's share is escrowed in the contract and reported as held.
     assert_eq!(token.balance(&s.contract), 30);
-    assert_eq!(client.get_held(&bob), 30);
+    assert_eq!(client.get_held(&bob, &s.token), 30);
     // The tipper is debited the full amount regardless.
     assert_eq!(token.balance(&tipper), 900);
 
     // Bob recovers; he withdraws his held share.
     token.unblock();
-    client.withdraw_held(&bob);
+    client.withdraw_held(&bob, &s.token);
     let expected_topics = vec![
         env,
         symbol_short!("withdraw").into_val(env),
@@ -99,14 +99,15 @@ fn tip_holds_share_of_deauthorised_recipient_and_withdraw_pays_it() {
     assert_eq!(evs.len(), 1);
     let decoded: HeldWithdrawnEvent =
         TryFromVal::try_from_val(env, &evs[0].2).expect("withdraw event data shape");
-    assert_eq!(decoded.version, 1);
+    assert_eq!(decoded.version, 2);
+    assert_eq!(decoded.token, s.token);
     assert_eq!(decoded.amount, 30);
     assert_eq!(token.balance(&bob), 30);
     assert_eq!(token.balance(&s.contract), 0);
-    assert_eq!(client.get_held(&bob), 0);
+    assert_eq!(client.get_held(&bob, &s.token), 0);
 
     // Nothing left to withdraw.
-    assert!(client.try_withdraw_held(&bob).is_err());
+    assert!(client.try_withdraw_held(&bob, &s.token).is_err());
 }
 
 #[test]
@@ -135,13 +136,13 @@ fn withdraw_held_requires_the_recipients_own_authorisation() {
     );
     token.block(&bob);
     client.tip(&tipper, &jar_id, &100, &String::from_str(env, ""));
-    assert_eq!(client.get_held(&bob), 100);
+    assert_eq!(client.get_held(&bob, &s.token), 100);
 
     // `withdraw_held` is gated on the recipient's own signature: with no auth
     // granted, the call fails and the escrow is untouched.
     env.mock_auths(&[]);
-    assert!(client.try_withdraw_held(&bob).is_err());
-    assert_eq!(client.get_held(&bob), 100);
+    assert!(client.try_withdraw_held(&bob, &s.token).is_err());
+    assert_eq!(client.get_held(&bob, &s.token), 100);
 }
 
 // ---------------------------------------------------------------------------
@@ -178,7 +179,7 @@ fn withdraw_held_to_pays_another_address_and_records_both() {
     );
     token.block(&bob);
     client.tip(&tipper, &jar_id, &100, &String::from_str(env, "hi"));
-    assert_eq!(client.get_held(&bob), 30);
+    assert_eq!(client.get_held(&bob, &s.token), 30);
 
     assert_eq!(
         client.try_withdraw_held_to(&bob, &s.contract),
@@ -207,7 +208,7 @@ fn withdraw_held_to_pays_another_address_and_records_both() {
     assert_eq!(decoded.amount, 30);
     assert_eq!(decoded.to, rescue);
     assert_eq!(token.balance(&rescue), 30);
-    assert_eq!(client.get_held(&bob), 0);
+    assert_eq!(client.get_held(&bob, &s.token), 0);
     assert!(client.try_withdraw_held_to(&bob, &rescue).is_err());
 }
 
@@ -261,12 +262,12 @@ fn withdraw_held_edge_cases_accumulate_retry_pause_and_double_withdraw() {
     client.tip(&tipper, &jar_two, &75, &String::from_str(env, "t3")); // +75 held
 
     assert_eq!(token.balance(&alice), 150);
-    assert_eq!(client.get_held(&bob), 225);
+    assert_eq!(client.get_held(&bob, &s.token), 225);
     assert_eq!(token.balance(&s.contract), 225);
 
     // Withdrawing while Bob still cannot receive fails and leaves `get_held` intact.
-    assert!(client.try_withdraw_held(&bob).is_err());
-    assert_eq!(client.get_held(&bob), 225);
+    assert!(client.try_withdraw_held(&bob, &s.token).is_err());
+    assert_eq!(client.get_held(&bob, &s.token), 225);
     assert_eq!(token.balance(&bob), 0);
 
     // Pause the contract: per docs/CONTRACT.md, admin cannot stop `withdraw_held` by pausing.
@@ -275,7 +276,7 @@ fn withdraw_held_edge_cases_accumulate_retry_pause_and_double_withdraw() {
 
     // Unblock Bob and withdraw while paused; assert the `withdraw` event.
     token.unblock();
-    client.withdraw_held(&bob);
+    client.withdraw_held(&bob, &s.token);
     let expected_topics = vec![
         env,
         symbol_short!("withdraw").into_val(env),
@@ -290,16 +291,17 @@ fn withdraw_held_edge_cases_accumulate_retry_pause_and_double_withdraw() {
     assert_eq!(evs.len(), 1);
     let decoded: HeldWithdrawnEvent =
         TryFromVal::try_from_val(env, &evs[0].2).expect("withdraw event data");
-    assert_eq!(decoded.version, 1);
+    assert_eq!(decoded.version, 2);
+    assert_eq!(decoded.token, s.token);
     assert_eq!(decoded.amount, 225);
 
     assert_eq!(token.balance(&bob), 225);
     assert_eq!(token.balance(&s.contract), 0);
-    assert_eq!(client.get_held(&bob), 0);
+    assert_eq!(client.get_held(&bob, &s.token), 0);
 
     // Withdrawing a second time fails with `NothingHeld`.
     assert_eq!(
-        client.try_withdraw_held(&bob),
+        client.try_withdraw_held(&bob, &s.token),
         Err(Ok(Error::NothingHeld.into()))
     );
 }

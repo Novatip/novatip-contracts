@@ -183,8 +183,7 @@ fn version_matches_the_interface_constant() {
     assert_eq!(client.version(), INTERFACE_VERSION);
     assert_eq!(
         client.version(),
-        10,
-        11,
+        12,
         "the published version is part of the public interface; bump \
          INTERFACE_VERSION when the shape changes, do not edit this test \
          to match a silent change"
@@ -791,7 +790,7 @@ fn upgrade_preserves_jar_held_totals_counter_and_fee() {
     env.as_contract(&s.contract, || {
         env.storage()
             .persistent()
-            .set(&DataKey::Held(alice.clone()), &held_credit);
+            .set(&DataKey::Held(alice.clone(), s.token.clone()), &held_credit);
     });
 
     // Same Soroban-host-compatible WASM envelope as the existing upgrade
@@ -846,7 +845,7 @@ fn upgrade_preserves_jar_held_totals_counter_and_fee() {
         let held: i128 = env
             .storage()
             .persistent()
-            .get(&DataKey::Held(alice.clone()))
+            .get(&DataKey::Held(alice.clone(), s.token.clone()))
             .unwrap();
         assert_eq!(held, held_credit);
         let counter: u64 = env.storage().instance().get(&DataKey::TipCount).unwrap();
