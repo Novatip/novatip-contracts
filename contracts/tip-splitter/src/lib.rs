@@ -265,6 +265,15 @@ pub enum DataKey {
     /// receive it again (see #171). Keyed by the recipient address; value is
     /// the amount owed them in the jar token.
     Held(Address),
+    /// Immutable internal id of the jar currently under a slug (#225). Assigned
+    /// by `create_jar`, moved by `rename_jar`, removed by `delete_jar`.
+    JarUid(String),
+    /// Monotonic counter of issued jar uids. Instance storage.
+    JarCount,
+    /// One supporter's settled totals, keyed by the jar's uid rather than its
+    /// reusable slug (#225). Jars created before uids existed keep using
+    /// `Supporter`.
+    SupporterOf(u128, Address),
     /// A recurring-tip schedule keyed by its assigned id.
     Recurring(u128),
     /// Monotonic counter of issued recurring-tip ids.
@@ -834,6 +843,8 @@ impl TipSplitter {
             },
         );
 
+        Self::assign_jar_uid(&env, &jar_id);
+
         // Issue #91: extend instance TTL on jar creation so the contract stays
         // alive alongside its jars.
         env.storage()
@@ -1339,6 +1350,11 @@ impl TipSplitter {
         env.storage()
             .persistent()
             .remove(&DataKey::PendingRemoval(jar_id.clone()));
+        // The next jar under this slug is a different jar and starts with no
+        // supporter history (#225).
+        env.storage()
+            .persistent()
+            .remove(&DataKey::JarUid(jar_id.clone()));
 
         env.events().publish(
             (symbol_short!("jar_del"), jar_id.clone()),
@@ -1490,6 +1506,18 @@ impl TipSplitter {
         env.storage()
             .persistent()
             .remove(&DataKey::PendingRemoval(jar_id.clone()));
+
+        // The jar keeps its uid, so its supporter totals follow it to the new
+        // slug and the old slug starts clean when someone registers it (#225).
+        let old_uid_key = DataKey::JarUid(jar_id.clone());
+        if let Some(uid) = env.storage().persistent().get::<_, u128>(&old_uid_key) {
+            let new_uid_key = DataKey::JarUid(new_jar_id.clone());
+            env.storage().persistent().set(&new_uid_key, &uid);
+            env.storage()
+                .persistent()
+                .extend_ttl(&new_uid_key, JAR_TTL_THRESHOLD, JAR_TTL_LEDGERS);
+            env.storage().persistent().remove(&old_uid_key);
+        }
 
         // Move stats too
         let old_stats_key = DataKey::Stats(jar_id.clone());
@@ -2261,7 +2289,7 @@ impl TipSplitter {
             .persistent()
             .extend_ttl(&stats_key, JAR_TTL_THRESHOLD, JAR_TTL_LEDGERS);
 
-        let supporter_key = DataKey::Supporter(jar_id.clone(), from.clone());
+        let supporter_key = Self::supporter_key(env, jar_id, from);
         let supporter_stats = env
             .storage()
             .persistent()
@@ -2825,7 +2853,7 @@ impl TipSplitter {
     pub fn get_supporter_stats(env: Env, jar_id: String, supporter: Address) -> SupporterStats {
         Self::load_jar(&env, &jar_id);
 
-        let key = DataKey::Supporter(jar_id, supporter);
+        let key = Self::supporter_key(&env, &jar_id, &supporter);
         match env
             .storage()
             .persistent()
@@ -3020,6 +3048,38 @@ impl TipSplitter {
         env.storage()
             .persistent()
             .extend_ttl(&key, JAR_TTL_THRESHOLD, JAR_TTL_LEDGERS);
+    }
+
+    /// Gives the jar under `jar_id` a fresh uid (#225).
+    fn assign_jar_uid(env: &Env, jar_id: &String) {
+        let count_key = DataKey::JarCount;
+        let uid: u128 = env
+            .storage()
+            .instance()
+            .get::<_, u128>(&count_key)
+            .unwrap_or(0)
+            + 1;
+        env.storage().instance().set(&count_key, &uid);
+        let key = DataKey::JarUid(jar_id.clone());
+        env.storage().persistent().set(&key, &uid);
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, JAR_TTL_THRESHOLD, JAR_TTL_LEDGERS);
+    }
+
+    /// The storage key for `supporter`'s totals against the jar under `jar_id`.
+    /// A jar with a uid is keyed by it, so a deleted or renamed slug cannot hand
+    /// its supporters to whoever claims it next (#225). A jar created before
+    /// uids existed has none and keeps its original slug-keyed entries.
+    fn supporter_key(env: &Env, jar_id: &String, supporter: &Address) -> DataKey {
+        let uid: Option<u128> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::JarUid(jar_id.clone()));
+        match uid {
+            Some(uid) => DataKey::SupporterOf(uid, supporter.clone()),
+            None => DataKey::Supporter(jar_id.clone(), supporter.clone()),
+        }
     }
 
     /// Extend a jar's TTL and its minimum-tip entry in lockstep (issue #92).

@@ -6,6 +6,7 @@ All notable changes to `novatip-contracts` are documented here.
 
 ### Fixed
 
+- Supporter totals are keyed by an internal jar uid instead of the reusable slug: after `delete_jar` plus `create_jar` the new jar starts with no supporter history, and `rename_jar` moves the totals with the jar. Jars created before this change keep their slug-keyed totals (#225).
 - `rename_jar` requires the registrar's co-signature over `(new_jar_id, owner)` while a registrar is set, closing the squatting gap `create_jar` already guarded (#224).
 - `delete_jar` on a locked jar needs authorization from every current recipient, like `unlock_splits`, so a lock cannot be bypassed by deleting and re-creating the jar (#223).
 - `collect_recurring` fails with `ContractPaused` while the contract is paused and `JarPaused` while the jar is paused, before any state change, so `next_due_ledger` is unchanged and the same call works after the pause is lifted (#220).

@@ -1845,3 +1845,91 @@ fn get_allowed_tokens_tracks_the_allowlist_and_is_capped() {
         Err(Ok(Error::TooManyAllowedTokens.into()))
     );
 }
+
+/// #225 — supporter totals belong to the jar, not to a reusable slug.
+fn tip_a_jar(
+    env: &Env,
+    client: &TipSplitterClient,
+    s: &Setup,
+    slug: &str,
+    recipient: &Address,
+    tipper: &Address,
+) -> String {
+    let jar_id = String::from_str(env, slug);
+    client.create_jar(
+        &Address::generate(env),
+        &jar_id,
+        &vec![
+            env,
+            Split {
+                to: recipient.clone(),
+                bps: 10000,
+            },
+        ],
+    );
+    token::StellarAssetClient::new(env, &s.token).mint(tipper, &1_000);
+    client.tip(tipper, &jar_id, &300, &String::from_str(env, "hi"));
+    jar_id
+}
+
+#[test]
+fn supporter_totals_do_not_survive_delete_and_recreate_of_the_slug() {
+    let s = setup();
+    let env = &s.env;
+    let client = TipSplitterClient::new(env, &s.contract);
+    let recipient = Address::generate(env);
+    let supporter = Address::generate(env);
+    let jar_id = tip_a_jar(env, &client, &s, "@reused", &recipient, &supporter);
+    let before = client.get_supporter_stats(&jar_id, &supporter);
+    assert_eq!((before.tip_count, before.total), (1, 300));
+
+    client.delete_jar(&jar_id);
+    let stranger = Address::generate(env);
+    client.create_jar(
+        &Address::generate(env),
+        &jar_id,
+        &vec![
+            env,
+            Split {
+                to: stranger,
+                bps: 10000,
+            },
+        ],
+    );
+
+    let after = client.get_supporter_stats(&jar_id, &supporter);
+    assert_eq!((after.tip_count, after.total), (0, 0));
+}
+
+#[test]
+fn supporter_totals_follow_a_renamed_jar_and_not_the_old_slug() {
+    let s = setup();
+    let env = &s.env;
+    let client = TipSplitterClient::new(env, &s.contract);
+    let recipient = Address::generate(env);
+    let supporter = Address::generate(env);
+    let old_id = tip_a_jar(env, &client, &s, "@before", &recipient, &supporter);
+    let new_id = String::from_str(env, "@after");
+
+    client.rename_jar(&old_id, &new_id);
+    let moved = client.get_supporter_stats(&new_id, &supporter);
+    assert_eq!((moved.tip_count, moved.total), (1, 300));
+
+    // Someone registers the freed slug: the old supporter has no history there.
+    client.create_jar(
+        &Address::generate(env),
+        &old_id,
+        &vec![
+            env,
+            Split {
+                to: Address::generate(env),
+                bps: 10000,
+            },
+        ],
+    );
+    let old_slug = client.get_supporter_stats(&old_id, &supporter);
+    assert_eq!((old_slug.tip_count, old_slug.total), (0, 0));
+    let still = client.get_supporter_stats(&new_id, &supporter);
+    assert_eq!((still.tip_count, still.total), (1, 300));
+}
+

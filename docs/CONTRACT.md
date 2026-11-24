@@ -68,7 +68,8 @@ entries archive independently.
 | `Recurring(id)` | Persistent | `create_recurring`, `update_recurring`, `collect_recurring` | `get_recurring`, `cancel_recurring`, `update_recurring`, `collect_recurring` | Creation, update, read and collection extend it | Restore the schedule; otherwise collection reports `RecurringNotFound`. |
 | `RecurringCount` | Persistent | `create_recurring` | `create_recurring` | Extended when a schedule is created | Restore the counter to preserve the next id; an absent counter is read as zero. |
 | `Stats(jar_id)` | Persistent | Successful tips through `bump_totals`; `rename_jar` moves an existing entry | `get_jar_stats`, combined jar info | A successful tip and a positive stats read extend it | Restore to recover totals; if no stats entry has ever been written, the getter returns zero totals. |
-| `Supporter(jar_id, supporter)` | Persistent | Successful tips through `bump_totals` | `get_supporter_stats` | A successful tip and a positive stats read extend it | Restore to recover totals; a never-written entry reads as zero totals. |
+| `JarUid(jar_id)`, `SupporterOf(jar_uid, supporter)` | Persistent | `create_jar` assigns the uid, `rename_jar` moves it, `delete_jar` removes it; tips write `SupporterOf` through `bump_totals` | `get_supporter_stats` | Extended with the jar and on tips | A jar created before #225 has no uid and keeps its `Supporter(jar_id, supporter)` entries. |
+| `Supporter(jar_id, supporter)` | Persistent | Successful tips through `bump_totals` (jars without a uid only) | `get_supporter_stats` | A successful tip and a positive stats read extend it | Restore to recover totals; a never-written entry reads as zero totals. |
 | `AllowedToken(token)` | Instance | `__constructor`, `allow_token`, `disallow_token` | `is_token_allowed`, `tip_in_token` | With the shared instance TTL | Restoring the contract instance restores the allowlist; the default token is initially allowed. |
 | `TipCount` | Instance | Successful tip settlement | Sequence assignment and `get_tip_count` | With the shared instance TTL | Restore the instance to preserve the sequence counter. |
 | `TipHook` | Instance | `set_tip_hook` | `get_tip_hook` and successful tip settlement | With the shared instance TTL | Restore the instance; an absent hook means no hook is configured. |
@@ -1733,6 +1734,19 @@ The supporter entry describes one supporter's relationship with one jar, so an
 archived entry means they restore it or tip again — the history is still in the
 event log, and a badge check that reads zeros asks for a restore rather than
 minting on a wrong count.
+
+**Supporter totals belong to the jar, not the slug (#225).** Each jar gets an
+internal uid when `create_jar` registers it, and `get_supporter_stats` reads the
+totals stored under that uid.
+
+- After `delete_jar`, the next `create_jar` on the same slug is a new jar with a
+  new uid, so every earlier supporter reads zeros there.
+- `rename_jar` moves the uid with the jar: `get_supporter_stats(new_slug, supporter)`
+  returns the supporter's totals, and the old slug reads zeros once someone
+  registers it.
+- A jar created before this change has no uid and keeps its slug-keyed totals.
+  Its history cannot follow a rename (the contract has no list of its
+  supporters), so after a rename those totals read zero under the new slug.
 
 ### What it costs per tip
 
