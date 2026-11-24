@@ -184,10 +184,14 @@ struct TipParams<'a> {
 #[derive(Clone)]
 pub struct Jar {
     pub owner: Address,
-    pub splits: Vec<Split>,
+    pub splits: Vec<CompactSplit>,
     pub locked: bool,
     pub paused: bool,
 }
+
+/// Storage-facing aliases make the compact persisted jar representation explicit.
+pub type CompactSplit = Split;
+pub type JarRecord = Jar;
 
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -2012,7 +2016,8 @@ impl TipSplitter {
                     send(&contract_addr, &fee);
                     let held_key = DataKey::Held(payee.clone(), token_addr.clone());
                     let held: i128 = env.storage().persistent().get(&held_key).unwrap_or(0);
-                    env.storage().persistent().set(&held_key, &(held + fee));
+                    let updated = held.checked_add(fee).unwrap_or_else(|| panic_with_error!(env, Error::AmountOverflow));
+                    env.storage().persistent().set(&held_key, &updated);
                     env.storage().persistent().extend_ttl(
                         &held_key,
                         JAR_TTL_THRESHOLD,
@@ -2071,7 +2076,8 @@ impl TipSplitter {
                 total_transferred += share;
                 let held_key = DataKey::Held(split.to.clone(), token_addr.clone());
                 let held: i128 = env.storage().persistent().get(&held_key).unwrap_or(0);
-                env.storage().persistent().set(&held_key, &(held + share));
+                let updated = held.checked_add(share).unwrap_or_else(|| panic_with_error!(env, Error::AmountOverflow));
+                env.storage().persistent().set(&held_key, &updated);
                 env.storage().persistent().extend_ttl(
                     &held_key,
                     JAR_TTL_THRESHOLD,
@@ -2887,6 +2893,9 @@ impl TipSplitter {
 
     pub fn get_min_accepted_tip(env: Env, jar_id: String) -> i128 {
         let jar = Self::load_jar(&env, &jar_id);
+        if jar.paused {
+            panic_with_error!(&env, Error::JarPaused);
+        }
         let denom = BPS_DENOM as i128;
         // The smallest post-fee amount that pays every recipient.
         let mut net = 1i128;
@@ -3135,8 +3144,8 @@ impl TipSplitter {
 
     /// Load a jar or fail with `JarNotFound`, extending the jar and its minimum
     /// tip in lockstep (#92). Every jar read goes through here (#327).
-    fn load_jar(env: &Env, jar_id: &String) -> Jar {
-        let jar: Jar = env
+    fn load_jar(env: &Env, jar_id: &String) -> JarRecord {
+        let jar: JarRecord = env
             .storage()
             .persistent()
             .get(&DataKey::Jar(jar_id.clone()))
