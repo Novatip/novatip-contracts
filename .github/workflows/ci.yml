@@ -149,6 +149,11 @@ jobs:
           ref: ${{ github.event.pull_request.base.sha }}
           path: base
 
+      # Fail when interface.json changed without bumping INTERFACE_VERSION and adding a CHANGELOG entry (#309).
+      - name: Check interface version bump on interface change
+        if: github.event_name == 'pull_request'
+        run: ./scripts/check-interface-version.sh base
+
       - name: Build the base wasm
         if: github.event_name == 'pull_request'
         working-directory: base
