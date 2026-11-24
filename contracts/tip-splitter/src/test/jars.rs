@@ -2049,3 +2049,121 @@ fn max_tip_amount_caps_tips_and_previews() {
     client.set_max_tip_amount(&jar_id, &None);
     assert_eq!(client.get_max_tip_amount(&jar_id), None);
 }
+
+/// #224 — while a registrar is set, renaming a jar to a new slug needs the same
+/// co-signature creating it would, over `(new_jar_id, owner)`.
+#[test]
+fn rename_jar_needs_the_registrars_co_signature_while_one_is_set() {
+    let s = setup();
+    let env = &s.env;
+    let client = TipSplitterClient::new(env, &s.contract);
+    let owner = Address::generate(env);
+    let alice = Address::generate(env);
+    let registrar = Address::generate(env);
+    let old_id = String::from_str(env, "@approved");
+    let new_id = String::from_str(env, "@squatted");
+    client.create_jar(
+        &owner,
+        &old_id,
+        &vec![
+            env,
+            Split {
+                to: alice.clone(),
+                bps: 10000,
+            },
+        ],
+    );
+    client.set_registrar(&Some(registrar.clone()));
+
+    let owner_auth = MockAuth {
+        address: &owner,
+        invoke: &MockAuthInvoke {
+            contract: &s.contract,
+            fn_name: "rename_jar",
+            args: (old_id.clone(), new_id.clone()).into_val(env),
+            sub_invokes: &[],
+        },
+    };
+
+    // The owner's signature alone is rejected and nothing moves.
+    env.mock_auths(&[MockAuth {
+        address: &owner,
+        invoke: owner_auth.invoke,
+    }]);
+    assert!(client.try_rename_jar(&old_id, &new_id).is_err());
+    assert!(client.jar_exists(&old_id));
+    assert!(!client.jar_exists(&new_id));
+
+    // A co-signature over a different slug does not help.
+    env.mock_auths(&[
+        MockAuth {
+            address: &owner,
+            invoke: owner_auth.invoke,
+        },
+        MockAuth {
+            address: &registrar,
+            invoke: &MockAuthInvoke {
+                contract: &s.contract,
+                fn_name: "rename_jar",
+                args: (String::from_str(env, "@other"), owner.clone()).into_val(env),
+                sub_invokes: &[],
+            },
+        },
+    ]);
+    assert!(client.try_rename_jar(&old_id, &new_id).is_err());
+
+    // The registrar co-signing (new_jar_id, owner) lets it through.
+    env.mock_auths(&[
+        MockAuth {
+            address: &owner,
+            invoke: owner_auth.invoke,
+        },
+        MockAuth {
+            address: &registrar,
+            invoke: &MockAuthInvoke {
+                contract: &s.contract,
+                fn_name: "rename_jar",
+                args: (new_id.clone(), owner.clone()).into_val(env),
+                sub_invokes: &[],
+            },
+        },
+    ]);
+    client.rename_jar(&old_id, &new_id);
+    assert!(client.jar_exists(&new_id));
+    assert!(!client.jar_exists(&old_id));
+}
+
+#[test]
+fn rename_jar_needs_only_the_owner_when_no_registrar_is_set() {
+    let s = setup();
+    let env = &s.env;
+    let client = TipSplitterClient::new(env, &s.contract);
+    let owner = Address::generate(env);
+    let alice = Address::generate(env);
+    let old_id = String::from_str(env, "@plainold");
+    let new_id = String::from_str(env, "@plainnew");
+    client.create_jar(
+        &owner,
+        &old_id,
+        &vec![
+            env,
+            Split {
+                to: alice,
+                bps: 10000,
+            },
+        ],
+    );
+
+    env.mock_auths(&[MockAuth {
+        address: &owner,
+        invoke: &MockAuthInvoke {
+            contract: &s.contract,
+            fn_name: "rename_jar",
+            args: (old_id.clone(), new_id.clone()).into_val(env),
+            sub_invokes: &[],
+        },
+    }]);
+    client.rename_jar(&old_id, &new_id);
+    assert!(client.jar_exists(&new_id));
+}
+

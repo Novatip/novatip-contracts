@@ -1473,6 +1473,13 @@ impl TipSplitter {
             panic_with_error!(&env, Error::JarIdInUse);
         }
 
+        // A rename claims a slug exactly like `create_jar` does, so it passes
+        // the same anti-squatting gate: the registrar co-signs the
+        // `(new_jar_id, owner)` pair while one is set (#224).
+        if let Some(registrar) = Self::get_registrar(env.clone()) {
+            registrar.require_auth_for_args((new_jar_id.clone(), jar.owner.clone()).into_val(&env));
+        }
+
         // Copy jar to new id
         Self::store_jar(&env, &new_jar_id, &jar);
 
