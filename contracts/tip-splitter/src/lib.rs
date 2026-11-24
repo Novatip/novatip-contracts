@@ -184,10 +184,14 @@ struct TipParams<'a> {
 #[derive(Clone)]
 pub struct Jar {
     pub owner: Address,
-    pub splits: Vec<Split>,
+    pub splits: Vec<CompactSplit>,
     pub locked: bool,
     pub paused: bool,
 }
+
+/// Storage-facing aliases make the compact persisted jar representation explicit.
+pub type CompactSplit = Split;
+pub type JarRecord = Jar;
 
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -3140,8 +3144,8 @@ impl TipSplitter {
 
     /// Load a jar or fail with `JarNotFound`, extending the jar and its minimum
     /// tip in lockstep (#92). Every jar read goes through here (#327).
-    fn load_jar(env: &Env, jar_id: &String) -> Jar {
-        let jar: Jar = env
+    fn load_jar(env: &Env, jar_id: &String) -> JarRecord {
+        let jar: JarRecord = env
             .storage()
             .persistent()
             .get(&DataKey::Jar(jar_id.clone()))
