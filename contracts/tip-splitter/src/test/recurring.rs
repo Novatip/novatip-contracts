@@ -577,3 +577,41 @@ fn recr_del_records_who_cancelled() {
     assert_eq!(cancelled, id);
     assert_eq!(cancelled_by, owner);
 }
+
+/// #220 — `collect_recurring` honours the contract pause and the jar pause,
+/// moves nothing while either is on, and works again once it is lifted.
+#[test]
+fn collect_recurring_respects_the_contract_pause_and_the_jar_pause() {
+    let s = setup();
+    let env = &s.env;
+    let (client, alice, bob, supporter, jar_id, id) = recurring_fixture(env, &s, 1_000, 1_000);
+    let token = token::Client::new(env, &s.token);
+    let due = client.get_recurring(&id).next_due_ledger;
+    env.ledger().set_sequence_number(due);
+
+    client.pause();
+    assert_eq!(
+        client.try_collect_recurring(&id),
+        Err(Ok(Error::ContractPaused.into()))
+    );
+    assert_eq!(client.get_recurring(&id).next_due_ledger, due);
+    assert_eq!(token.balance(&alice) + token.balance(&bob), 0);
+    assert_eq!(token.balance(&supporter), 10_000);
+    client.resume();
+
+    client.set_jar_paused(&jar_id, &true);
+    assert_eq!(
+        client.try_collect_recurring(&id),
+        Err(Ok(Error::JarPaused.into()))
+    );
+    assert_eq!(client.get_recurring(&id).next_due_ledger, due);
+    assert_eq!(token.balance(&alice) + token.balance(&bob), 0);
+    assert_eq!(token.balance(&supporter), 10_000);
+
+    client.set_jar_paused(&jar_id, &false);
+    client.collect_recurring(&id);
+    assert_eq!(token.balance(&alice), 700);
+    assert_eq!(token.balance(&bob), 300);
+    assert_eq!(client.get_recurring(&id).next_due_ledger, due + 100);
+}
+

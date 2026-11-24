@@ -1138,6 +1138,9 @@ impl TipSplitter {
         jar.locked
     }
 
+    /// Pause or resume tipping for one jar (owner only). While paused, every tip
+    /// entry point, including `collect_recurring`, rejects the jar with
+    /// `JarPaused`; reads and owner edits keep working.
     pub fn set_jar_paused(env: Env, jar_id: String, paused: bool) {
         let jar = Self::load_jar(&env, &jar_id);
         jar.owner.require_auth();
@@ -1357,9 +1360,9 @@ impl TipSplitter {
     }
 
     /// Stop tipping contract-wide (admin only): `tip`, `tip_with_ref`,
-    /// `tip_in_token` and `tip_many` reject with `ContractPaused` until
-    /// `resume`. Other calls, including `withdraw_held` and owner edits, keep
-    /// working; `collect_recurring` is not gated yet (#220).
+    /// `tip_in_token`, `tip_many` and `collect_recurring` reject with
+    /// `ContractPaused` until `resume`. Other calls, including `withdraw_held`
+    /// and owner edits, keep working.
     pub fn pause(env: Env) {
         let admin = Self::require_admin(&env);
         env.storage().instance().set(&DataKey::Paused, &true);
@@ -2506,6 +2509,13 @@ impl TipSplitter {
             .get(&rec_key)
             .unwrap_or_else(|| panic_with_error!(&env, Error::RecurringNotFound));
 
+        // Same contract-wide switch the tip entry points honour (#220). Checked
+        // before anything is written, so a paused collection leaves
+        // `next_due_ledger` where it was and succeeds once `resume` is called.
+        if env.storage().instance().has(&DataKey::Paused) {
+            panic_with_error!(&env, Error::ContractPaused);
+        }
+
         // Due check first: an early call is a typed no-op, no funds move, no
         // TTL bump that would mask the rejection.
         if env.ledger().sequence() < entry.next_due_ledger {
@@ -2513,6 +2523,11 @@ impl TipSplitter {
         }
 
         let jar = Self::load_jar(&env, &entry.jar_id);
+
+        // And the owner's per-jar switch (#220).
+        if jar.paused {
+            panic_with_error!(&env, Error::JarPaused);
+        }
 
         // A recurring schedule is a promise about the *default* token: it was
         // registered against `tip`'s token and minimum, and it is collected

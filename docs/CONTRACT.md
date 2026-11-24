@@ -224,7 +224,7 @@ Every privileged entry point requires the contract `admin` signature (`transfer_
 
 | Admin function | What it can affect | What it can never do |
 | -------------- | ------------------ | -------------------- |
-| `pause()` / `resume()` | Halts or resumes `tip`, `tip_with_ref`, `tip_in_token` and `tip_many`. `collect_recurring` is not halted ([#220](https://github.com/Novatip/novatip-contracts/issues/220)) | Cannot move funds out of any jar or alter existing splits |
+| `pause()` / `resume()` | Halts or resumes `tip`, `tip_with_ref`, `tip_in_token`, `tip_many` and `collect_recurring` (#220) | Cannot move funds out of any jar or alter existing splits |
 | `set_fee_bps(fee_bps)` | Sets the protocol fee taken off the top of tips (capped at 5% / `500` bps) | Cannot exceed `500` bps or take funds retroactively |
 | `allow_token(token)` / `disallow_token(token)` | Controls which tokens (besides the default USDC token) can be tipped | Cannot disallow the default token or seize held balances |
 | `set_tip_hook(hook)` | Registers or clears a post-tip hook contract called after tip transfers | Cannot intercept or revert funds already sent to recipients before the hook runs (hook failure reverts the whole tx) |
@@ -253,7 +253,7 @@ written as raised only when every earlier check has passed.
 | `preview_tip(jar_id, from, amount) -> Vec<i128>` | — | `AmountZero` (amount = 0) / `AmountNegative` (amount < 0) → `JarNotFound` → `BelowMinTipAmount` → `SplitAmountTooSmall` / `AmountOverflow` | The sender-aware preview (#177): exactly the amounts `tip` will transfer for `from`, helper-shared with the payout. |
 | `preview_tip(jar_id, from, amount) -> Vec<i128>` | — | `AmountZero` / `AmountNegative` → `JarNotFound` → `BelowMinTipAmount` → `SplitAmountTooSmall` (a share truncates to zero) / `AmountOverflow` (`amount * bps` overflows) | The sender-aware preview (#177): exactly the amounts `tip` will transfer for `from`, helper-shared with the payout. |
 | `tip_many(from, tips, token) -> Vec<u64>` | `from` | Soroban auth error (missing `from` signature) → `ContractPaused` → `BatchEmpty` → `BatchTooLarge` → `NotInitialized` → `TokenNotAllowed`, then per entry the same sequence as `tip`: `AmountZero` / `AmountNegative` → `MessageTooLong` → `JarNotFound` → `BelowMinTipAmount` → `AboveMaxTipAmount` → `SplitAmountTooSmall` / `AmountOverflow` → `InsufficientBalance` → the token contract's own error | Tip several jars in one transaction (#84). The batch-size and pause checks run first, before any jar is looked up; each entry is then settled exactly as `tip` would settle it (including the per-jar `JarPaused` check), and a failure in any entry reverts the whole call. |
-| `collect_recurring(id)` | — | `RecurringNotFound` → `NotDue` → `JarNotFound` → `NotInitialized` → `InsufficientAllowance` → `InsufficientBalance` | Collect one due period of a recurring schedule through the supporter's token allowance (#175). Publishes the same `tip` event and fires the post-tip hook. |
+| `collect_recurring(id)` | — | `RecurringNotFound` → `ContractPaused` → `NotDue` → `JarNotFound` → `JarPaused` → `NotInitialized` → `InsufficientAllowance` → `InsufficientBalance` | Collect one due period of a recurring schedule through the supporter's token allowance (#175). Publishes the same `tip` event and fires the post-tip hook. |
 | `jar_exists(jar_id) -> bool` | — | — | Whether the slug is already registered. Reads one key and returns a plain `bool`; never panics on a free slug. |
 | `is_recipient(jar_id, address) -> bool` | — | `JarNotFound` | Whether `address` appears in the jar's splits. Panics with `JarNotFound` if the slug is free. |
 | `get_min_tip_amount(jar_id) -> Option<i128>` | — | `JarNotFound` | Read a jar's optional minimum tip amount. Returns `None` if no minimum is set. Panics with `JarNotFound` if the slug is free. |
@@ -931,8 +931,8 @@ The admin **cannot**:
 - change the compiled-in bounds: 20 recipients, a 280-byte message, 10 000 bps
   for the whole split. They ship with the code, so changing one means shipping
   new code.
-- stop scheduled collection. `pause` gates the four tip entry points only;
-  `collect_recurring` and `withdraw_held` keep working while paused.
+- stop `withdraw_held`. `pause` gates the tip entry points and
+  `collect_recurring`; `withdraw_held` keeps working while paused.
 
 `upgrade` is the widest power on the list and it is deliberately in the admin's
 hands: new Wasm can change everything the bullets above pin down. Operators
@@ -1547,7 +1547,7 @@ moves nothing.
 | `tip`, `tip_with_ref` | Yes, `ContractPaused` | Yes, `JarPaused` |
 | `tip_in_token` | Yes, `ContractPaused` | Yes, `JarPaused` |
 | `tip_many` | Yes, `ContractPaused`, before any entry | Yes, `JarPaused` for a paused jar in the batch; the whole batch reverts |
-| `collect_recurring` | No, see [#220](https://github.com/Novatip/novatip-contracts/issues/220) | No, see [#220](https://github.com/Novatip/novatip-contracts/issues/220) |
+| `collect_recurring` | Yes, `ContractPaused`, before any state change | Yes, `JarPaused`, before any state change |
 | `create_recurring`, `update_recurring`, `cancel_recurring` | No | No |
 | `withdraw_held`, `withdraw_held_to` | No | No |
 | `create_jar`, `rename_jar`, `delete_jar` | No | No |
@@ -1568,9 +1568,9 @@ storage TTLs, but none moves funds.
 
 Neither switch holds back recipients or owners: a recipient can still withdraw
 a held share, and an owner can still edit, rename, transfer or delete a jar
-while either pause is on. `collect_recurring` should honour both switches like
-the tip entry points; until #220 is fixed, a keeper can still collect a due
-period while the contract or the jar is paused.
+while either pause is on. `collect_recurring` honours both switches like the
+tip entry points: a paused collection fails before anything changes, so
+`next_due_ledger` stays put and the same call succeeds once the pause is lifted.
 
 ## When a share is held (#171)
 
@@ -2545,7 +2545,7 @@ The admin **cannot**:
   jar owner, and a locked jar also needs each affected recipient;
 - change the settlement token after deploy;
 - set a fee above 5%;
-- stop `collect_recurring` or `withdraw_held` by pausing.
+- stop `withdraw_held` by pausing.
 
 **The upgrade caveat.** `upgrade` replaces the whole contract code. A new build
 can read or move anything the contract holds, including held balances. The

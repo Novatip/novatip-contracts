@@ -6,6 +6,8 @@ All notable changes to `novatip-contracts` are documented here.
 
 ### Fixed
 
+- `collect_recurring` fails with `ContractPaused` while the contract is paused and `JarPaused` while the jar is paused, before any state change, so `next_due_ledger` is unchanged and the same call works after the pause is lifted (#220).
+
 - Tippers who are also recipients are charged only for funds that leave their account (#229).
 - `transfer_admin` now requires the proposed administrator's authorization before changing control (#230).
 - `preview_split_details` applies the same amount, minimum, maximum and paused-jar validation as tipping previews (#227, #228).
