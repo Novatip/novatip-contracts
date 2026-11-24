@@ -262,6 +262,10 @@ pub enum DataKey {
     /// Optional minimum tip amount for a jar keyed by its public slug.
     MinTip(String),
     /// A recipient's undeliverable share, held by the contract until they can
+    /// receive it again (see #171). Keyed by the recipient address; value is
+    /// the amount owed them in the jar token.
+    Held(Address),
+    /// Immutable internal id of the jar currently under a slug (#225). Assigned
     /// receive it again (see #171). Keyed by the recipient address and the
     /// token the share was paid in (#219); value is the amount owed them in
     /// that token.
@@ -271,6 +275,10 @@ pub enum DataKey {
     JarUid(String),
     /// Monotonic counter of issued jar uids. Instance storage.
     JarCount,
+    /// One supporter's settled totals, keyed by the jar's uid rather than its
+    /// reusable slug (#225). Jars created before uids existed keep using
+    /// `Supporter`.
+    SupporterOf(u128, Address),
     /// The jar uid a recurring schedule was created against (#222).
     RecurringJar(u128),
     /// A recurring-tip schedule keyed by its assigned id.
@@ -858,6 +866,8 @@ impl TipSplitter {
         );
         Self::assign_jar_uid(&env, &jar_id);
 
+        Self::assign_jar_uid(&env, &jar_id);
+
         // Issue #91: extend instance TTL on jar creation so the contract stays
         // alive alongside its jars.
         env.storage()
@@ -1162,6 +1172,9 @@ impl TipSplitter {
         jar.locked
     }
 
+    /// Pause or resume tipping for one jar (owner only). While paused, every tip
+    /// entry point, including `collect_recurring`, rejects the jar with
+    /// `JarPaused`; reads and owner edits keep working.
     pub fn set_jar_paused(env: Env, jar_id: String, paused: bool) {
         let jar = Self::load_jar(&env, &jar_id);
         jar.owner.require_auth();
@@ -1329,9 +1342,18 @@ impl TipSplitter {
         );
     }
 
+    /// Delete a jar and free its slug (owner only). A locked jar also needs
+    /// every current recipient to authorize, exactly like `unlock_splits`:
+    /// otherwise the owner could delete it and re-create it with themselves as
+    /// the only recipient, which is what the lock exists to prevent (#223).
     pub fn delete_jar(env: Env, jar_id: String) {
         let jar = Self::load_jar(&env, &jar_id);
         jar.owner.require_auth();
+        if jar.locked {
+            for split in jar.splits.iter() {
+                split.to.require_auth();
+            }
+        }
 
         env.storage()
             .persistent()
@@ -1351,6 +1373,8 @@ impl TipSplitter {
         env.storage()
             .persistent()
             .remove(&DataKey::PendingRemoval(jar_id.clone()));
+        // The next jar under this slug is a different jar and starts with no
+        // supporter history (#225).
         env.storage()
             .persistent()
             .remove(&DataKey::JarUid(jar_id.clone()));
@@ -1384,9 +1408,9 @@ impl TipSplitter {
     }
 
     /// Stop tipping contract-wide (admin only): `tip`, `tip_with_ref`,
-    /// `tip_in_token` and `tip_many` reject with `ContractPaused` until
-    /// `resume`. Other calls, including `withdraw_held` and owner edits, keep
-    /// working; `collect_recurring` is not gated yet (#220).
+    /// `tip_in_token`, `tip_many` and `collect_recurring` reject with
+    /// `ContractPaused` until `resume`. Other calls, including `withdraw_held`
+    /// and owner edits, keep working.
     pub fn pause(env: Env) {
         let admin = Self::require_admin(&env);
         env.storage().instance().set(&DataKey::Paused, &true);
@@ -1488,6 +1512,13 @@ impl TipSplitter {
             panic_with_error!(&env, Error::JarIdInUse);
         }
 
+        // A rename claims a slug exactly like `create_jar` does, so it passes
+        // the same anti-squatting gate: the registrar co-signs the
+        // `(new_jar_id, owner)` pair while one is set (#224).
+        if let Some(registrar) = Self::get_registrar(env.clone()) {
+            registrar.require_auth_for_args((new_jar_id.clone(), jar.owner.clone()).into_val(&env));
+        }
+
         // Copy jar to new id
         Self::store_jar(&env, &new_jar_id, &jar);
 
@@ -1499,6 +1530,8 @@ impl TipSplitter {
             .persistent()
             .remove(&DataKey::PendingRemoval(jar_id.clone()));
 
+        // The jar keeps its uid, so its supporter totals follow it to the new
+        // slug and the old slug starts clean when someone registers it (#225).
         // The jar keeps its uid under the new slug, so a schedule created for the
         // old slug can no longer be mistaken for one that follows the jar (#222).
         let old_uid_key = DataKey::JarUid(jar_id.clone());
@@ -2317,7 +2350,7 @@ impl TipSplitter {
             .persistent()
             .extend_ttl(&stats_key, JAR_TTL_THRESHOLD, JAR_TTL_LEDGERS);
 
-        let supporter_key = DataKey::Supporter(jar_id.clone(), from.clone());
+        let supporter_key = Self::supporter_key(env, jar_id, from);
         let supporter_stats = env
             .storage()
             .persistent()
@@ -2600,6 +2633,13 @@ impl TipSplitter {
             .get(&rec_key)
             .unwrap_or_else(|| panic_with_error!(&env, Error::RecurringNotFound));
 
+        // Same contract-wide switch the tip entry points honour (#220). Checked
+        // before anything is written, so a paused collection leaves
+        // `next_due_ledger` where it was and succeeds once `resume` is called.
+        if env.storage().instance().has(&DataKey::Paused) {
+            panic_with_error!(&env, Error::ContractPaused);
+        }
+
         // Due check first: an early call is a typed no-op, no funds move, no
         // TTL bump that would mask the rejection.
         if env.ledger().sequence() < entry.next_due_ledger {
@@ -2608,6 +2648,9 @@ impl TipSplitter {
 
         let jar = Self::load_jar(&env, &entry.jar_id);
 
+        // And the owner's per-jar switch (#220).
+        if jar.paused {
+            panic_with_error!(&env, Error::JarPaused);
         // The slug may have been freed and claimed by someone else since the
         // supporter registered this schedule (#222). Fail with a typed error
         // before any state changes rather than paying the new jar. Schedules
@@ -2914,7 +2957,7 @@ impl TipSplitter {
     pub fn get_supporter_stats(env: Env, jar_id: String, supporter: Address) -> SupporterStats {
         Self::load_jar(&env, &jar_id);
 
-        let key = DataKey::Supporter(jar_id, supporter);
+        let key = Self::supporter_key(&env, &jar_id, &supporter);
         match env
             .storage()
             .persistent()
@@ -3140,6 +3183,38 @@ impl TipSplitter {
         env.storage()
             .persistent()
             .extend_ttl(&key, JAR_TTL_THRESHOLD, JAR_TTL_LEDGERS);
+    }
+
+    /// Gives the jar under `jar_id` a fresh uid (#225).
+    fn assign_jar_uid(env: &Env, jar_id: &String) {
+        let count_key = DataKey::JarCount;
+        let uid: u128 = env
+            .storage()
+            .instance()
+            .get::<_, u128>(&count_key)
+            .unwrap_or(0)
+            + 1;
+        env.storage().instance().set(&count_key, &uid);
+        let key = DataKey::JarUid(jar_id.clone());
+        env.storage().persistent().set(&key, &uid);
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, JAR_TTL_THRESHOLD, JAR_TTL_LEDGERS);
+    }
+
+    /// The storage key for `supporter`'s totals against the jar under `jar_id`.
+    /// A jar with a uid is keyed by it, so a deleted or renamed slug cannot hand
+    /// its supporters to whoever claims it next (#225). A jar created before
+    /// uids existed has none and keeps its original slug-keyed entries.
+    fn supporter_key(env: &Env, jar_id: &String, supporter: &Address) -> DataKey {
+        let uid: Option<u128> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::JarUid(jar_id.clone()));
+        match uid {
+            Some(uid) => DataKey::SupporterOf(uid, supporter.clone()),
+            None => DataKey::Supporter(jar_id.clone(), supporter.clone()),
+        }
     }
 
     /// Extend a jar's TTL and its minimum-tip entry in lockstep (issue #92).

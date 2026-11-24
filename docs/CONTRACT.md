@@ -69,7 +69,8 @@ entries archive independently.
 | `JarUid(slug)`, `RecurringJar(id)` | Persistent | `create_jar`, `rename_jar` (moves the uid), `create_recurring` | `collect_recurring` | Extended with the jar and the schedule | Absent for jars created before #222 until a schedule is registered against them; a schedule with no `RecurringJar` entry is not checked. |
 | `RecurringCount` | Persistent | `create_recurring` | `create_recurring` | Extended when a schedule is created | Restore the counter to preserve the next id; an absent counter is read as zero. |
 | `Stats(jar_id)` | Persistent | Successful tips through `bump_totals`; `rename_jar` moves an existing entry | `get_jar_stats`, combined jar info | A successful tip and a positive stats read extend it | Restore to recover totals; if no stats entry has ever been written, the getter returns zero totals. |
-| `Supporter(jar_id, supporter)` | Persistent | Successful tips through `bump_totals` | `get_supporter_stats` | A successful tip and a positive stats read extend it | Restore to recover totals; a never-written entry reads as zero totals. |
+| `JarUid(jar_id)`, `SupporterOf(jar_uid, supporter)` | Persistent | `create_jar` assigns the uid, `rename_jar` moves it, `delete_jar` removes it; tips write `SupporterOf` through `bump_totals` | `get_supporter_stats` | Extended with the jar and on tips | A jar created before #225 has no uid and keeps its `Supporter(jar_id, supporter)` entries. |
+| `Supporter(jar_id, supporter)` | Persistent | Successful tips through `bump_totals` (jars without a uid only) | `get_supporter_stats` | A successful tip and a positive stats read extend it | Restore to recover totals; a never-written entry reads as zero totals. |
 | `AllowedToken(token)` | Instance | `__constructor`, `allow_token`, `disallow_token` | `is_token_allowed`, `tip_in_token` | With the shared instance TTL | Restoring the contract instance restores the allowlist; the default token is initially allowed. |
 | `TipCount` | Instance | Successful tip settlement | Sequence assignment and `get_tip_count` | With the shared instance TTL | Restore the instance to preserve the sequence counter. |
 | `TipHook` | Instance | `set_tip_hook` | `get_tip_hook` and successful tip settlement | With the shared instance TTL | Restore the instance; an absent hook means no hook is configured. |
@@ -159,8 +160,8 @@ one belongs to a jar, the other to a `(jar, supporter)` pair.
 | `get_max_tip_amount(jar_id) -> Option<i128>` | — | Read a jar's optional maximum tip amount. Panics with `JarNotFound` if the slug is free. |
 | `transfer_jar_ownership(jar_id, new_owner)` | current jar `owner` and `new_owner` | Hand control of a jar to `new_owner`. The exact `(jar_id, new_owner)` pair must be signed by both parties; a transfer to the current owner is rejected. Splits are unchanged. Emits a `jar_xfer` event carrying both owners. |
 | `admin_recover_jar(jar_id, new_owner)` | contract admin | Reassign a jar whose owner key is lost. No owner signature is required; shares and jar flags are preserved. Emits `jar_recov`. |
-| `delete_jar(jar_id)` | current jar `owner` | Delete a registered jar and free its slug so it can be recreated. Removes the jar, its stats, and any minimum-tip value for that slug. Emits a `jar_del` event with the jar id as a topic. |
-| `rename_jar(jar_id, new_jar_id)` | jar `owner` | Move a jar, its stats and its minimum to a new slug. The old slug stops resolving immediately; `new_jar_id` must be free and pass the same length checks as `create_jar`. Emits a `jar_rnm` event with the old jar id as a topic and `JarRenamedEvent { version, jar_id, new_jar_id }` data. |
+| `delete_jar(jar_id)` | current jar `owner`, plus **every current recipient** when the jar is locked (#223) | Delete a registered jar and free its slug so it can be recreated. Removes the jar, its stats, and any minimum-tip value for that slug. Emits a `jar_del` event with the jar id as a topic. |
+| `rename_jar(jar_id, new_jar_id)` | jar `owner`, plus the [`registrar`](#glossary-registrar)'s co-signature over `(new_jar_id, owner)` while one is registered (#224) | Move a jar, its stats and its minimum to a new slug. The old slug stops resolving immediately; `new_jar_id` must be free and pass the same length checks as `create_jar`. Emits a `jar_rnm` event with the old jar id as a topic and `JarRenamedEvent { version, jar_id, new_jar_id }` data. |
 | `tip(from, jar_id, amount, message)` | `from` | Move `amount` USDC out of `from` and route it across the jar's recipients. A recipient who cannot receive the token has their share **escrowed in the contract** (see `get_held`/`withdraw_held`) instead of reverting the tip. Emits a `tip` event carrying the per-recipient breakdown. Rejects amounts below the jar's minimum with `BelowMinTipAmount`. |
 | `get_held(recipient, token) -> i128` | — | How much the contract is holding ([held](#glossary-held)) for `recipient` in `token` because a past tip could not deliver their share. `0` when nothing is held. |
 | `withdraw_held(recipient, token)` | `recipient` | Pay a recipient their balance held in `token` once they can receive again. Pays only that token's balance. Rejected with `NothingHeld` when nothing is owed in `token`. Emits a `withdraw` event with `HeldWithdrawnEvent { version, amount, token }` data. |
@@ -225,7 +226,7 @@ Every privileged entry point requires the contract `admin` signature (`transfer_
 
 | Admin function | What it can affect | What it can never do |
 | -------------- | ------------------ | -------------------- |
-| `pause()` / `resume()` | Halts or resumes `tip`, `tip_with_ref`, `tip_in_token` and `tip_many`. `collect_recurring` is not halted ([#220](https://github.com/Novatip/novatip-contracts/issues/220)) | Cannot move funds out of any jar or alter existing splits |
+| `pause()` / `resume()` | Halts or resumes `tip`, `tip_with_ref`, `tip_in_token`, `tip_many` and `collect_recurring` (#220) | Cannot move funds out of any jar or alter existing splits |
 | `set_fee_bps(fee_bps)` | Sets the protocol fee taken off the top of tips (capped at 5% / `500` bps) | Cannot exceed `500` bps or take funds retroactively |
 | `allow_token(token)` / `disallow_token(token)` | Controls which tokens (besides the default USDC token) can be tipped | Cannot disallow the default token or seize held balances |
 | `set_tip_hook(hook)` | Registers or clears a post-tip hook contract called after tip transfers | Cannot intercept or revert funds already sent to recipients before the hook runs (hook failure reverts the whole tx) |
@@ -244,8 +245,8 @@ written as raised only when every earlier check has passed.
 | `set_min_tip_amount(jar_id, min_amount)` | jar `owner` | `JarNotFound` → `InvalidMinimumAmount` | Set or clear an optional minimum tip amount for a jar. `min_amount` must be strictly positive (`> 0`) or `None` to clear. Emits a `min_tip` event. |
 | `transfer_jar_ownership(jar_id, new_owner)` | current jar `owner` and `new_owner` | `JarNotFound` → `InvalidRecipient` (new owner is the contract itself or the token) → `SameOwner` (new owner is the current owner) | Hand control of a jar to `new_owner`. The exact `(jar_id, new_owner)` pair is signed by both owners. Splits are unchanged. Emits a `jar_xfer` event carrying both owners. |
 | `admin_recover_jar(jar_id, new_owner)` | contract admin | `JarNotFound` → `InvalidRecipient` (new owner is current owner, contract, or token) | Reassign a jar after owner-key loss. Preserves splits and flags; emits `jar_recov`. |
-| `delete_jar(jar_id)` | current jar `owner` | `JarNotFound` | Delete a registered jar and free its slug for reuse. Removes the jar, its stats, and the associated minimum-tip value. Emits a `jar_del` event with the jar id as a topic. |
-| `rename_jar(jar_id, new_jar_id)` | jar `owner` | `InvalidJarId` (new id not a canonical `@`-prefixed `[a-z0-9_-]{3,32}` slug) → `JarNotFound` → `JarIdInUse` | Move a jar, its stats and its minimum to `new_jar_id`. The old id stops resolving once the move is complete. Emits a `jar_rnm` event with the old jar id as a topic and `JarRenamedEvent { version, jar_id, new_jar_id }` data. |
+| `delete_jar(jar_id)` | current jar `owner`, plus every current recipient when the jar is locked | `JarNotFound` | Delete a registered jar and free its slug for reuse. Removes the jar, its stats, and the associated minimum-tip value. Emits a `jar_del` event with the jar id as a topic. |
+| `rename_jar(jar_id, new_jar_id)` | jar `owner` (+ registrar co-auth over `(new_jar_id, owner)` when set) | `InvalidJarId` (new id not a canonical `@`-prefixed `[a-z0-9_-]{3,32}` slug) → `JarNotFound` → `JarIdInUse` | Move a jar, its stats and its minimum to `new_jar_id`. The old id stops resolving once the move is complete. Emits a `jar_rnm` event with the old jar id as a topic and `JarRenamedEvent { version, jar_id, new_jar_id }` data. |
 | `tip(from, jar_id, amount, message)` | `from` | `ContractPaused` → `NotInitialized` → `AmountZero` (amount = 0) / `AmountNegative` (amount < 0) → `MessageTooLong` → `JarNotFound` → `JarPaused` → `BelowMinTipAmount` → `InsufficientBalance` → `SplitAmountTooSmall` (a share truncates to zero) / `AmountOverflow` (`amount * bps` overflows `i128`) | Transfer `amount` USDC from `from`, split across the jar's recipients. Emits a `tip` event carrying the per-recipient breakdown. Rejects amounts below the jar's minimum with `BelowMinTipAmount` and amounts that cannot pay every recipient with `SplitAmountTooSmall`; see [the smallest amount a jar accepts](#the-smallest-amount-a-jar-accepts-86). A failing token `transfer` reverts the whole call with the **token contract's own error**, not one of this contract's codes (e.g. an insufficient balance). |
 | `get_jar(jar_id) -> Jar` | — | `JarNotFound` | Read a jar's configuration. Panics with `JarNotFound` if the slug is free. |
 | `get_jar_owner(jar_id) -> Address` | — | `JarNotFound` | Read just a jar's owner. Panics with `JarNotFound` if the slug is free. |
@@ -254,7 +255,7 @@ written as raised only when every earlier check has passed.
 | `preview_tip(jar_id, from, amount) -> Vec<i128>` | — | `AmountZero` (amount = 0) / `AmountNegative` (amount < 0) → `JarNotFound` → `BelowMinTipAmount` → `SplitAmountTooSmall` / `AmountOverflow` | The sender-aware preview (#177): exactly the amounts `tip` will transfer for `from`, helper-shared with the payout. |
 | `preview_tip(jar_id, from, amount) -> Vec<i128>` | — | `AmountZero` / `AmountNegative` → `JarNotFound` → `BelowMinTipAmount` → `SplitAmountTooSmall` (a share truncates to zero) / `AmountOverflow` (`amount * bps` overflows) | The sender-aware preview (#177): exactly the amounts `tip` will transfer for `from`, helper-shared with the payout. |
 | `tip_many(from, tips, token) -> Vec<u64>` | `from` | Soroban auth error (missing `from` signature) → `ContractPaused` → `BatchEmpty` → `BatchTooLarge` → `NotInitialized` → `TokenNotAllowed`, then per entry the same sequence as `tip`: `AmountZero` / `AmountNegative` → `MessageTooLong` → `JarNotFound` → `BelowMinTipAmount` → `AboveMaxTipAmount` → `SplitAmountTooSmall` / `AmountOverflow` → `InsufficientBalance` → the token contract's own error | Tip several jars in one transaction (#84). The batch-size and pause checks run first, before any jar is looked up; each entry is then settled exactly as `tip` would settle it (including the per-jar `JarPaused` check), and a failure in any entry reverts the whole call. |
-| `collect_recurring(id)` | — | `RecurringNotFound` → `NotDue` → `JarNotFound` → `NotInitialized` → `InsufficientAllowance` → `InsufficientBalance` | Collect one due period of a recurring schedule through the supporter's token allowance (#175). Publishes the same `tip` event and fires the post-tip hook. |
+| `collect_recurring(id)` | — | `RecurringNotFound` → `ContractPaused` → `NotDue` → `JarNotFound` → `JarPaused` → `NotInitialized` → `InsufficientAllowance` → `InsufficientBalance` | Collect one due period of a recurring schedule through the supporter's token allowance (#175). Publishes the same `tip` event and fires the post-tip hook. |
 | `jar_exists(jar_id) -> bool` | — | — | Whether the slug is already registered. Reads one key and returns a plain `bool`; never panics on a free slug. |
 | `is_recipient(jar_id, address) -> bool` | — | `JarNotFound` | Whether `address` appears in the jar's splits. Panics with `JarNotFound` if the slug is free. |
 | `get_min_tip_amount(jar_id) -> Option<i128>` | — | `JarNotFound` | Read a jar's optional minimum tip amount. Returns `None` if no minimum is set. Panics with `JarNotFound` if the slug is free. |
@@ -935,8 +936,8 @@ The admin **cannot**:
 - change the compiled-in bounds: 20 recipients, a 280-byte message, 10 000 bps
   for the whole split. They ship with the code, so changing one means shipping
   new code.
-- stop scheduled collection. `pause` gates the four tip entry points only;
-  `collect_recurring` and `withdraw_held` keep working while paused.
+- stop `withdraw_held`. `pause` gates the tip entry points and
+  `collect_recurring`; `withdraw_held` keeps working while paused.
 
 `upgrade` is the widest power on the list and it is deliberately in the admin's
 hands: new Wasm can change everything the bullets above pin down. Operators
@@ -1495,6 +1496,13 @@ re-enables reductions it requires authorization from **all** current recipients,
 not just the owner; otherwise an owner could disarm the lock and cut shares a
 moment later. `is_splits_locked(jar_id)` reads the flag.
 
+`delete_jar` on a locked jar needs the same consent as `unlock_splits` (#223):
+the owner and every current recipient. Without it, an owner could delete the
+locked jar and re-create the slug with themselves as the only recipient in one
+transaction. An unlocked jar is deleted with the owner's signature alone, as
+before. To delete a locked jar with an unreachable recipient, remove that
+recipient first with `request_recipient_removal`.
+
 The lock is a property of the jar, not the owner, so it **survives
 `transfer_jar_ownership`**: handing control to a new owner does not silently
 disarm the protection the collaborators agreed to. Interactions with the
@@ -1552,7 +1560,7 @@ moves nothing.
 | `tip`, `tip_with_ref` | Yes, `ContractPaused` | Yes, `JarPaused` |
 | `tip_in_token` | Yes, `ContractPaused` | Yes, `JarPaused` |
 | `tip_many` | Yes, `ContractPaused`, before any entry | Yes, `JarPaused` for a paused jar in the batch; the whole batch reverts |
-| `collect_recurring` | No, see [#220](https://github.com/Novatip/novatip-contracts/issues/220) | No, see [#220](https://github.com/Novatip/novatip-contracts/issues/220) |
+| `collect_recurring` | Yes, `ContractPaused`, before any state change | Yes, `JarPaused`, before any state change |
 | `create_recurring`, `update_recurring`, `cancel_recurring` | No | No |
 | `withdraw_held`, `withdraw_held_to` | No | No |
 | `create_jar`, `rename_jar`, `delete_jar` | No | No |
@@ -1573,9 +1581,9 @@ storage TTLs, but none moves funds.
 
 Neither switch holds back recipients or owners: a recipient can still withdraw
 a held share, and an owner can still edit, rename, transfer or delete a jar
-while either pause is on. `collect_recurring` should honour both switches like
-the tip entry points; until #220 is fixed, a keeper can still collect a due
-period while the contract or the jar is paused.
+while either pause is on. `collect_recurring` honours both switches like the
+tip entry points: a paused collection fails before anything changes, so
+`next_due_ledger` stays put and the same call succeeds once the pause is lifted.
 
 ## When a share is held (#171)
 
@@ -1756,6 +1764,19 @@ The supporter entry describes one supporter's relationship with one jar, so an
 archived entry means they restore it or tip again — the history is still in the
 event log, and a badge check that reads zeros asks for a restore rather than
 minting on a wrong count.
+
+**Supporter totals belong to the jar, not the slug (#225).** Each jar gets an
+internal uid when `create_jar` registers it, and `get_supporter_stats` reads the
+totals stored under that uid.
+
+- After `delete_jar`, the next `create_jar` on the same slug is a new jar with a
+  new uid, so every earlier supporter reads zeros there.
+- `rename_jar` moves the uid with the jar: `get_supporter_stats(new_slug, supporter)`
+  returns the supporter's totals, and the old slug reads zeros once someone
+  registers it.
+- A jar created before this change has no uid and keeps its slug-keyed totals.
+  Its history cannot follow a rename (the contract has no list of its
+  supporters), so after a rename those totals read zero under the new slug.
 
 ### What it costs per tip
 
@@ -1980,6 +2001,11 @@ registrar.require_auth_for_args((jar_id.clone(), owner.clone()).into_val(&env));
   auth only. Existing deployments and third-party users of the contract are
   untouched until the admin opts in — which is the reversible half of the
   rollout the issue asks for.
+- `rename_jar` claims a slug too, so while a registrar is set it requires the
+  registrar's co-signature over `(new_jar_id, owner)` in the same way (#224).
+  Otherwise anyone holding one approved jar could rename it to an unclaimed
+  slug such as `@alice` before her onboarding finished. With no registrar,
+  `rename_jar` needs only the owner, as before.
 - Every installation or removal emits a `reg_set` event carrying the admin.
 
 **The trust model, stated plainly.** The intended registrar is the Novatip
@@ -2579,7 +2605,7 @@ The admin **cannot**:
   jar owner, and a locked jar also needs each affected recipient;
 - change the settlement token after deploy;
 - set a fee above 5%;
-- stop `collect_recurring` or `withdraw_held` by pausing.
+- stop `withdraw_held` by pausing.
 
 **The upgrade caveat.** `upgrade` replaces the whole contract code. A new build
 can read or move anything the contract holds, including held balances. The
