@@ -552,10 +552,10 @@ proptest! {
                 EscrowOp::Block { recipient } => token.block(&recipients[recipient]),
                 EscrowOp::Unblock => token.unblock(),
                 EscrowOp::Withdraw { recipient } => {
-                    let _ = client.try_withdraw_held(&recipients[recipient]);
+                    let _ = client.try_withdraw_held(&recipients[recipient], &s.token);
                 }
             }
-            let held: i128 = recipients.iter().map(|r| client.get_held(r)).sum();
+            let held: i128 = recipients.iter().map(|r| client.get_held(r, &s.token)).sum();
             prop_assert_eq!(token.balance(&s.contract), held);
         }
     }

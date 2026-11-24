@@ -272,3 +272,84 @@ fn admin_tipping_keeps_the_fee() {
     assert_eq!(token.balance(&s.admin), 100);
     assert_eq!(decoded.fee, 0);
 }
+
+/// #226 — a fee the payee cannot receive is escrowed for them instead of
+/// failing the tip.
+#[test]
+fn fee_that_cannot_be_paid_is_held_for_the_admin_and_the_tip_settles() {
+    let s = setup_hostile();
+    let env = &s.env;
+    let client = TipSplitterClient::new(env, &s.contract);
+    let token = TestTokenClient::new(env, &s.token);
+    let alice = Address::generate(env);
+    let tipper = Address::generate(env);
+    token.mint(&tipper, &1_000);
+    let jar = String::from_str(env, "@feeheld");
+    client.create_jar(
+        &Address::generate(env),
+        &jar,
+        &vec![
+            env,
+            Split {
+                to: alice.clone(),
+                bps: 10000,
+            },
+        ],
+    );
+    client.set_fee_bps(&100);
+
+    // The admin can no longer receive the token.
+    token.block(&s.admin);
+    client.tip(&tipper, &jar, &1_000, &String::from_str(env, "fee"));
+
+    assert_eq!(token.balance(&alice), 990);
+    assert_eq!(token.balance(&s.admin), 0);
+    assert_eq!(token.balance(&s.contract), 10);
+    assert_eq!(token.balance(&tipper), 0);
+    assert_eq!(client.get_held(&s.admin, &s.token), 10);
+    assert_eq!(client.get_jar_stats(&jar).total, 1_000);
+
+    // Once the admin can receive again they withdraw the escrowed fee.
+    token.unblock();
+    client.withdraw_held(&s.admin, &s.token);
+    assert_eq!(token.balance(&s.admin), 10);
+    assert_eq!(token.balance(&s.contract), 0);
+    assert_eq!(client.get_held(&s.admin, &s.token), 0);
+}
+
+#[test]
+fn collect_recurring_holds_a_fee_the_payee_cannot_receive() {
+    let s = setup_hostile();
+    let env = &s.env;
+    let client = TipSplitterClient::new(env, &s.contract);
+    let token = TestTokenClient::new(env, &s.token);
+    let alice = Address::generate(env);
+    let supporter = Address::generate(env);
+    token.mint(&supporter, &1_000);
+    token.approve(&supporter, &s.contract, &1_000, &(env.ledger().sequence() + 100_000));
+    let jar = String::from_str(env, "@recfee");
+    client.create_jar(
+        &Address::generate(env),
+        &jar,
+        &vec![
+            env,
+            Split {
+                to: alice.clone(),
+                bps: 10000,
+            },
+        ],
+    );
+    client.set_fee_bps(&100);
+    let id = client.create_recurring(&supporter, &jar, &1_000, &100, &String::from_str(env, "m"));
+    env.ledger()
+        .set_sequence_number(client.get_recurring(&id).next_due_ledger);
+
+    token.block(&s.admin);
+    client.collect_recurring(&id);
+
+    assert_eq!(token.balance(&alice), 990);
+    assert_eq!(token.balance(&s.admin), 0);
+    assert_eq!(client.get_held(&s.admin, &s.token), 10);
+    assert_eq!(token.balance(&supporter), 0);
+}
+
