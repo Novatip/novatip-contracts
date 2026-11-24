@@ -64,8 +64,9 @@ entries archive independently.
 | `Token` | Instance | `__constructor` | `get_token`, default-token tip and recurring paths | With the shared instance TTL | Restore the contract instance; there is no token setter. |
 | `Jar(jar_id)` | Persistent | `create_jar`, `store_jar` used by owner, split, pause, lock and recovery changes | `load_jar`, jar reads, tips and recurring operations | `store_jar` and `load_jar` extend the jar | Restore to make the jar available again; event history remains available for reconstruction. |
 | `MinTip(jar_id)` | Persistent | `set_min_tip_amount`, clear, and `rename_jar` | Tip validation, previews and minimum-tip reads | Set/clear, minimum reads, and `load_jar` renew it alongside the jar | Restore it to recover the configured floor; a never-set floor is `None`. |
-| `Held(recipient)` | Persistent | `pay_out` when a recipient cannot receive a share | `get_held`, `withdraw_held` | A new held credit and positive `get_held` reads extend it | Restore to withdraw the balance; the event log alone cannot recreate a spendable held balance. |
+| `Held(recipient, token)` | Persistent | `pay_out` when a recipient cannot receive a share | `get_held`, `withdraw_held` | A new held credit and positive `get_held` reads extend it | Restore to withdraw the balance; the event log alone cannot recreate a spendable held balance. |
 | `Recurring(id)` | Persistent | `create_recurring`, `update_recurring`, `collect_recurring` | `get_recurring`, `cancel_recurring`, `update_recurring`, `collect_recurring` | Creation, update, read and collection extend it | Restore the schedule; otherwise collection reports `RecurringNotFound`. |
+| `JarUid(slug)`, `RecurringJar(id)` | Persistent | `create_jar`, `rename_jar` (moves the uid), `create_recurring` | `collect_recurring` | Extended with the jar and the schedule | Absent for jars created before #222 until a schedule is registered against them; a schedule with no `RecurringJar` entry is not checked. |
 | `RecurringCount` | Persistent | `create_recurring` | `create_recurring` | Extended when a schedule is created | Restore the counter to preserve the next id; an absent counter is read as zero. |
 | `Stats(jar_id)` | Persistent | Successful tips through `bump_totals`; `rename_jar` moves an existing entry | `get_jar_stats`, combined jar info | A successful tip and a positive stats read extend it | Restore to recover totals; if no stats entry has ever been written, the getter returns zero totals. |
 | `Supporter(jar_id, supporter)` | Persistent | Successful tips through `bump_totals` | `get_supporter_stats` | A successful tip and a positive stats read extend it | Restore to recover totals; a never-written entry reads as zero totals. |
@@ -161,10 +162,10 @@ one belongs to a jar, the other to a `(jar, supporter)` pair.
 | `delete_jar(jar_id)` | current jar `owner` | Delete a registered jar and free its slug so it can be recreated. Removes the jar, its stats, and any minimum-tip value for that slug. Emits a `jar_del` event with the jar id as a topic. |
 | `rename_jar(jar_id, new_jar_id)` | jar `owner` | Move a jar, its stats and its minimum to a new slug. The old slug stops resolving immediately; `new_jar_id` must be free and pass the same length checks as `create_jar`. Emits a `jar_rnm` event with the old jar id as a topic and `JarRenamedEvent { version, jar_id, new_jar_id }` data. |
 | `tip(from, jar_id, amount, message)` | `from` | Move `amount` USDC out of `from` and route it across the jar's recipients. A recipient who cannot receive the token has their share **escrowed in the contract** (see `get_held`/`withdraw_held`) instead of reverting the tip. Emits a `tip` event carrying the per-recipient breakdown. Rejects amounts below the jar's minimum with `BelowMinTipAmount`. |
-| `get_held(recipient) -> i128` | — | How much the contract is holding ([held](#glossary-held)) for `recipient` because a past tip could not deliver their share. `0` when nothing is held. |
-| `withdraw_held(recipient)` | `recipient` | Pay a recipient their held balance once they can receive again. Rejected with `NothingHeld` when nothing is owed. Emits a `withdraw` event with `HeldWithdrawnEvent { version, amount }` data. |
-| `withdraw_held_to(recipient, to)` | `recipient` | Pay `recipient`'s held balance to `to` instead (#311), for an account that can no longer receive the token. Rejects `to` equal to the contract or the token (`InvalidRecipient`) and `NothingHeld` when nothing is owed. Emits a `wd_to` event with topics `(wd_to, recipient)` and `HeldWithdrawnToEvent { version, amount, to }` data. |
-| `create_recurring(supporter, jar_id, amount, period_ledgers, message) -> u128` | `supporter` | Register a recurring-tip schedule. Validates the jar exists and the amount/message pass the same checks `tip` applies; `period_ledgers` must be non-zero. Assigns a fresh id, stores the entry with its first `next_due_ledger`, and emits a `recr_add` event. Returns the id. The schedule moves funds through `collect_recurring`: the supporter must have approved this contract as a token spender for at least `amount` per period. |
+| `get_held(recipient, token) -> i128` | — | How much the contract is holding ([held](#glossary-held)) for `recipient` in `token` because a past tip could not deliver their share. `0` when nothing is held. |
+| `withdraw_held(recipient, token)` | `recipient` | Pay a recipient their balance held in `token` once they can receive again. Pays only that token's balance. Rejected with `NothingHeld` when nothing is owed in `token`. Emits a `withdraw` event with `HeldWithdrawnEvent { version, amount, token }` data. |
+| `withdraw_held_to(recipient, to)` | `recipient` | Pay `recipient`'s balance held in the default token to `to` instead (#311), for an account that can no longer receive the token. Rejects `to` equal to the contract or the token (`InvalidRecipient`) and `NothingHeld` when nothing is owed. Emits a `wd_to` event with topics `(wd_to, recipient)` and `HeldWithdrawnToEvent { version, amount, to }` data. |
+| `create_recurring(supporter, jar_id, amount, period_ledgers, message) -> u128` | `supporter` | Register a recurring-tip schedule. Validates the jar exists and the amount/message pass the same checks `tip` applies; `period_ledgers` must be non-zero. Assigns a fresh id, stores the entry with its first `next_due_ledger`, and emits a `recr_add` event. Returns the id. Rejects a schedule that would move no funds with `NoFundsMoved`. The schedule is bound to the jar's internal uid, not just its slug (see [recurring tips and jar changes](#recurring-tips-and-jar-changes)). The schedule moves funds through `collect_recurring`: the supporter must have approved this contract as a token spender for at least `amount` per period. |
 | `cancel_recurring(caller, id)` | `caller`: the entry's `supporter` or the jar's `owner` | Remove a recurring-tip record. Either party may cancel (#324); anyone else gets `NotAuthorized`. Emits a `recr_del` event naming who cancelled. |
 | `cancel_recurring(id)` | the entry's `supporter` | Remove a recurring-tip record. Emits a `recr_del` event. |
 | `update_recurring(id, amount, message)` | the entry's `supporter` | Change a recurring tip's amount and message in place (#316). Keeps the id and `next_due_ledger`. Validated like `create_recurring` (`AmountZero` / `AmountNegative` → `MessageTooLong` / `InvalidMessage` → `JarNotFound` → `BelowMinTipAmount` → split arithmetic); `RecurringNotFound` for an unknown id. Emits a `recr_upd` event. |
@@ -808,7 +809,10 @@ self-tip rule.
 
 **A tipper who is the jar's only recipient moves nothing**, and the call is
 rejected with `NoFundsMoved` (30) rather than publishing a `tip` event that
-claims a tip happened at no cost.
+claims a tip happened at no cost. The same rule applies to recurring tips
+(#221): `create_recurring` rejects a schedule that would move nothing, so it is
+never stored, and `collect_recurring` rejects a collection that would move
+nothing (for example after the jar's splits changed) before any state changes.
 
 To see these amounts before signing, use
 [`preview_tip(jar_id, from, amount)`](#previewing-a-tip-for-a-known-sender): it
@@ -986,7 +990,7 @@ exactly the way issue #87 found it had.
 | 27 | `SplitAmountTooSmall` | The amount — after the protocol fee, when one is set — is small enough that some recipient's share would truncate to zero (`net * bps < 10_000`). `get_min_accepted_tip` reports the smallest amount that clears it. |
 | 28 | `AmountOverflow` | `amount * bps` (or `amount * fee_bps`) would overflow `i128`. |
 | 29 | `InvalidMinimumAmount` | `set_min_tip_amount` was given a minimum that is zero or negative. |
-| 30 | `NoFundsMoved` | A tip where every share was skipped (every recipient is the tipper) would move no funds. |
+| 30 | `NoFundsMoved` | A tip, recurring schedule or recurring collection where every share would be skipped (every recipient is the tipper) and no fee is paid would move no funds. |
 | 31 | `InvalidRecipient` | A split recipient or jar owner is the contract itself or its token. A transfer to the jar's current owner is `SameOwner` (45), not this. |
 | 32 | `AdminExists` | `transfer_admin` was called with the current admin's address. |
 | 33 | `ContractPaused` | A tip was attempted while the contract is paused. |
@@ -1005,6 +1009,7 @@ exactly the way issue #87 found it had.
 | 45 | `SameOwner` | `transfer_jar_ownership` named the jar's current owner as the new owner. A no-op handoff, distinct from `InvalidRecipient` (31). |
 | 46 | `RemovalNotRequested` | `execute_recipient_removal` found no pending removal for the jar, or the jar's splits changed since it was announced (#239). |
 | 47 | `RemovalNotReady` | `execute_recipient_removal` was called before the 120 960-ledger delay elapsed (#239). |
+| 48 | `JarChanged` | `collect_recurring` found that the schedule's slug now names a different jar than the one it was created for, after the jar was deleted and the slug re-created (#222). |
 
 Error codes are part of the public interface: `@novatip/sdk` and the frontend
 both map these numbers to user-facing messages. New variants are **appended**
@@ -1281,12 +1286,12 @@ flag is set to the value it already held, so the intent is always recorded.
 ### `withdraw` — published on every successful `withdraw_held`
 
 - **Topics:** `(symbol "withdraw", recipient: Address)`
-- **Data:** `HeldWithdrawnEvent { version: u32, amount: i128 }`
+- **Data:** `HeldWithdrawnEvent { version: u32, amount: i128, token: Address }`
 
 Records the moment an escrowed share (#171) is released to its recipient. The
 recipient is a topic (not just data) so an indexer can subscribe to one
-address's withdrawals. `amount` is named and versioned, so a future field (the
-token withdrawn, for example) can be added without changing the payload type.
+address's withdrawals. `token` names the asset paid out, and `version` is `2`
+since that field was added (#219).
 
 ### `adm_xfer` — published on every successful `transfer_admin`
 
@@ -1609,24 +1614,24 @@ protocol fee is 0. Bob has no USDC trustline. A supporter tips 10 USDC
 (`100000000` in the token's 7-decimal units):
 
 - Alice receives `70000000` directly.
-- Bob's `30000000` goes to the contract and is credited to `Held(Bob)`.
+- Bob's `30000000` goes to the contract and is credited to `Held(Bob, USDC)`.
 - The `tip` event's breakdown is
   `[[Alice, 70000000, false], [Bob, 30000000, true]]`.
-- `get_held(Bob)` now returns `30000000`.
+- `get_held(Bob, USDC)` now returns `30000000`.
 
-Bob adds the trustline and calls `withdraw_held(Bob)`. He receives
+Bob adds the trustline and calls `withdraw_held(Bob, USDC)`. He receives
 `30000000`, the contract publishes `withdraw` with topics `["withdraw", Bob]`
-and data `{ "version": 1, "amount": 30000000 }`, and `get_held(Bob)` returns
-`0` again.
+and data `{ "version": 2, "amount": 30000000, "token": USDC }`, and
+`get_held(Bob, USDC)` returns `0` again.
 
 ### Check
 
-`get_held(recipient)` returns the amount owed in the token's smallest units,
-or `0`. Anyone can call it, and no signature is needed:
+`get_held(recipient, token)` returns the amount owed in that token's smallest
+units, or `0`. Anyone can call it, and no signature is needed:
 
 ```bash
 stellar contract invoke --id "$CONTRACT_ID" --network testnet --source "$SOURCE" \
-  -- get_held --recipient G...RECIPIENT
+  -- get_held --recipient G...RECIPIENT --token C...TOKEN
 ```
 
 To find out which tips caused the balance, filter the `tip` events for
@@ -1646,12 +1651,12 @@ withdrawal fails the same way the original transfer did.
 
 ### Withdraw
 
-The recipient signs `withdraw_held(recipient)`, which pays the whole balance in
-one transfer and publishes a `withdraw` event:
+The recipient signs `withdraw_held(recipient, token)`, which pays the whole
+balance held in that token in one transfer and publishes a `withdraw` event:
 
 ```bash
 stellar contract invoke --id "$CONTRACT_ID" --network testnet --source recipient \
-  -- withdraw_held --recipient G...RECIPIENT
+  -- withdraw_held --recipient G...RECIPIENT --token C...TOKEN
 ```
 
 `scripts/withdraw-held.sh` does the same in one step. It reads `get_held`,
@@ -1670,15 +1675,40 @@ extends it, but if it lapses, the entry is archived. Restore it before
 withdrawing; see [Storage model and idle jars](#storage-model-and-idle-jars-56).
 The event log alone cannot recreate a spendable balance.
 
-### Limitation: one token
+### A fee that cannot be paid
 
-`Held(recipient)` is a single number with no token attached, and
-`withdraw_held` always pays the contract's default token (`get_token()`). A
-share held from `tip_in_token` in another token is added to the same number
-and would be paid out in the default token. Until per-token escrow lands in
-[#219](https://github.com/Novatip/novatip-contracts/issues/219), only held
-shares from default-token tips are reliably withdrawable as the asset that
-was tipped.
+The protocol fee follows the same rule as a recipient's share (#226). If the
+payee (the admin, or the fee recipient) cannot receive the token, the fee is
+held under `Held(payee, token)`, the tip still settles, and a `fee_held` event
+`(sym, jar_id)` with `FeeHeldEvent { version, payee, token, amount }` is
+published after the transfer attempt. The `tip` event's `fee` still reports the
+fee that left the tipper. The payee collects it with `withdraw_held(payee,
+token)` once they can receive the token. `collect_recurring` behaves the same.
+
+### Held balances are per token
+
+A held share is keyed by the recipient **and** the token it was paid in
+(`Held(recipient, token)`, #219). A share held from `tip_in_token` in another
+token is therefore withdrawn with `withdraw_held(recipient, token)` and paid in
+that same token; it never touches the default token's balance. Withdraw each
+token separately. `withdraw_held_to` pays only the default-token balance.
+
+## Recurring tips and jar changes
+
+A recurring schedule stores the jar's slug, and `collect_recurring` needs no
+signature from the supporter, so it must never follow a slug to a different
+jar (#222). Every jar has an internal uid that `create_jar` assigns, `rename_jar`
+keeps and `delete_jar` removes. `create_recurring` records the uid of the jar it
+was created for.
+
+- **Delete, then re-create the slug:** the new jar has a new uid, so collecting
+  the older schedule fails with `JarChanged` (48) and moves no funds.
+- **Rename:** the schedule still names the old slug. While the old slug is free
+  collection fails with `JarNotFound`; if someone claims it, collection fails
+  with `JarChanged`. The schedule does not follow the jar to its new slug.
+  Cancel it and register a new one against the new slug.
+- **Schedules created before this change** carry no uid binding and are not
+  checked.
 
 ## Reading tip totals
 
@@ -2032,7 +2062,7 @@ changes. Do not bump it for an internal refactor, a new storage key, or a doc
 edit — none of those are visible to a consumer, and a version that changes when
 nothing observable did is a version consumers stop trusting.
 
-This build ships `version() == 10`. Every bump since `version()` was added:
+This build ships `version() == 14`. Every bump since `version()` was added:
 
 | Version | What it added or changed | Issues |
 |---------|--------------------------|--------|
@@ -2047,6 +2077,9 @@ This build ships `version() == 10`. Every bump since `version()` was added:
 | 9 | Adds admin-only `admin_recover_jar` and the `jar_recov` event. | #52 |
 | 10 | Adds `change_recipient` (publishes `splits`), `withdraw_held_to` with the `wd_to` event, and `set_fee_recipient` / `get_fee_recipient` with the `fee_rcpt` event. No new error codes. | #310, #311, #312 |
 | 11 | Adds `request_recipient_removal`, `cancel_recipient_removal` and `execute_recipient_removal` with the `rm_req` / `rm_cancel` events, and appends error codes 45–47. `NotAuthorized` moves from the colliding 40 to 44. | #239, #241 |
+| 12 | Held balances are keyed by token: `get_held(recipient, token)` and `withdraw_held(recipient, token)` take the token, and the `withdraw` event is version 2 with a `token` field. Held balances written under the old single-token key are not migrated. No new error codes. | #219 |
+| 13 | Recurring schedules are bound to the jar they were created for, with the new `JarChanged` error (48). No function signature changed. | #222 |
+| 14 | A protocol fee the payee cannot receive is escrowed for them (`Held(payee, token)`, collected with `withdraw_held`) instead of failing the tip, and the new `fee_held` event records it. No new error codes. | #226 |
 
 `CHANGELOG.md` has the full entry for each change.
 
@@ -2353,7 +2386,7 @@ The contract uses two storage types. The table below lists every key in
 | Instance | `Admin`, `Token`, `AllowedToken(addr)`, `AllowedTokens`, `TipCount`, `TipHook`, `Registrar`, `Paused`, `FeeBps`, `WasmHash`, `SchemaVersion` | `create_jar` and every settled tip. Reads do not extend it. |
 | Persistent | `Jar(id)`, `MinTip(id)`, `Stats(id)`, `Supporter(id, addr)` | `Jar` and `MinTip` on every load or store of the jar, reads included. `Stats` and `Supporter` on every tip. |
 | Persistent | `MaxTip(id)` | Only `set_max_tip_amount` and `rename_jar`. See the known gap below. |
-| Persistent | `Held(addr)` | Each tip that escrows a share, and `get_held` while the balance is above zero. |
+| Persistent | `Held(addr, token)` | Each tip that escrows a share, and `get_held` while the balance is above zero. |
 | Persistent | `Recurring(id)`, `RecurringCount` | Create, update, collect and get for the schedule. Create for the counter. |
 
 Instance storage holds configuration that must not expire ahead of the
@@ -2422,10 +2455,11 @@ the same as a quiet contract.
 | `jar_xfer` | `(sym, jar_id)` | `JarTransferredEvent { version, previous_owner, new_owner }` |
 | `jar_del` | `(sym, jar_id)` | `JarDeletedEvent { version, jar_id }` |
 | `jar_rnm` | `(sym, old jar_id)` | `JarRenamedEvent { version, jar_id, new_jar_id }` |
+| `fee_held` | `(sym, jar_id)` | `FeeHeldEvent { version, payee, token, amount }` (the protocol fee could not be paid and was escrowed, #226) |
 | `min_tip` | `(sym, jar_id)` | `MinTipEvent { version, amount }` |
 | `max_tip` | `(sym, jar_id)` | `MaxTipEvent { version, amount }` |
 | `tip` | `(sym, jar_id)` | `TipEvent { version, from, amount, fee, message, breakdown, token, seq, reference }` |
-| `withdraw` | `(sym, recipient)` | `HeldWithdrawnEvent { version, amount }` |
+| `withdraw` | `(sym, recipient)` | `HeldWithdrawnEvent { version, amount, token }` |
 | `wd_to` | `(sym, recipient)` | `HeldWithdrawnToEvent { version, amount, to }` |
 | `recr_add` | `(sym, supporter, jar_id)` | `RecurringAddedEvent { version, id, jar_id, amount, period_ledgers, next_due_ledger }` |
 | `recr_upd` | `(sym, supporter)` | `RecurringUpdatedEvent { version, id, amount, message }` |

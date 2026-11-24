@@ -471,6 +471,10 @@
         {
           "name": "RemovalNotReady",
           "value": 47
+        },
+        {
+          "name": "JarChanged",
+          "value": 48
         }
       ]
     }
@@ -659,6 +663,34 @@
         {
           "name": "amount",
           "type_": "i128"
+        },
+        {
+          "name": "token",
+          "type_": "address"
+        },
+        {
+          "name": "version",
+          "type_": "u32"
+        }
+      ]
+    }
+  },
+  {
+    "udt_struct_v0": {
+      "lib": "",
+      "name": "FeeHeldEvent",
+      "fields": [
+        {
+          "name": "amount",
+          "type_": "i128"
+        },
+        {
+          "name": "payee",
+          "type_": "address"
+        },
+        {
+          "name": "token",
+          "type_": "address"
         },
         {
           "name": "version",
@@ -1763,6 +1795,10 @@
         {
           "name": "recipient",
           "type_": "address"
+        },
+        {
+          "name": "token",
+          "type_": "address"
         }
       ],
       "outputs": [
@@ -1776,6 +1812,10 @@
       "inputs": [
         {
           "name": "recipient",
+          "type_": "address"
+        },
+        {
+          "name": "token",
           "type_": "address"
         }
       ],

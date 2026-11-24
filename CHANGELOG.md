@@ -6,6 +6,11 @@ All notable changes to `novatip-contracts` are documented here.
 
 ### Fixed
 
+- A protocol fee the payee cannot receive is escrowed for them instead of failing the tip or recurring collection; the payee collects it with `withdraw_held` and a `fee_held` event records it. `version()` is now `14` (#226).
+- Recurring schedules are bound to the jar's internal uid: after `delete_jar` plus `create_jar` on the same slug, or a `rename_jar` followed by someone claiming the old slug, `collect_recurring` fails with the new `JarChanged` (48) and moves no funds. `version()` is now `13` (#222).
+- `create_recurring` and `collect_recurring` reject a plan that moves no funds with `NoFundsMoved`, so a supporter who is a jar's only recipient can no longer inflate totals, sequence numbers and `tip` events (#221).
+- Held balances are keyed by `(recipient, token)`: `get_held` and `withdraw_held` take the token, `withdraw_held` pays only that token's balance, and the `withdraw` event is now version 2 with a `token` field. `version()` is now `12`. Balances held under the previous single-token key are not migrated (#219).
+
 - Tippers who are also recipients are charged only for funds that leave their account (#229).
 - `transfer_admin` now requires the proposed administrator's authorization before changing control (#230).
 - `preview_split_details` applies the same amount, minimum, maximum and paused-jar validation as tipping previews (#227, #228).

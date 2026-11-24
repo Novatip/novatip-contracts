@@ -144,7 +144,7 @@ const INSTANCE_TTL_THRESHOLD: u32 = JAR_TTL_THRESHOLD;
 ///
 /// This is a per-contract number for client feature detection. It complements
 /// the per-event schema version proposed in #83 rather than replacing it.
-const INTERFACE_VERSION: u32 = 11;
+const INTERFACE_VERSION: u32 = 14;
 
 /// Storage schema this build expects. Bump it together with a new step in
 /// `migrate` whenever stored state needs transforming after an upgrade (#325).
@@ -262,9 +262,17 @@ pub enum DataKey {
     /// Optional minimum tip amount for a jar keyed by its public slug.
     MinTip(String),
     /// A recipient's undeliverable share, held by the contract until they can
-    /// receive it again (see #171). Keyed by the recipient address; value is
-    /// the amount owed them in the jar token.
-    Held(Address),
+    /// receive it again (see #171). Keyed by the recipient address and the
+    /// token the share was paid in (#219); value is the amount owed them in
+    /// that token.
+    Held(Address, Address),
+    /// Immutable internal id of the jar currently under a slug (#222). Assigned
+    /// by `create_jar`, moved by `rename_jar`, removed by `delete_jar`.
+    JarUid(String),
+    /// Monotonic counter of issued jar uids. Instance storage.
+    JarCount,
+    /// The jar uid a recurring schedule was created against (#222).
+    RecurringJar(u128),
     /// A recurring-tip schedule keyed by its assigned id.
     Recurring(u128),
     /// Monotonic counter of issued recurring-tip ids.
@@ -410,6 +418,9 @@ pub enum Error {
     /// `execute_recipient_removal` was called before the announced delay
     /// (`RECIPIENT_REMOVAL_DELAY_LEDGERS`) elapsed.
     RemovalNotReady = 47,
+    /// `collect_recurring` found that the slug the schedule was created for now
+    /// names a different jar (deleted and re-created, #222).
+    JarChanged = 48,
 }
 
 #[contractclient(name = "TipHookClient")]
@@ -495,6 +506,18 @@ pub struct JarPausedEvent {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct HeldWithdrawnEvent {
     pub version: u32,
+    pub amount: i128,
+    pub token: Address,
+}
+
+// Data published by `fee_held` (#226) when the protocol fee could not be paid
+// and was escrowed for the payee instead; the topics are the symbol and the jar.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FeeHeldEvent {
+    pub version: u32,
+    pub payee: Address,
+    pub token: Address,
     pub amount: i128,
 }
 
@@ -833,6 +856,7 @@ impl TipSplitter {
                 paused: false,
             },
         );
+        Self::assign_jar_uid(&env, &jar_id);
 
         // Issue #91: extend instance TTL on jar creation so the contract stays
         // alive alongside its jars.
@@ -1327,6 +1351,9 @@ impl TipSplitter {
         env.storage()
             .persistent()
             .remove(&DataKey::PendingRemoval(jar_id.clone()));
+        env.storage()
+            .persistent()
+            .remove(&DataKey::JarUid(jar_id.clone()));
 
         env.events().publish(
             (symbol_short!("jar_del"), jar_id.clone()),
@@ -1471,6 +1498,18 @@ impl TipSplitter {
         env.storage()
             .persistent()
             .remove(&DataKey::PendingRemoval(jar_id.clone()));
+
+        // The jar keeps its uid under the new slug, so a schedule created for the
+        // old slug can no longer be mistaken for one that follows the jar (#222).
+        let old_uid_key = DataKey::JarUid(jar_id.clone());
+        if let Some(uid) = env.storage().persistent().get::<_, u128>(&old_uid_key) {
+            let new_uid_key = DataKey::JarUid(new_jar_id.clone());
+            env.storage().persistent().set(&new_uid_key, &uid);
+            env.storage()
+                .persistent()
+                .extend_ttl(&new_uid_key, JAR_TTL_THRESHOLD, JAR_TTL_LEDGERS);
+            env.storage().persistent().remove(&old_uid_key);
+        }
 
         // Move stats too
         let old_stats_key = DataKey::Stats(jar_id.clone());
@@ -1931,8 +1970,31 @@ impl TipSplitter {
         let (fee, net) = Self::split_fee(env, amount);
         let plan = Self::payout_amounts(env, splits, from, net);
         let fee_moved = match Self::fee_payee(env, from, fee) {
-            Some(admin) => {
-                send(&admin, &fee);
+            Some(payee) => {
+                if !try_send(&payee, &fee) {
+                    // The payee cannot receive the token (no trustline, or
+                    // deauthorised). Escrow the fee for them, as for a recipient's
+                    // share, instead of reverting every tip (#226); they collect
+                    // it with `withdraw_held`.
+                    send(&contract_addr, &fee);
+                    let held_key = DataKey::Held(payee.clone(), token_addr.clone());
+                    let held: i128 = env.storage().persistent().get(&held_key).unwrap_or(0);
+                    env.storage().persistent().set(&held_key, &(held + fee));
+                    env.storage().persistent().extend_ttl(
+                        &held_key,
+                        JAR_TTL_THRESHOLD,
+                        JAR_TTL_LEDGERS,
+                    );
+                    env.events().publish(
+                        (symbol_short!("fee_held"), jar_id.clone()),
+                        FeeHeldEvent {
+                            version: 1,
+                            payee,
+                            token: token_addr.clone(),
+                            amount: fee,
+                        },
+                    );
+                }
                 fee
             }
             None => 0,
@@ -1974,7 +2036,7 @@ impl TipSplitter {
                 // recipient can receive again (#171).
                 send(&contract_addr, &share);
                 total_transferred += share;
-                let held_key = DataKey::Held(split.to.clone());
+                let held_key = DataKey::Held(split.to.clone(), token_addr.clone());
                 let held: i128 = env.storage().persistent().get(&held_key).unwrap_or(0);
                 env.storage().persistent().set(&held_key, &(held + share));
                 env.storage().persistent().extend_ttl(
@@ -1989,9 +2051,8 @@ impl TipSplitter {
         // Issue #93: reject a tip where no funds actually moved. When every
         // recipient is the tipper themselves, all shares are skipped and the
         // event would claim a tip occurred at zero cost — forgeable and
-        // misleading for indexers, leaderboards, and notifications. Applied to
-        // direct tips only, as before; the recurring path's guard is tracked
-        // in its own bug issue.
+        // misleading for indexers, leaderboards, and notifications. The
+        // recurring path checks the same plan up front (#221).
         if spender.is_none() && total_transferred == 0 {
             panic_with_error!(env, Error::NoFundsMoved);
         }
@@ -2184,6 +2245,20 @@ impl TipSplitter {
         (fee, amount - fee)
     }
 
+    /// Whether a tip of `amount` from `from` through `splits` moves any funds:
+    /// some recipient other than the tipper gets a share, or a fee is paid to
+    /// someone other than the tipper (#221). The same plan `pay_out` executes.
+    fn plan_moves_funds(env: &Env, from: &Address, splits: &Vec<Split>, amount: i128) -> bool {
+        let (fee, net) = Self::split_fee(env, amount);
+        let plan = Self::payout_amounts(env, splits, from, net);
+        for i in 0..plan.len() {
+            if plan.get(i).unwrap() > 0 {
+                return true;
+            }
+        }
+        Self::fee_payee(env, from, fee).is_some()
+    }
+
     /// Who a fee of `fee` should be transferred to, or `None` when nothing
     /// moves: no fee, or the tipper is the fee recipient (#312). That second
     /// case is the self-transfer rule applied to the fee, and the `tip` event
@@ -2273,8 +2348,9 @@ impl TipSplitter {
             .extend_ttl(&supporter_key, JAR_TTL_THRESHOLD, JAR_TTL_LEDGERS);
     }
 
-    pub fn get_held(env: Env, recipient: Address) -> i128 {
-        let held_key = DataKey::Held(recipient);
+    /// What the contract holds for `recipient` in `token` (#219).
+    pub fn get_held(env: Env, recipient: Address, token: Address) -> i128 {
+        let held_key = DataKey::Held(recipient, token);
         let held: i128 = env.storage().persistent().get(&held_key).unwrap_or(0);
         if held > 0 {
             env.storage()
@@ -2284,16 +2360,16 @@ impl TipSplitter {
         held
     }
 
-    pub fn withdraw_held(env: Env, recipient: Address) {
+    /// Pay `recipient` what is held for them in `token` only (#219).
+    pub fn withdraw_held(env: Env, recipient: Address, token: Address) {
         recipient.require_auth();
-        let held_key = DataKey::Held(recipient.clone());
+        let held_key = DataKey::Held(recipient.clone(), token.clone());
         let held: i128 = env.storage().persistent().get(&held_key).unwrap_or(0);
         if held <= 0 {
             panic_with_error!(&env, Error::NothingHeld);
         }
 
-        let token_addr: Address = Self::get_token(env.clone());
-        let client = token::Client::new(&env, &token_addr);
+        let client = token::Client::new(&env, &token);
         let contract_addr = env.current_contract_address();
 
         // Clear the balance before the transfer so the withdrawal cannot be
@@ -2305,14 +2381,16 @@ impl TipSplitter {
         env.events().publish(
             (symbol_short!("withdraw"), recipient),
             HeldWithdrawnEvent {
-                version: 1,
+                version: 2,
                 amount: held,
+                token,
             },
         );
     }
 
     /// Like `withdraw_held`, but pays `to` (#311), for a recipient account
-    /// that can no longer receive the token. Authorized by `recipient`.
+    /// that can no longer receive the token. Authorized by `recipient`. Pays
+    /// only the balance held in the default token.
     pub fn withdraw_held_to(env: Env, recipient: Address, to: Address) {
         recipient.require_auth();
         let contract_addr = env.current_contract_address();
@@ -2320,7 +2398,7 @@ impl TipSplitter {
         if to == contract_addr || to == token_addr {
             panic_with_error!(&env, Error::InvalidRecipient);
         }
-        let held_key = DataKey::Held(recipient.clone());
+        let held_key = DataKey::Held(recipient.clone(), token_addr.clone());
         let held: i128 = env.storage().persistent().get(&held_key).unwrap_or(0);
         if held <= 0 {
             panic_with_error!(&env, Error::NothingHeld);
@@ -2374,6 +2452,13 @@ impl TipSplitter {
         let (_, net) = Self::split_fee(&env, amount);
         let _ = Self::compute_shares(&env, &jar.splits, net);
 
+        // A schedule that would move nothing (the supporter is the jar's only
+        // recipient and no fee leaves their account) is never stored (#221);
+        // `collect_recurring` repeats the check in case the jar changes later.
+        if !Self::plan_moves_funds(&env, &supporter, &jar.splits, amount) {
+            panic_with_error!(&env, Error::NoFundsMoved);
+        }
+
         let count_key = DataKey::RecurringCount;
         let count: u128 = env.storage().persistent().get(&count_key).unwrap_or(0);
         let id = count + 1;
@@ -2401,6 +2486,14 @@ impl TipSplitter {
         env.storage()
             .persistent()
             .extend_ttl(&count_key, JAR_TTL_THRESHOLD, JAR_TTL_LEDGERS);
+        // Bind the schedule to this jar, not just to its slug (#222).
+        let bound_key = DataKey::RecurringJar(id);
+        env.storage()
+            .persistent()
+            .set(&bound_key, &Self::jar_uid(&env, &jar_id));
+        env.storage()
+            .persistent()
+            .extend_ttl(&bound_key, JAR_TTL_THRESHOLD, JAR_TTL_LEDGERS);
 
         env.events().publish(
             (symbol_short!("recr_add"), supporter, jar_id.clone()),
@@ -2431,6 +2524,7 @@ impl TipSplitter {
         caller.require_auth();
 
         env.storage().persistent().remove(&rec_key);
+        env.storage().persistent().remove(&DataKey::RecurringJar(id));
         env.events()
             .publish((symbol_short!("recr_del"), entry.supporter), (id, caller));
     }
@@ -2513,6 +2607,32 @@ impl TipSplitter {
         }
 
         let jar = Self::load_jar(&env, &entry.jar_id);
+
+        // The slug may have been freed and claimed by someone else since the
+        // supporter registered this schedule (#222). Fail with a typed error
+        // before any state changes rather than paying the new jar. Schedules
+        // registered before jar uids existed carry no binding and are not
+        // checked.
+        let bound_key = DataKey::RecurringJar(id);
+        if let Some(bound_uid) = env.storage().persistent().get::<_, u128>(&bound_key) {
+            let current: Option<u128> = env
+                .storage()
+                .persistent()
+                .get(&DataKey::JarUid(entry.jar_id.clone()));
+            if current != Some(bound_uid) {
+                panic_with_error!(&env, Error::JarChanged);
+            }
+            env.storage()
+                .persistent()
+                .extend_ttl(&bound_key, JAR_TTL_THRESHOLD, JAR_TTL_LEDGERS);
+        }
+
+        // Same rule as a direct tip (#93), checked before any state changes:
+        // a collection that would move no funds must not publish a `tip`
+        // event, bump the totals or consume a sequence number (#221).
+        if !Self::plan_moves_funds(&env, &entry.supporter, &jar.splits, entry.amount) {
+            panic_with_error!(&env, Error::NoFundsMoved);
+        }
 
         // A recurring schedule is a promise about the *default* token: it was
         // registered against `tip`'s token and minimum, and it is collected
@@ -2982,6 +3102,37 @@ impl TipSplitter {
         jar
     }
 
+    /// Gives the jar under `jar_id` a fresh uid and returns it (#222).
+    fn assign_jar_uid(env: &Env, jar_id: &String) -> u128 {
+        let count_key = DataKey::JarCount;
+        let uid: u128 = env
+            .storage()
+            .instance()
+            .get::<_, u128>(&count_key)
+            .unwrap_or(0)
+            + 1;
+        env.storage().instance().set(&count_key, &uid);
+        let key = DataKey::JarUid(jar_id.clone());
+        env.storage().persistent().set(&key, &uid);
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, JAR_TTL_THRESHOLD, JAR_TTL_LEDGERS);
+        uid
+    }
+
+    /// The uid of the jar under `jar_id`. A jar created before uids existed gets
+    /// one the first time a schedule is registered against it.
+    fn jar_uid(env: &Env, jar_id: &String) -> u128 {
+        match env
+            .storage()
+            .persistent()
+            .get::<_, u128>(&DataKey::JarUid(jar_id.clone()))
+        {
+            Some(uid) => uid,
+            None => Self::assign_jar_uid(env, jar_id),
+        }
+    }
+
     /// Store a jar and extend its TTL. Every jar write goes through here (#327).
     fn store_jar(env: &Env, jar_id: &String, jar: &Jar) {
         let key = DataKey::Jar(jar_id.clone());
@@ -3360,12 +3511,12 @@ pub mod examples {
     //! let seqs: Vec<u64> = client.tip_many(&supporter, &tips, &None);
     //! ```
     //!
-    //! `withdraw_held(recipient)` pays out a share that could not be delivered
-    //! at tip time; `get_held(recipient)` reports what is owed.
+    //! `withdraw_held(recipient, token)` pays out a share that could not be
+    //! delivered at tip time; `get_held(recipient, token)` reports what is owed.
     //!
     //! ```ignore
-    //! if client.get_held(&bob) > 0 {
-    //!     client.withdraw_held(&bob);
+    //! if client.get_held(&bob, &token) > 0 {
+    //!     client.withdraw_held(&bob, &token);
     //! }
     //! ```
     //!

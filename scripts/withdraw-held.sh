@@ -54,7 +54,7 @@ canonical_amount() {
 }
 
 echo "==> Reading held balance for ${RECIPIENT}"
-HELD="$(canonical_amount "$(invoke get_held --recipient "${RECIPIENT}")")"
+HELD="$(canonical_amount "$(invoke get_held --recipient "${RECIPIENT}" --token "${USDC_TOKEN}")")"
 echo "    held: ${HELD} smallest units"
 if [ "${HELD}" = "0" ]; then
   echo "==> Done. Nothing is held for ${RECIPIENT}; no transaction sent."
@@ -68,10 +68,10 @@ if ! IDENTITIES="${RECIPIENT}" "${NOVATIP_ROOT}/scripts/trustline.sh" --check; t
 fi
 
 echo "==> Withdrawing ${HELD} smallest units to ${RECIPIENT}"
-invoke withdraw_held --recipient "${RECIPIENT}"
+invoke withdraw_held --recipient "${RECIPIENT}" --token "${USDC_TOKEN}"
 
 echo "==> Reading back the held balance"
-HELD_AFTER="$(canonical_amount "$(invoke get_held --recipient "${RECIPIENT}")")"
+HELD_AFTER="$(canonical_amount "$(invoke get_held --recipient "${RECIPIENT}" --token "${USDC_TOKEN}")")"
 echo "    held after withdrawal: ${HELD_AFTER}"
 if [ "${HELD_AFTER}" != "0" ]; then
   echo "error: get_held still reports ${HELD_AFTER} after withdraw_held" >&2

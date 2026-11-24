@@ -213,14 +213,14 @@ fn delete_jar_does_not_remove_recipient_held_balances() {
     );
     token.block(&held_recipient);
     client.tip(&tipper, &id, &100, &String::from_str(env, "escrow"));
-    assert_eq!(client.get_held(&held_recipient), 100);
+    assert_eq!(client.get_held(&held_recipient, &s.token), 100);
 
     client.delete_jar(&id);
     assert!(!client.jar_exists(&id));
-    assert_eq!(client.get_held(&held_recipient), 100);
+    assert_eq!(client.get_held(&held_recipient, &s.token), 100);
     token.unblock();
-    client.withdraw_held(&held_recipient);
-    assert_eq!(client.get_held(&held_recipient), 0);
+    client.withdraw_held(&held_recipient, &s.token);
+    assert_eq!(client.get_held(&held_recipient, &s.token), 0);
     assert_eq!(token.balance(&held_recipient), 100);
 }
 

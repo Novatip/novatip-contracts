@@ -403,7 +403,8 @@ fn alternate_token_undeliverable_share_is_held_and_event_marks_it() {
     assert_eq!(other_token.balance(&bob), 0);
     assert_eq!(other_token.balance(&s.contract), 30);
     assert_eq!(other_token.balance(&tipper), 900);
-    assert_eq!(client.get_held(&bob), 30);
+    assert_eq!(client.get_held(&bob, &other), 30);
+    assert_eq!(client.get_held(&bob, &s.token), 0);
     assert_eq!(
         client.get_jar_stats(&jar),
         JarStats {
@@ -411,8 +412,68 @@ fn alternate_token_undeliverable_share_is_held_and_event_marks_it() {
             total: 100
         }
     );
-    // Withdrawal is intentionally not tested until escrow is keyed per token:
-    // get_held is currently recipient-keyed and withdraw_held uses default token.
+    other_token.unblock();
+    client.withdraw_held(&bob, &other);
+    assert_eq!(other_token.balance(&bob), 30);
+    assert_eq!(other_token.balance(&s.contract), 0);
+    assert_eq!(client.get_held(&bob, &other), 0);
+}
+
+#[test]
+fn held_shares_in_two_tokens_are_withdrawn_per_token() {
+    let s = setup_hostile();
+    let env = &s.env;
+    let client = TipSplitterClient::new(env, &s.contract);
+    let default_token = TestTokenClient::new(env, &s.token);
+    let other = env.register(TestToken, ());
+    let other_token = TestTokenClient::new(env, &other);
+    client.allow_token(&other);
+    let bob = Address::generate(env);
+    let tipper = Address::generate(env);
+    default_token.mint(&tipper, &1_000);
+    other_token.mint(&tipper, &1_000);
+    let jar = String::from_str(env, "@twotokens");
+    client.create_jar(
+        &Address::generate(env),
+        &jar,
+        &vec![
+            env,
+            Split {
+                to: bob.clone(),
+                bps: 10000,
+            },
+        ],
+    );
+
+    // Bob can receive neither token, so both shares are escrowed.
+    default_token.block(&bob);
+    other_token.block(&bob);
+    client.tip(&tipper, &jar, &100, &String::from_str(env, "first"));
+    client.tip_in_token(&tipper, &jar, &other, &40, &String::from_str(env, "second"));
+    assert_eq!(client.get_held(&bob, &s.token), 100);
+    assert_eq!(client.get_held(&bob, &other), 40);
+    assert_eq!(default_token.balance(&s.contract), 100);
+    assert_eq!(other_token.balance(&s.contract), 40);
+
+    default_token.unblock();
+    other_token.unblock();
+
+    // Each withdrawal pays only its own token.
+    client.withdraw_held(&bob, &other);
+    assert_eq!(other_token.balance(&bob), 40);
+    assert_eq!(default_token.balance(&bob), 0);
+    assert_eq!(client.get_held(&bob, &other), 0);
+    assert_eq!(client.get_held(&bob, &s.token), 100);
+
+    client.withdraw_held(&bob, &s.token);
+    assert_eq!(default_token.balance(&bob), 100);
+    assert_eq!(client.get_held(&bob, &s.token), 0);
+
+    // The contract ends holding nothing in either token.
+    assert_eq!(default_token.balance(&s.contract), 0);
+    assert_eq!(other_token.balance(&s.contract), 0);
+    assert_eq!(default_token.balance(&tipper), 900);
+    assert_eq!(other_token.balance(&tipper), 960);
 }
 
 #[test]
@@ -622,7 +683,7 @@ fn recurring_held_share_matches_manual_tip_and_charges_full_allowance() {
     assert_eq!(token.balance(&alice), 693);
     assert_eq!(token.balance(&bob), 0);
     assert_eq!(token.balance(&s.contract), 297);
-    assert_eq!(client.get_held(&bob), 297);
+    assert_eq!(client.get_held(&bob, &s.token), 297);
     assert_eq!(
         client.get_jar_stats(&jar),
         JarStats {
@@ -640,7 +701,7 @@ fn recurring_held_share_matches_manual_tip_and_charges_full_allowance() {
     assert_eq!(collected.message, manual.message);
     assert_eq!(manual.seq, collected.seq + 1);
     assert_eq!(token.allowance(&supporter, &s.contract), 1_000);
-    assert_eq!(client.get_held(&bob), 594);
+    assert_eq!(client.get_held(&bob, &s.token), 594);
     assert_eq!(token.balance(&s.contract), 594);
     assert_eq!(token.balance(&s.admin), 20);
     assert_eq!(
