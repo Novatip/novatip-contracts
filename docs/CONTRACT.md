@@ -158,7 +158,7 @@ one belongs to a jar, the other to a `(jar, supporter)` pair.
 | `get_max_tip_amount(jar_id) -> Option<i128>` | — | Read a jar's optional maximum tip amount. Panics with `JarNotFound` if the slug is free. |
 | `transfer_jar_ownership(jar_id, new_owner)` | current jar `owner` and `new_owner` | Hand control of a jar to `new_owner`. The exact `(jar_id, new_owner)` pair must be signed by both parties; a transfer to the current owner is rejected. Splits are unchanged. Emits a `jar_xfer` event carrying both owners. |
 | `admin_recover_jar(jar_id, new_owner)` | contract admin | Reassign a jar whose owner key is lost. No owner signature is required; shares and jar flags are preserved. Emits `jar_recov`. |
-| `delete_jar(jar_id)` | current jar `owner` | Delete a registered jar and free its slug so it can be recreated. Removes the jar, its stats, and any minimum-tip value for that slug. Emits a `jar_del` event with the jar id as a topic. |
+| `delete_jar(jar_id)` | current jar `owner`, plus **every current recipient** when the jar is locked (#223) | Delete a registered jar and free its slug so it can be recreated. Removes the jar, its stats, and any minimum-tip value for that slug. Emits a `jar_del` event with the jar id as a topic. |
 | `rename_jar(jar_id, new_jar_id)` | jar `owner` | Move a jar, its stats and its minimum to a new slug. The old slug stops resolving immediately; `new_jar_id` must be free and pass the same length checks as `create_jar`. Emits a `jar_rnm` event with the old jar id as a topic and `JarRenamedEvent { version, jar_id, new_jar_id }` data. |
 | `tip(from, jar_id, amount, message)` | `from` | Move `amount` USDC out of `from` and route it across the jar's recipients. A recipient who cannot receive the token has their share **escrowed in the contract** (see `get_held`/`withdraw_held`) instead of reverting the tip. Emits a `tip` event carrying the per-recipient breakdown. Rejects amounts below the jar's minimum with `BelowMinTipAmount`. |
 | `get_held(recipient) -> i128` | — | How much the contract is holding ([held](#glossary-held)) for `recipient` because a past tip could not deliver their share. `0` when nothing is held. |
@@ -243,7 +243,7 @@ written as raised only when every earlier check has passed.
 | `set_min_tip_amount(jar_id, min_amount)` | jar `owner` | `JarNotFound` → `InvalidMinimumAmount` | Set or clear an optional minimum tip amount for a jar. `min_amount` must be strictly positive (`> 0`) or `None` to clear. Emits a `min_tip` event. |
 | `transfer_jar_ownership(jar_id, new_owner)` | current jar `owner` and `new_owner` | `JarNotFound` → `InvalidRecipient` (new owner is the contract itself or the token) → `SameOwner` (new owner is the current owner) | Hand control of a jar to `new_owner`. The exact `(jar_id, new_owner)` pair is signed by both owners. Splits are unchanged. Emits a `jar_xfer` event carrying both owners. |
 | `admin_recover_jar(jar_id, new_owner)` | contract admin | `JarNotFound` → `InvalidRecipient` (new owner is current owner, contract, or token) | Reassign a jar after owner-key loss. Preserves splits and flags; emits `jar_recov`. |
-| `delete_jar(jar_id)` | current jar `owner` | `JarNotFound` | Delete a registered jar and free its slug for reuse. Removes the jar, its stats, and the associated minimum-tip value. Emits a `jar_del` event with the jar id as a topic. |
+| `delete_jar(jar_id)` | current jar `owner`, plus every current recipient when the jar is locked | `JarNotFound` | Delete a registered jar and free its slug for reuse. Removes the jar, its stats, and the associated minimum-tip value. Emits a `jar_del` event with the jar id as a topic. |
 | `rename_jar(jar_id, new_jar_id)` | jar `owner` | `InvalidJarId` (new id not a canonical `@`-prefixed `[a-z0-9_-]{3,32}` slug) → `JarNotFound` → `JarIdInUse` | Move a jar, its stats and its minimum to `new_jar_id`. The old id stops resolving once the move is complete. Emits a `jar_rnm` event with the old jar id as a topic and `JarRenamedEvent { version, jar_id, new_jar_id }` data. |
 | `tip(from, jar_id, amount, message)` | `from` | `ContractPaused` → `NotInitialized` → `AmountZero` (amount = 0) / `AmountNegative` (amount < 0) → `MessageTooLong` → `JarNotFound` → `JarPaused` → `BelowMinTipAmount` → `InsufficientBalance` → `SplitAmountTooSmall` (a share truncates to zero) / `AmountOverflow` (`amount * bps` overflows `i128`) | Transfer `amount` USDC from `from`, split across the jar's recipients. Emits a `tip` event carrying the per-recipient breakdown. Rejects amounts below the jar's minimum with `BelowMinTipAmount` and amounts that cannot pay every recipient with `SplitAmountTooSmall`; see [the smallest amount a jar accepts](#the-smallest-amount-a-jar-accepts-86). A failing token `transfer` reverts the whole call with the **token contract's own error**, not one of this contract's codes (e.g. an insufficient balance). |
 | `get_jar(jar_id) -> Jar` | — | `JarNotFound` | Read a jar's configuration. Panics with `JarNotFound` if the slug is free. |
@@ -1489,6 +1489,13 @@ of a jar cannot be removed (`SoleRecipient`).
 re-enables reductions it requires authorization from **all** current recipients,
 not just the owner; otherwise an owner could disarm the lock and cut shares a
 moment later. `is_splits_locked(jar_id)` reads the flag.
+
+`delete_jar` on a locked jar needs the same consent as `unlock_splits` (#223):
+the owner and every current recipient. Without it, an owner could delete the
+locked jar and re-create the slug with themselves as the only recipient in one
+transaction. An unlocked jar is deleted with the owner's signature alone, as
+before. To delete a locked jar with an unreachable recipient, remove that
+recipient first with `request_recipient_removal`.
 
 The lock is a property of the jar, not the owner, so it **survives
 `transfer_jar_ownership`**: handing control to a new owner does not silently

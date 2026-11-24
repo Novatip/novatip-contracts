@@ -6,6 +6,7 @@ All notable changes to `novatip-contracts` are documented here.
 
 ### Fixed
 
+- `delete_jar` on a locked jar needs authorization from every current recipient, like `unlock_splits`, so a lock cannot be bypassed by deleting and re-creating the jar (#223).
 - `collect_recurring` fails with `ContractPaused` while the contract is paused and `JarPaused` while the jar is paused, before any state change, so `next_due_ledger` is unchanged and the same call works after the pause is lifted (#220).
 
 - Tippers who are also recipients are charged only for funds that leave their account (#229).

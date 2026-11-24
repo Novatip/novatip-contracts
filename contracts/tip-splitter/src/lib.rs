@@ -1308,9 +1308,18 @@ impl TipSplitter {
         );
     }
 
+    /// Delete a jar and free its slug (owner only). A locked jar also needs
+    /// every current recipient to authorize, exactly like `unlock_splits`:
+    /// otherwise the owner could delete it and re-create it with themselves as
+    /// the only recipient, which is what the lock exists to prevent (#223).
     pub fn delete_jar(env: Env, jar_id: String) {
         let jar = Self::load_jar(&env, &jar_id);
         jar.owner.require_auth();
+        if jar.locked {
+            for split in jar.splits.iter() {
+                split.to.require_auth();
+            }
+        }
 
         env.storage()
             .persistent()

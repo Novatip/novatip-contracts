@@ -1412,3 +1412,107 @@ fn sole_recipient_cannot_be_removed() {
         Err(Ok(Error::SoleRecipient.into()))
     );
 }
+
+/// #223 — a locked jar cannot be deleted and re-created with only the owner's
+/// signature; it needs every current recipient, like `unlock_splits`.
+#[test]
+fn delete_jar_on_a_locked_jar_needs_every_recipient() {
+    let s = setup();
+    let env = &s.env;
+    let client = TipSplitterClient::new(env, &s.contract);
+
+    let owner = Address::generate(env);
+    let alice = Address::generate(env);
+    let bob = Address::generate(env);
+    let jar_id = String::from_str(env, "@lockeddel");
+    client.create_jar(
+        &owner,
+        &jar_id,
+        &vec![
+            env,
+            Split {
+                to: alice.clone(),
+                bps: 5000,
+            },
+            Split {
+                to: bob.clone(),
+                bps: 5000,
+            },
+        ],
+    );
+    client.lock_splits(&jar_id);
+
+    // Owner alone: the delete, and so the re-create, never happens.
+    env.mock_auths(&[MockAuth {
+        address: &owner,
+        invoke: &MockAuthInvoke {
+            contract: &s.contract,
+            fn_name: "delete_jar",
+            args: (jar_id.clone(),).into_val(env),
+            sub_invokes: &[],
+        },
+    }]);
+    assert!(client.try_delete_jar(&jar_id).is_err());
+    assert!(client.jar_exists(&jar_id));
+    assert_eq!(client.get_jar(&jar_id).splits.len(), 2);
+
+    // Owner and both recipients can delete it.
+    let args: Vec<soroban_sdk::Val> = (jar_id.clone(),).into_val(env);
+    let inv = MockAuthInvoke {
+        contract: &s.contract,
+        fn_name: "delete_jar",
+        args,
+        sub_invokes: &[],
+    };
+    env.mock_auths(&[
+        MockAuth {
+            address: &owner,
+            invoke: &inv,
+        },
+        MockAuth {
+            address: &alice,
+            invoke: &inv,
+        },
+        MockAuth {
+            address: &bob,
+            invoke: &inv,
+        },
+    ]);
+    client.delete_jar(&jar_id);
+    assert!(!client.jar_exists(&jar_id));
+}
+
+#[test]
+fn delete_jar_on_an_unlocked_jar_needs_only_the_owner() {
+    let s = setup();
+    let env = &s.env;
+    let client = TipSplitterClient::new(env, &s.contract);
+
+    let owner = Address::generate(env);
+    let alice = Address::generate(env);
+    let jar_id = String::from_str(env, "@openedel");
+    client.create_jar(
+        &owner,
+        &jar_id,
+        &vec![
+            env,
+            Split {
+                to: alice,
+                bps: 10000,
+            },
+        ],
+    );
+
+    env.mock_auths(&[MockAuth {
+        address: &owner,
+        invoke: &MockAuthInvoke {
+            contract: &s.contract,
+            fn_name: "delete_jar",
+            args: (jar_id.clone(),).into_val(env),
+            sub_invokes: &[],
+        },
+    }]);
+    client.delete_jar(&jar_id);
+    assert!(!client.jar_exists(&jar_id));
+}
+
